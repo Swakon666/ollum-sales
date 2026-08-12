@@ -28,6 +28,16 @@ reclaimable=$(awk -v target="$cache_record_id" '
   selected && $1 == "Reclaimable:" { print $2; exit }
 ' <<<"$cache_details")
 [[ $reclaimable == true ]] || die 'the selected cache record is absent or not reclaimable'
+description=$(awk -v target="$cache_record_id" '
+  $1 == "ID:" { selected = ($2 == target) }
+  selected && $1 == "Description:" {
+    sub(/^[^:]+:[[:space:]]*/, "")
+    print
+    exit
+  }
+' <<<"$cache_details")
+[[ $description == *'pip install /app/upstream/Scrapegraph-ai'* ]] \
+  || die 'the selected record is not the verified Ollum ScrapeGraphAI build cache'
 
 current_release=$(readlink -f "$deploy_root/current" 2>/dev/null || true)
 previous_release=$(readlink -f "$deploy_root/previous" 2>/dev/null || true)
@@ -55,7 +65,14 @@ if [[ -e $incoming_dir ]]; then
   printf 'Removed failed Ollum incoming payload: %s\n' "$failed_release_id"
 fi
 
-docker buildx prune --force --filter "id=$cache_record_id"
+docker buildx prune --force \
+  --filter 'description=pip install /app/upstream/Scrapegraph-ai'
+if docker buildx du --verbose | awk -v target="$cache_record_id" '
+  $1 == "ID:" && $2 == target { found = 1 }
+  END { exit(found ? 0 : 1) }
+'; then
+  die 'the selected BuildKit record still exists after pruning'
+fi
 printf 'Pruned verified BuildKit record: %s\n' "$cache_record_id"
 df -hT /
 docker system df
