@@ -1,0 +1,23 @@
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.DS_Store
+/data/
+store/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# Local Codex workspace state
+/work/
+/outputs/
+/.codebase-memory/

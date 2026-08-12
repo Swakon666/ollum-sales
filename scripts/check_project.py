@@ -1,0 +1,21 @@
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+root = Path(__file__).resolve().parents[1]
+required = [
+    root / "app" / "server.py",
+    root / "app" / "scraping.py",
+    root / "app" / "whatsapp_service.py",
+    root / "upstream" / "Scrapegraph-ai" / "scrapegraphai" / "__init__.py",
+    root / "upstream" / "whatsapp-mcp" / "whatsapp-bridge" / "main.go",
+    root / "upstream" / "whatsapp-mcp" / "whatsapp-mcp-server" / "whatsapp.py",
+    root / "docker-compose.yml",
+]
+missing = [str(p.relative_to(root)) for p in required if not p.exists()]
+if missing:
+    raise SystemExit(f"Missing required paths: {missing}")
+with (root / "pyproject.toml").open("rb") as f:
+    project = tomllib.load(f)["project"]
+print(f"OK: {project['name']} {project['version']}")

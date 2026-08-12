@@ -1,0 +1,1 @@
+"""Ollum Sales MCP application."""

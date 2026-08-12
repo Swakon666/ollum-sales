@@ -1,0 +1,30 @@
+services:
+  whatsapp-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.whatsapp
+    restart: unless-stopped
+    volumes:
+      - whatsapp-data:/app/store
+    stdin_open: true
+    tty: true
+
+  ollum-sales-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WHATSAPP_API_BASE_URL: http://whatsapp-bridge:8080/api
+      WHATSAPP_MESSAGES_DB_PATH: /data/whatsapp/messages.db
+    volumes:
+      - whatsapp-data:/data/whatsapp:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      - whatsapp-bridge
+
+volumes:
+  whatsapp-data:

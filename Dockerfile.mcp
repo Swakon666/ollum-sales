@@ -1,0 +1,18 @@
+FROM python:3.12-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Keep the complete upstream trees in the image. Install ScrapeGraphAI from its local source.
+COPY upstream /app/upstream
+RUN pip install /app/upstream/Scrapegraph-ai
+
+COPY pyproject.toml /app/pyproject.toml
+COPY app /app/app
+RUN pip install . && python -m playwright install --with-deps chromium
+
+EXPOSE 8000
+CMD ["python", "-m", "app.server"]

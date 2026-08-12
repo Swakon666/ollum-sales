@@ -1,0 +1,17 @@
+[project]
+name = "ollum-sales-mcp"
+version = "0.2.0"
+description = "Ollum Group MCP server combining full-source ScrapeGraphAI and WhatsApp MCP upstream projects"
+requires-python = ">=3.12,<4.0"
+dependencies = [
+  "mcp[cli]>=1.10.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.32.0",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
