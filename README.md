@@ -1,6 +1,6 @@
 # Ollum Sales MCP — Full Source Edition
 
-Version **0.2.0** keeps both uploaded upstream projects **complete and unmodified** under `upstream/`, while all Ollum-specific integration code lives separately in `app/`.
+Version **0.3.0** adds a persistent sales-agent runtime while keeping both upstream projects **complete and unmodified** under `upstream/`. All Ollum-specific integration code remains separate in `app/`.
 
 ## Repository layout
 
@@ -23,13 +23,14 @@ ollum-sales-mcp/
 
 ## What the MCP exposes
 
-- `ollum_status`
-- `analyze_website`
-- `whatsapp_search_contacts`
-- `whatsapp_list_chats`
-- `whatsapp_list_messages`
-- `whatsapp_get_last_interaction`
-- `whatsapp_send_message`
+The server exposes 30 tools in four groups:
+
+- campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
+- lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
+- CRM and outreach: `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
+- WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
+
+`ollum_status` reports runtime readiness and CRM counts without exposing secrets.
 
 The MCP endpoint uses Streamable HTTP at `/mcp`. Production serves it as
 `https://mcp.ollumgroup.ru/mcp` behind bearer authentication and the host Nginx proxy.
@@ -46,17 +47,17 @@ Host Nginx :443
         | 127.0.0.1:18000
         v
 Ollum Sales MCP :8000 (container)
-   |                         \
-   |                          \
-full ScrapeGraphAI source   adapter -> full WhatsApp MCP source
-   |                                      |
-   v                                      +--> shared SQLite
-LLM provider                              |
-                                          v
-                                  Go WhatsApp bridge :8080
-                                          |
-                                          v
-                                     WhatsApp Web
+   |                 |                       \
+   |                 |                        \
+CRM SQLite volume   website evidence       full WhatsApp MCP source
+                     |                       |
+                     +--> ScrapeGraphAI      +--> shared WhatsApp SQLite
+                          when configured    |
+                                             v
+                                     Go WhatsApp bridge :8080
+                                             |
+                                             v
+                                        WhatsApp Web
 ```
 
 ## Requirements
@@ -69,7 +70,8 @@ LLM provider                              |
 - Python 3.12+
 - Go 1.24.1+
 - Chromium/Playwright dependencies
-- an API key/model supported by ScrapeGraphAI
+- optionally, an API key/model supported by ScrapeGraphAI for provider-side analysis
+- optionally, a Serper API key for reliable server-side company discovery
 
 ## Docker quick start
 
@@ -79,7 +81,7 @@ LLM provider                              |
 cp .env.example .env
 ```
 
-2. Add your LLM key/model to `.env`.
+2. Optionally add an LLM key/model and `SERPER_API_KEY` to `.env`. Without an LLM key, the MCP returns bounded website evidence for Codex to analyze and persist. Without Serper, company search uses a best-effort public fallback and agents can import separately verified candidates.
 
 3. Build:
 
@@ -95,7 +97,7 @@ docker compose logs --follow whatsapp-bridge
 ```
 
 Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
-The named Docker volume keeps the session and message databases across restarts and redeploys.
+Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys.
 
 5. MCP endpoint:
 
@@ -130,6 +132,18 @@ python -m app.server
 
 The adapter dynamically loads the original `upstream/whatsapp-mcp/whatsapp-mcp-server/whatsapp.py`, then sets runtime DB/API locations **in memory**. No upstream source file needs to be modified.
 
+## Persistent sales workflow
+
+A complete agent run is resumable:
+
+```text
+campaign -> verified companies -> website evidence -> grounded analysis
+         -> deterministic score/ranking -> saved draft -> operator approval
+         -> confirmed send -> interaction timeline -> scheduled follow-up
+```
+
+The CRM is stored in `ollum-sales-crm-data`. Do not remove this volume during updates or rollback.
+
 ## Write safety
 
 WhatsApp sending is disabled by default:
@@ -146,17 +160,20 @@ OLLUM_ALLOW_WHATSAPP_SEND=true
 
 Then restart the MCP process.
 
-Every send call must also include `confirm_send=true`; both controls are required.
+Direct sends require `confirm_send=true`. The recommended workflow adds a stronger boundary: save the exact message, approve that immutable recipient/message pair, and separately confirm `sales_send_whatsapp_draft`.
 
 ## First end-to-end test
 
 1. `ollum_status`
-2. `analyze_website` on one known company site
-3. `whatsapp_search_contacts`
-4. `whatsapp_get_last_interaction`
-5. draft/review message
-6. enable write mode
-7. `whatsapp_send_message`
+2. `sales_create_campaign`
+3. `sales_import_leads` with one known company site
+4. `sales_analyze_lead`, then `sales_save_analysis` when Codex fallback evidence is returned
+5. `sales_rank_leads`
+6. `sales_save_outreach_draft`
+7. inspect WhatsApp context and review the exact recipient/message
+8. `sales_approve_outreach_draft`
+9. enable write mode and separately confirm `sales_send_whatsapp_draft`
+10. verify `sales_overview` and the follow-up timeline
 
 ## Upstream preservation
 

@@ -45,6 +45,7 @@ jobs:
       MCP_BEARER_TOKEN: ${{ secrets.OLLUM_MCP_BEARER_TOKEN }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
       SCRAPEGRAPH_MODEL: ${{ secrets.SCRAPEGRAPH_MODEL }}
       ALLOW_WHATSAPP_SEND: ${{ secrets.OLLUM_ALLOW_WHATSAPP_SEND }}
       MCP_BIND_PORT: "18000"
@@ -157,6 +158,7 @@ jobs:
             printf 'SCRAPEGRAPH_MODEL=%s\n' "$model"
             printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-}"
             printf 'LLM_API_KEY=%s\n' "${LLM_API_KEY:-}"
+            printf 'SERPER_API_KEY=%s\n' "${SERPER_API_KEY:-}"
             printf 'WHATSAPP_API_BASE_URL=http://whatsapp-bridge:8080/api\n'
             printf 'WHATSAPP_MESSAGES_DB_PATH=/data/whatsapp/messages.db\n'
             printf 'OLLUM_ALLOW_WHATSAPP_SEND=%s\n' "$allow_send"

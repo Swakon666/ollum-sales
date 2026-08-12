@@ -9,23 +9,28 @@ from typing import Any
 
 from .config import settings
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
-UPSTREAM_WHATSAPP_SERVER = REPO_ROOT / "upstream" / "whatsapp-mcp" / "whatsapp-mcp-server"
+UPSTREAM_WHATSAPP_SERVER = (
+    REPO_ROOT / "upstream" / "whatsapp-mcp" / "whatsapp-mcp-server"
+)
 UPSTREAM_WHATSAPP_MODULE = UPSTREAM_WHATSAPP_SERVER / "whatsapp.py"
 
 
 def _load_upstream_whatsapp():
     """Load the original upstream whatsapp.py without modifying its source tree."""
     if not UPSTREAM_WHATSAPP_MODULE.exists():
-        raise RuntimeError(f"Upstream WhatsApp module not found: {UPSTREAM_WHATSAPP_MODULE}")
+        raise RuntimeError(
+            f"Upstream WhatsApp module not found: {UPSTREAM_WHATSAPP_MODULE}"
+        )
 
     # Upstream whatsapp.py imports audio.py as a top-level module.
     server_path = str(UPSTREAM_WHATSAPP_SERVER)
     if server_path not in sys.path:
         sys.path.insert(0, server_path)
 
-    spec = importlib.util.spec_from_file_location("ollum_upstream_whatsapp", UPSTREAM_WHATSAPP_MODULE)
+    spec = importlib.util.spec_from_file_location(
+        "ollum_upstream_whatsapp", UPSTREAM_WHATSAPP_MODULE
+    )
     if spec is None or spec.loader is None:
         raise RuntimeError("Could not create import spec for upstream WhatsApp module")
 
@@ -68,7 +73,9 @@ def search_contacts(query: str) -> list[dict[str, Any]]:
 
 
 def list_chats(query: str | None = None, limit: int = 20) -> Any:
-    return _serialize(wa.list_chats(query=query, limit=limit, page=0, include_last_message=True))
+    return _serialize(
+        wa.list_chats(query=query, limit=limit, page=0, include_last_message=True)
+    )
 
 
 def list_messages(

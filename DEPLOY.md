@@ -22,10 +22,11 @@ existing host Nginx :443
   | 127.0.0.1:18000
   v
 ollum-sales-mcp :8000 ---- internal Docker network ---- whatsapp-bridge :8080
-  |                                                        |
-  | outbound network                                       +-- named volume
-  v                                                            ollum-sales-whatsapp-data
-ScrapeGraphAI / LLM provider
+  |                  |                                     |
+  |                  +-- named volume                      +-- named volume
+  |                      ollum-sales-crm-data                   ollum-sales-whatsapp-data
+  v
+ScrapeGraphAI / LLM provider (optional)
 ```
 
 The WhatsApp bridge has no published host port. The MCP container is published only on localhost;
@@ -52,6 +53,7 @@ Configure these repository secrets under **Settings → Secrets and variables �
 | `OLLUM_MCP_BEARER_TOKEN` | yes | Long random token protecting `/mcp` |
 | `OPENAI_API_KEY` | for OpenAI | ScrapeGraphAI provider credential |
 | `LLM_API_KEY` | optional | Generic provider credential override |
+| `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
 | `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
 | `OLLUM_ALLOW_WHATSAPP_SEND` | optional | Defaults to `false`; set exactly `true` to permit sends |
 
@@ -131,8 +133,9 @@ sudo docker compose logs --follow --tail=200 whatsapp-bridge
 In WhatsApp, open **Settings → Linked devices → Link a device** and scan the QR code. The bridge
 allows three minutes per attempt; `restart: unless-stopped` starts a fresh attempt if it expires.
 
-Authentication and message databases live in the named volume `ollum-sales-whatsapp-data`. Do not
-delete this volume. It survives container recreation, release changes, and server restarts.
+Authentication and message databases live in `ollum-sales-whatsapp-data`. Campaigns, leads,
+analysis, scores, drafts, interactions, and follow-ups live in `ollum-sales-crm-data`. Do not delete
+either named volume. They survive container recreation, release changes, and server restarts.
 
 The bridge health status remains `starting` until WhatsApp authentication succeeds. This does not
 prevent the MCP health endpoint from running; WhatsApp operations become available after pairing.
@@ -166,7 +169,7 @@ sudo docker compose restart whatsapp-bridge
 ```
 
 For an update, push the reviewed commit to `main` or manually run the workflow in `deploy` mode.
-Do not run `docker compose down --volumes`; that would remove persistent WhatsApp state.
+Do not run `docker compose down --volumes`; that would remove persistent WhatsApp and CRM state.
 
 ## Rollback
 
@@ -183,14 +186,18 @@ Rollback is unavailable before at least two successful releases exist.
   then update `OLLUM_SSH_HOST_KEY`. Never bypass host-key validation.
 - **Sudo failure:** the SSH user must be allowed to install Docker packages, manage Docker, write the
   dedicated Nginx site, reload Nginx, and run Certbot. Do not weaken sudo policy globally.
-- **Less than 4 GiB free:** expand or safely clean the server disk before deploying. The workflow does
-  not delete unrelated files, images, or application data.
+- **Less than 1.5 GiB free:** expand or safely clean the server disk before deploying. After a
+  verified deployment, the workflow removes only superseded Ollum Sales images that no container
+  still uses; it does not delete unrelated images, volumes, files, or application data.
 - **Nginx configuration conflict:** the workflow refuses to overwrite an unmanaged
   `/etc/nginx/sites-available/ollum-sales` or unrelated enabled-site symlink.
 - **HTTP 502:** check `sudo docker compose ps` and MCP logs, then verify localhost port `18000`.
 - **HTTP 401 on `/mcp`:** expected without `Authorization: Bearer …`; check the client header.
-- **`analyze_website` provider error:** configure the matching LLM key and model secrets, redeploy,
-  then confirm `llm_key_configured` through `ollum_status`.
+- **No LLM key:** `sales_analyze_lead` returns bounded website evidence in `codex_fallback` mode;
+  Codex can ground an analysis in that evidence and save it with `sales_save_analysis`. Configure an
+  LLM key only when provider-side ScrapeGraphAI analysis is required.
+- **Company discovery is empty or noisy:** configure `SERPER_API_KEY`, or verify candidates through
+  agent research and persist them with `sales_import_leads`.
 - **WhatsApp bridge not healthy:** follow the QR/auth logs and pair the device. A timed-out QR attempt
   is restarted automatically.
 - **WhatsApp sends blocked:** both `OLLUM_ALLOW_WHATSAPP_SEND=true` and the tool argument

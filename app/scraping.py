@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from scrapegraphai.graphs import SmartScraperGraph
 
 from .config import settings
 from .schemas import LeadAnalysis
-
 
 LEAD_PROMPT = """
 Analyze this website as a potential B2B lead for Ollum Group, a software studio that
@@ -50,7 +48,9 @@ def _llm_config() -> dict[str, Any]:
 def analyze_website(url: str, extra_context: str | None = None) -> dict[str, Any]:
     prompt = LEAD_PROMPT
     if extra_context:
-        prompt += f"\n\nAdditional sales context from the operator:\n{extra_context.strip()}"
+        prompt += (
+            f"\n\nAdditional sales context from the operator:\n{extra_context.strip()}"
+        )
 
     graph = SmartScraperGraph(
         prompt=prompt,

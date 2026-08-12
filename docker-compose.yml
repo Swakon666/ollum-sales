@@ -31,9 +31,11 @@ services:
     env_file:
       - ${OLLUM_ENV_FILE:-.env}
     environment:
+      OLLUM_CRM_DB_PATH: /data/crm/ollum-sales.db
       WHATSAPP_API_BASE_URL: http://whatsapp-bridge:8080/api
       WHATSAPP_MESSAGES_DB_PATH: /data/whatsapp/messages.db
     volumes:
+      - crm-data:/data/crm
       - whatsapp-data:/data/whatsapp:ro
     ports:
       - "127.0.0.1:${OLLUM_MCP_BIND_PORT:-18000}:8000"
@@ -56,6 +58,8 @@ services:
     stop_grace_period: 30s
 
 volumes:
+  crm-data:
+    name: ollum-sales-crm-data
   whatsapp-data:
     name: ollum-sales-whatsapp-data
 

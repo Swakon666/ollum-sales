@@ -129,6 +129,13 @@ build_fingerprint() {
 cd "$release_dir"
 docker compose config --quiet
 
+declare -a prior_ollum_image_ids=()
+while IFS= read -r image; do
+  if image_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null); then
+    prior_ollum_image_ids+=("$image_id")
+  fi
+done < <(docker compose config --images)
+
 reuse_images=false
 if [[ -n $previous_release ]]; then
   current_fingerprint=$(build_fingerprint "$release_dir")
@@ -151,8 +158,8 @@ if [[ $reuse_images == true ]]; then
   printf 'Reusing unchanged Ollum Sales images from release %s\n' \
     "$(basename "$previous_release")"
 else
-  (( available_kb >= 4 * 1024 * 1024 )) \
-    || die 'at least 4 GiB of free disk space is required to build images'
+  (( available_kb >= 1536 * 1024 )) \
+    || die 'at least 1.5 GiB of free disk space is required to build images'
   docker compose build --pull
 fi
 
@@ -267,6 +274,20 @@ authenticated_status=$(curl -sS --max-time 30 \
 rm -f "$mcp_response"
 unset mcp_token
 [[ $authenticated_status == 200 ]] || die "authenticated MCP check returned HTTP $authenticated_status"
+
+mapfile -t active_ollum_image_ids < <(
+  while IFS= read -r image; do
+    docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true
+  done < <(docker compose config --images)
+)
+for prior_image_id in "${prior_ollum_image_ids[@]}"; do
+  if printf '%s\n' "${active_ollum_image_ids[@]}" | grep -Fxq "$prior_image_id"; then
+    continue
+  fi
+  if [[ -z $(docker ps -aq --filter "ancestor=$prior_image_id") ]]; then
+    docker image rm "$prior_image_id" >/dev/null 2>&1 || true
+  fi
+done
 
 docker compose ps
 rm -f -- "$archive"
