@@ -26,7 +26,11 @@ concurrency:
 jobs:
   production:
     name: ${{ github.event_name == 'push' && 'Deploy' || inputs.mode }} production
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - ollum-sales-production
     timeout-minutes: 45
     environment: production
     env:
@@ -71,12 +75,16 @@ jobs:
           echo "::add-mask::$SSH_USER"
           echo "::add-mask::$MCP_BEARER_TOKEN"
 
-      - name: Install SSH password helper
+      - name: Validate runner dependencies
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq sshpass
+          for command_name in bash curl ssh ssh-keyscan ssh-keygen sshpass tar; do
+            command -v "$command_name" >/dev/null || {
+              echo "Required runner command is missing: $command_name" >&2
+              exit 1
+            }
+          done
 
       - name: Pin SSH host key
         shell: bash

@@ -4,6 +4,10 @@ Production is deployed by `.github/workflows/deploy.yml`. The workflow supports 
 preflight, deployment, and one-step rollback. A push to `main` deploys automatically; a manual run
 defaults to preflight so an operator cannot accidentally change production.
 
+Production jobs run on the dedicated repository runner labelled `ollum-sales-production`. The
+runner is installed as a separate system service under the deployment user and connects outbound to
+GitHub over HTTPS. It exposes no public port, and the workflow does not run for pull requests.
+
 ## Architecture
 
 ```text
