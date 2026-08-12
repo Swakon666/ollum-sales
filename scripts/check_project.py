@@ -12,6 +12,11 @@ required = [
     root / "upstream" / "whatsapp-mcp" / "whatsapp-bridge" / "main.go",
     root / "upstream" / "whatsapp-mcp" / "whatsapp-mcp-server" / "whatsapp.py",
     root / "docker-compose.yml",
+    root / ".github" / "workflows" / "deploy.yml",
+    root / "DEPLOY.md",
+    root / "deploy" / "nginx" / "ollum-sales.conf",
+    root / "deploy" / "remote_deploy.sh",
+    root / "deploy" / "remote_rollback.sh",
 ]
 missing = [str(p.relative_to(root)) for p in required if not p.exists()]
 if missing:

@@ -16,6 +16,10 @@ DEFAULT_WA_DB = REPO_ROOT / "upstream" / "whatsapp-mcp" / "whatsapp-bridge" / "s
 class Settings:
     mcp_host: str = os.getenv("MCP_HOST", "0.0.0.0")
     mcp_port: int = int(os.getenv("MCP_PORT", "8000"))
+    mcp_require_auth: bool = os.getenv("OLLUM_MCP_REQUIRE_AUTH", "false").lower() in {
+        "1", "true", "yes", "on"
+    }
+    mcp_bearer_token: str | None = os.getenv("OLLUM_MCP_BEARER_TOKEN")
     scrapegraph_model: str = os.getenv("SCRAPEGRAPH_MODEL", "openai/gpt-4o-mini")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     llm_api_key: str | None = os.getenv("LLM_API_KEY")

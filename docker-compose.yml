@@ -1,3 +1,5 @@
+name: ollum-sales
+
 services:
   whatsapp-bridge:
     build:
@@ -8,6 +10,18 @@ services:
       - whatsapp-data:/app/store
     stdin_open: true
     tty: true
+    networks:
+      - backend
+      - egress
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'code=$$(curl --silent --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8080/api/send || true); [ "$$code" = "405" ]'
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 5m
+    stop_grace_period: 30s
 
   ollum-sales-mcp:
     build:
@@ -15,16 +29,39 @@ services:
       dockerfile: Dockerfile.mcp
     restart: unless-stopped
     env_file:
-      - .env
+      - ${OLLUM_ENV_FILE:-.env}
     environment:
       WHATSAPP_API_BASE_URL: http://whatsapp-bridge:8080/api
       WHATSAPP_MESSAGES_DB_PATH: /data/whatsapp/messages.db
     volumes:
       - whatsapp-data:/data/whatsapp:ro
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${OLLUM_MCP_BIND_PORT:-18000}:8000"
+    networks:
+      - backend
+      - egress
     depends_on:
-      - whatsapp-bridge
+      whatsapp-bridge:
+        condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"
+      interval: 15s
+      timeout: 6s
+      retries: 10
+      start_period: 30s
+    stop_grace_period: 30s
 
 volumes:
   whatsapp-data:
+    name: ollum-sales-whatsapp-data
+
+networks:
+  backend:
+    name: ollum-sales-internal
+    internal: true
+  egress:
+    name: ollum-sales-egress

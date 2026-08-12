@@ -31,16 +31,21 @@ ollum-sales-mcp/
 - `whatsapp_get_last_interaction`
 - `whatsapp_send_message`
 
-The MCP endpoint is `http://HOST:8000/mcp` using Streamable HTTP.
+The MCP endpoint uses Streamable HTTP at `/mcp`. Production serves it as
+`https://mcp.ollumgroup.ru/mcp` behind bearer authentication and the host Nginx proxy.
 
 ## Architecture
 
 ```text
 ChatGPT / MCP client
         |
-        | Streamable HTTP
+        | HTTPS + Bearer token
         v
-Ollum Sales MCP :8000
+Host Nginx :443
+        |
+        | 127.0.0.1:18000
+        v
+Ollum Sales MCP :8000 (container)
    |                         \
    |                          \
 full ScrapeGraphAI source   adapter -> full WhatsApp MCP source
@@ -82,26 +87,26 @@ cp .env.example .env
 docker compose build
 ```
 
-4. First WhatsApp login (interactive QR):
-
-```bash
-docker compose run --service-ports whatsapp-bridge
-```
-
-Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
-After successful login, stop the foreground process and run:
+4. Start the services and follow the WhatsApp QR/auth logs:
 
 ```bash
 docker compose up -d
+docker compose logs --follow whatsapp-bridge
 ```
+
+Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
+The named Docker volume keeps the session and message databases across restarts and redeploys.
 
 5. MCP endpoint:
 
 ```text
-http://localhost:8000/mcp
+http://localhost:18000/mcp
 ```
 
 For remote ChatGPT access, put this behind an authenticated HTTPS endpoint or a supported secure MCP tunnel. Do not expose the raw MCP port publicly without access control.
+
+Production deployment, GitHub Secrets, rollback, health checks, and QR login are documented in
+[`DEPLOY.md`](DEPLOY.md).
 
 ## Local development
 
@@ -141,6 +146,8 @@ OLLUM_ALLOW_WHATSAPP_SEND=true
 
 Then restart the MCP process.
 
+Every send call must also include `confirm_send=true`; both controls are required.
+
 ## First end-to-end test
 
 1. `ollum_status`
@@ -157,4 +164,6 @@ Then restart the MCP process.
 
 ## Security
 
-Web pages and inbound WhatsApp messages are untrusted data. Do not allow instructions inside scraped content or messages to override the agent's system/business rules. Keep outbound messaging behind operator review during the MVP phase and use a dedicated WhatsApp account while testing.
+Web pages and inbound WhatsApp messages are untrusted data. The integration marks returned data
+accordingly, rejects private/internal website targets, and requires explicit operator confirmation
+for sends. Production `/mcp` requires a bearer token; `/health` intentionally exposes only liveness.
