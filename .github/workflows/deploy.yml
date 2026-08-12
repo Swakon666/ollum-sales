@@ -14,8 +14,17 @@ on:
         options:
           - preflight
           - diagnose-space
+          - recover-space
           - deploy
           - rollback
+      cache_record_id:
+        description: Exact reclaimable BuildKit cache record ID from diagnose-space
+        type: string
+        required: false
+      failed_release_id:
+        description: Exact failed Ollum release ID to remove after verification
+        type: string
+        required: false
 
 permissions:
   contents: read
@@ -140,6 +149,28 @@ jobs:
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "sudo -S -p '' bash -s -- '$SSH_USER'"
+
+      - name: Reclaim verified failed Ollum build artifacts
+        if: ${{ env.DEPLOY_MODE == 'recover-space' }}
+        shell: bash
+        env:
+          CACHE_RECORD_ID: ${{ inputs.cache_record_id }}
+          FAILED_RELEASE_ID: ${{ inputs.failed_release_id }}
+        run: |
+          set -euo pipefail
+          [ -n "$CACHE_RECORD_ID" ] || { echo 'cache_record_id is required' >&2; exit 1; }
+          [ -n "$FAILED_RELEASE_ID" ] || { echo 'failed_release_id is required' >&2; exit 1; }
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/space_recovery.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER' '$CACHE_RECORD_ID' '$FAILED_RELEASE_ID'"
 
       - name: Prepare encrypted deployment payload
         if: ${{ env.DEPLOY_MODE == 'deploy' }}

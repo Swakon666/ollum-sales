@@ -158,9 +158,27 @@ if [[ $reuse_images == true ]]; then
   printf 'Reusing unchanged Ollum Sales images from release %s\n' \
     "$(basename "$previous_release")"
 else
-  (( available_kb >= 1536 * 1024 )) \
-    || die 'at least 1.5 GiB of free disk space is required to build images'
-  docker compose build --pull
+  if (( available_kb >= 1536 * 1024 )); then
+    docker compose build
+  else
+    (( available_kb >= 384 * 1024 )) \
+      || die 'at least 384 MiB of free disk space is required for an overlay build'
+    mcp_image=$(docker compose config --images | grep 'ollum-sales-mcp' | head -1)
+    [[ -n $mcp_image ]] || die 'could not identify the existing MCP image'
+    docker image inspect "$mcp_image" >/dev/null 2>&1 \
+      || die 'an existing MCP image is required for a low-disk overlay build'
+    [[ -f deploy/Dockerfile.mcp-overlay ]] \
+      || die 'low-disk MCP overlay Dockerfile is missing'
+    docker run --rm --entrypoint python "$mcp_image" -c \
+      'import bs4, mcp, pydantic, requests, scrapegraphai, uvicorn' \
+      || die 'existing MCP image does not contain the required runtime dependencies'
+    docker build \
+      --file deploy/Dockerfile.mcp-overlay \
+      --build-arg "OLLUM_BASE_IMAGE=$mcp_image" \
+      --tag "$mcp_image" \
+      .
+    printf 'Built a low-disk MCP application overlay from %s\n' "$mcp_image"
+  fi
 fi
 
 restore_previous() {

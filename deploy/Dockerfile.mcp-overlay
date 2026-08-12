@@ -1,0 +1,6 @@
+ARG OLLUM_BASE_IMAGE
+FROM ${OLLUM_BASE_IMAGE}
+
+COPY app /app/app
+
+RUN python -c "import bs4, mcp, pydantic, requests, scrapegraphai, uvicorn"

@@ -186,9 +186,12 @@ Rollback is unavailable before at least two successful releases exist.
   then update `OLLUM_SSH_HOST_KEY`. Never bypass host-key validation.
 - **Sudo failure:** the SSH user must be allowed to install Docker packages, manage Docker, write the
   dedicated Nginx site, reload Nginx, and run Certbot. Do not weaken sudo policy globally.
-- **Less than 1.5 GiB free:** expand or safely clean the server disk before deploying. After a
-  verified deployment, the workflow removes only superseded Ollum Sales images that no container
-  still uses; it does not delete unrelated images, volumes, files, or application data.
+- **Low disk:** normal builds require 1.5 GiB free. With 384 MiB to 1.5 GiB and an existing verified
+  MCP image, deployment creates a small application overlay after checking required dependencies.
+  `diagnose-space` is read-only; `recover-space` accepts an exact reclaimable BuildKit record ID and
+  exact failed Ollum release ID. It does not prune global cache or delete unrelated images, volumes,
+  files, or application data. After a verified deployment, the workflow removes only superseded
+  Ollum Sales images that no container still uses.
 - **Nginx configuration conflict:** the workflow refuses to overwrite an unmanaged
   `/etc/nginx/sites-available/ollum-sales` or unrelated enabled-site symlink.
 - **HTTP 502:** check `sudo docker compose ps` and MCP logs, then verify localhost port `18000`.
