@@ -7,12 +7,13 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: Run a read-only preflight, deploy the current ref, or roll back one release
+        description: Run preflight/space diagnostics, deploy the current ref, or roll back one release
         type: choice
         required: true
         default: preflight
         options:
           - preflight
+          - diagnose-space
           - deploy
           - rollback
 
@@ -122,6 +123,23 @@ jobs:
             -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" 'bash -se' < deploy/server_preflight.sh
+
+      - name: Read-only Docker space diagnostics
+        if: ${{ env.DEPLOY_MODE == 'diagnose-space' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/space_diagnostics.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER'"
 
       - name: Prepare encrypted deployment payload
         if: ${{ env.DEPLOY_MODE == 'deploy' }}
