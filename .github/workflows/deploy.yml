@@ -217,8 +217,56 @@ jobs:
             "$SSH_USER@$SSH_HOST" \
             "sudo -S -p '' bash -s -- '$SSH_USER' '$OLLUM_DOMAIN' '$MCP_BIND_PORT'"
 
-      - name: Verify public production endpoints
+      - name: Verify production endpoints through local Nginx
         if: ${{ env.DEPLOY_MODE == 'deploy' || env.DEPLOY_MODE == 'rollback' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 20 \
+            --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
+            "https://$OLLUM_DOMAIN/health" >/dev/null
+
+          unauthorized_status=$(curl --silent --show-error --max-time 20 \
+            --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://$OLLUM_DOMAIN/mcp")
+          [ "$unauthorized_status" = 401 ] || {
+            echo "Expected unauthenticated /mcp to return 401, got $unauthorized_status" >&2
+            exit 1
+          }
+
+          if [ "$DEPLOY_MODE" = deploy ]; then
+            authenticated_status=$(curl --silent --show-error --max-time 30 \
+              --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
+              --output /dev/null --write-out '%{http_code}' \
+              -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
+              -H 'Content-Type: application/json' \
+              -H 'Accept: application/json, text/event-stream' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"github-actions-check","version":"1"}}}' \
+              "https://$OLLUM_DOMAIN/mcp")
+            [ "$authenticated_status" = 200 ] || {
+              echo "Authenticated /mcp check returned $authenticated_status" >&2
+              exit 1
+            }
+          fi
+
+  public-verification:
+    name: Verify public production endpoints
+    needs: production
+    if: >-
+      ${{ github.event_name == 'push' ||
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.mode == 'deploy' || inputs.mode == 'rollback')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: production
+    env:
+      DEPLOY_MODE: ${{ github.event_name == 'push' && 'deploy' || inputs.mode }}
+      OLLUM_DOMAIN: ${{ secrets.OLLUM_DOMAIN }}
+      MCP_BEARER_TOKEN: ${{ secrets.OLLUM_MCP_BEARER_TOKEN }}
+
+    steps:
+      - name: Verify public health and MCP authentication
         shell: bash
         run: |
           set -euo pipefail
@@ -239,10 +287,10 @@ jobs:
               -H "Authorization: Bearer $MCP_BEARER_TOKEN" \
               -H 'Content-Type: application/json' \
               -H 'Accept: application/json, text/event-stream' \
-              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"github-actions-check","version":"1"}}}' \
+              --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"github-public-check","version":"1"}}}' \
               "https://$OLLUM_DOMAIN/mcp")
             [ "$authenticated_status" = 200 ] || {
-              echo "Authenticated /mcp check returned $authenticated_status" >&2
+              echo "Authenticated public /mcp check returned $authenticated_status" >&2
               exit 1
             }
           fi

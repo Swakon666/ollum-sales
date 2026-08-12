@@ -7,6 +7,8 @@ defaults to preflight so an operator cannot accidentally change production.
 Production jobs run on the dedicated repository runner labelled `ollum-sales-production`. The
 runner is installed as a separate system service under the deployment user and connects outbound to
 GitHub over HTTPS. It exposes no public port, and the workflow does not run for pull requests.
+Because the provider does not support NAT loopback, server-side TLS checks resolve the production
+domain to localhost. A separate GitHub-hosted job verifies the real public HTTPS route externally.
 
 ## Architecture
 

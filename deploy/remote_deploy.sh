@@ -43,9 +43,6 @@ cleanup_incoming_secret() {
 }
 trap cleanup_incoming_secret EXIT
 
-available_kb=$(df -Pk / | awk 'NR==2 {print $4}')
-(( available_kb >= 4 * 1024 * 1024 )) || die 'at least 4 GiB of free disk space is required'
-
 command -v nginx >/dev/null || die 'existing Nginx installation is required on this server'
 command -v certbot >/dev/null || die 'Certbot is required on this server'
 
@@ -111,9 +108,53 @@ if [[ -L $deploy_root/current ]]; then
   esac
 fi
 
+build_fingerprint() {
+  local source_dir=$1
+  (
+    cd "$source_dir"
+    find \
+      .dockerignore \
+      Dockerfile.mcp \
+      Dockerfile.whatsapp \
+      docker-compose.yml \
+      pyproject.toml \
+      app \
+      upstream \
+      -type f -print0 \
+      | LC_ALL=C sort -z \
+      | xargs -0 sha256sum
+  ) | sha256sum | awk '{print $1}'
+}
+
 cd "$release_dir"
 docker compose config --quiet
-docker compose build --pull
+
+reuse_images=false
+if [[ -n $previous_release ]]; then
+  current_fingerprint=$(build_fingerprint "$release_dir")
+  previous_fingerprint=$(build_fingerprint "$previous_release")
+  if [[ $current_fingerprint == "$previous_fingerprint" ]]; then
+    reuse_images=true
+    while IFS= read -r image; do
+      if ! docker image inspect "$image" >/dev/null 2>&1; then
+        reuse_images=false
+        break
+      fi
+    done < <(docker compose config --images)
+  fi
+fi
+
+available_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+if [[ $reuse_images == true ]]; then
+  (( available_kb >= 1024 * 1024 )) \
+    || die 'at least 1 GiB of free disk space is required when reusing images'
+  printf 'Reusing unchanged Ollum Sales images from release %s\n' \
+    "$(basename "$previous_release")"
+else
+  (( available_kb >= 4 * 1024 * 1024 )) \
+    || die 'at least 4 GiB of free disk space is required to build images'
+  docker compose build --pull
+fi
 
 restore_previous() {
   if [[ -n $previous_release && -f $previous_release/docker-compose.yml ]]; then
@@ -201,16 +242,21 @@ certbot --nginx \
   --keep-until-expiring \
   -d "$domain"
 
-curl -fsS --max-time 20 "https://$domain/health" >/dev/null \
+curl -fsS --max-time 20 \
+  --resolve "$domain:443:127.0.0.1" \
+  "https://$domain/health" >/dev/null \
   || die 'public HTTPS health check failed'
 
-unauthorized_status=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' "https://$domain/mcp")
+unauthorized_status=$(curl -sS --max-time 20 \
+  --resolve "$domain:443:127.0.0.1" \
+  -o /dev/null -w '%{http_code}' "https://$domain/mcp")
 [[ $unauthorized_status == 401 ]] || die "unauthenticated MCP check returned HTTP $unauthorized_status"
 
 mcp_token=$(sed -n 's/^OLLUM_MCP_BEARER_TOKEN=//p' "$deploy_root/shared/.env" | head -1)
 [[ -n $mcp_token ]] || die 'MCP bearer token is missing from production environment'
 mcp_response=$(mktemp)
 authenticated_status=$(curl -sS --max-time 30 \
+  --resolve "$domain:443:127.0.0.1" \
   -o "$mcp_response" \
   -w '%{http_code}' \
   -H "Authorization: Bearer $mcp_token" \
