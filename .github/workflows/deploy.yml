@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Validate deployment configuration
         shell: bash
@@ -83,7 +83,17 @@ jobs:
         run: |
           set -euo pipefail
           known_hosts="$RUNNER_TEMP/known_hosts"
-          ssh-keyscan -t ed25519 -p "$SSH_PORT" -T 20 "$SSH_HOST" > "$known_hosts"
+          scanned=false
+          for attempt in 1 2 3 4 5 6; do
+            if ssh-keyscan -t ed25519 -p "$SSH_PORT" -T 15 "$SSH_HOST" > "$known_hosts" \
+              && [ -s "$known_hosts" ]; then
+              scanned=true
+              break
+            fi
+            echo "SSH host key scan attempt $attempt failed; retrying" >&2
+            sleep 10
+          done
+          [ "$scanned" = true ] || { echo 'Unable to scan SSH host key after retries' >&2; exit 1; }
           chmod 600 "$known_hosts"
           actual_fingerprint=$(ssh-keygen -lf "$known_hosts" | awk 'NR == 1 {print $2}')
           if [ "$actual_fingerprint" != "$SSH_HOST_KEY" ]; then
