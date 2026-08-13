@@ -825,6 +825,13 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
+	if proxyAddress := strings.TrimSpace(os.Getenv("WHATSAPP_PROXY_URL")); proxyAddress != "" {
+		if err := client.SetProxyAddress(proxyAddress); err != nil {
+			logger.Errorf("Failed to configure WhatsApp proxy: %v", err)
+			return
+		}
+		logger.Infof("WhatsApp proxy configured")
+	}
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()

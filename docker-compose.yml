@@ -6,6 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile.whatsapp
     restart: unless-stopped
+    environment:
+      WHATSAPP_PROXY_URL: ${WHATSAPP_PROXY_URL:-}
     volumes:
       - whatsapp-data:/app/store
     stdin_open: true
