@@ -52,6 +52,8 @@ class SalesCRMTests(unittest.TestCase):
         )
         self.assertEqual(saved["status"], "analyzed")
         scored = self.crm.score_lead(lead["id"], budget=70, timing=60)
+        self.assertEqual(scored["status"], "analyzed")
+        scored = self.crm.score_lead(lead["id"], budget=70, timing=60, qualify_at=55)
         self.assertEqual(scored["status"], "qualified")
         self.assertGreater(scored["score"], 0)
         self.assertEqual(self.crm.overview(campaign["id"])["lead_count"], 1)
@@ -109,6 +111,22 @@ class SalesCRMTests(unittest.TestCase):
             canonical_company_url("HTTPS://Example.COM:443/path?q=1#fragment"),
             "https://example.com/",
         )
+
+    def test_scoring_status_respects_qualification_threshold(self) -> None:
+        lead = self.crm.upsert_lead("Threshold Example", "https://threshold.example")
+        self.assertEqual(
+            self.crm.find_lead_by_website_url("https://threshold.example/path")["id"],
+            lead["id"],
+        )
+        below = self.crm.score_lead(
+            lead["id"], fit=20, need=20, budget=20, timing=20, qualify_at=65
+        )
+        self.assertEqual(below["score"], 20)
+        self.assertEqual(below["status"], "analyzed")
+        above = self.crm.score_lead(
+            lead["id"], fit=90, need=90, budget=90, timing=90, qualify_at=65
+        )
+        self.assertEqual(above["status"], "qualified")
 
     def test_reports_include_vertical_performance_and_conversion(self) -> None:
         vertical = self.crm.create_vertical("logistics", region="Moscow")

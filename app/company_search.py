@@ -33,21 +33,115 @@ BLOCKED_RESULT_DOMAINS = {
     "youtube.com",
 }
 
+# Ollum's target check is sized for a 50–300k RUB project. These domains belong
+# to federal platforms or very large chains where that offer is not a credible fit.
+NON_TARGET_ENTERPRISE_DOMAINS = {
+    "beeline.ru",
+    "foxford.ru",
+    "geekbrains.ru",
+    "invitro.ru",
+    "lenta.com",
+    "magnit.com",
+    "mail.ru",
+    "medsi.ru",
+    "megafon.ru",
+    "mts.ru",
+    "netology.ru",
+    "openedu.ru",
+    "ozon.ru",
+    "rostelecom.ru",
+    "sber.ru",
+    "skillbox.ru",
+    "skyeng.ru",
+    "skysmart.ru",
+    "tbank.ru",
+    "tele2.ru",
+    "tinkoff.ru",
+    "wildberries.ru",
+    "x5.ru",
+}
+CONTENT_SUBDOMAINS = ("blog.", "journal.", "media.", "news.")
+CONTENT_PATH_MARKERS = (
+    "/article",
+    "/blog",
+    "/journal",
+    "/knowledge",
+    "/media",
+    "/news",
+    "/publication",
+    "/reviews",
+    "/wiki",
+)
+EDITORIAL_RESULT_MARKERS = (
+    "вакансии",
+    "виды и",
+    "каталог компаний",
+    "лучшие компании",
+    "определение",
+    "работа в",
+    "рейтинг",
+    "список компаний",
+    "топ компаний",
+    "что такое",
+)
+
 
 def _is_blocked_domain(hostname: str) -> bool:
     hostname = hostname.lower().removeprefix("www.")
     return any(
         hostname == domain or hostname.endswith(f".{domain}")
-        for domain in BLOCKED_RESULT_DOMAINS
+        for domain in BLOCKED_RESULT_DOMAINS | NON_TARGET_ENTERPRISE_DOMAINS
     )
+
+
+def candidate_rejection_reason(result: dict[str, Any]) -> str | None:
+    """Return a stable reason when a search hit is clearly not a target company."""
+    source_url = str(result.get("source_url") or result.get("website_url") or "")
+    parsed = urlsplit(source_url)
+    hostname = (parsed.hostname or "").lower().removeprefix("www.")
+    if not hostname:
+        return "invalid_url"
+    if _is_blocked_domain(hostname):
+        return "blocked_or_enterprise_domain"
+    if hostname.startswith(CONTENT_SUBDOMAINS):
+        return "content_subdomain"
+    path = parsed.path.lower().rstrip("/")
+    if any(marker in path for marker in CONTENT_PATH_MARKERS):
+        return "editorial_path"
+    haystack = " ".join(
+        str(result.get(key) or "") for key in ("company_name", "snippet")
+    ).lower()
+    if any(marker in haystack for marker in EDITORIAL_RESULT_MARKERS):
+        return "editorial_result"
+    return None
+
+
+def _clean_company_name(title: str, hostname: str) -> str:
+    name = title.strip() or hostname.removeprefix("www.")
+    name = re.sub(
+        r"\s*(?:[|—–-]\s*)?(?:официальный сайт|главная|home)\s*$",
+        "",
+        name,
+        flags=re.IGNORECASE,
+    ).strip(" |—–-")
+    return (name or hostname.removeprefix("www."))[:300]
 
 
 def build_company_query(
     industry: str, location: str, extra_query: str | None = None
 ) -> str:
-    parts = [industry.strip(), location.strip(), "official company website"]
-    if extra_query:
+    parts = [
+        industry.strip(),
+        location.strip(),
+        '"официальный сайт"',
+        "компания",
+        "услуги",
+    ]
+    # Short vertical hints such as "B2B" help. Long strategy descriptions pollute
+    # the query and tend to produce SEO articles that quote the same wording.
+    if extra_query and len(extra_query.split()) <= 6:
         parts.append(extra_query.strip())
+    parts.extend(("-рейтинг", "-отзывы", "-вакансии", "-статья", "-новости"))
     query = " ".join(part for part in parts if part)
     if not query:
         raise ValueError("industry or a search query is required")
@@ -103,21 +197,20 @@ def parse_bing_results(html: str, *, limit: int) -> list[dict[str, Any]]:
             continue
         if website_url in seen:
             continue
-        seen.add(website_url)
         snippet_node = item.select_one(".b_caption p")
         title = link.get_text(" ", strip=True)
-        if not title:
-            title = parsed.hostname.removeprefix("www.")
-        results.append(
-            {
-                "company_name": title[:300],
-                "website_url": website_url,
-                "source_url": href,
-                "snippet": snippet_node.get_text(" ", strip=True)[:1000]
-                if snippet_node
-                else None,
-            }
-        )
+        result = {
+            "company_name": _clean_company_name(title, parsed.hostname),
+            "website_url": website_url,
+            "source_url": href,
+            "snippet": snippet_node.get_text(" ", strip=True)[:1000]
+            if snippet_node
+            else None,
+        }
+        if candidate_rejection_reason(result):
+            continue
+        seen.add(website_url)
+        results.append(result)
         if len(results) >= limit:
             break
     return results
@@ -159,12 +252,18 @@ def _serper_results(
         except ValueError:
             continue
         result = {
-            "company_name": str(item.get("title") or parsed.hostname).strip()[:300],
+            "company_name": _clean_company_name(
+                str(item.get("title") or ""), parsed.hostname
+            ),
             "website_url": website_url,
             "source_url": href,
             "snippet": str(item.get("snippet") or "").strip()[:1000] or None,
         }
-        if website_url in seen or not _is_relevant_result(result, tokens):
+        if (
+            website_url in seen
+            or candidate_rejection_reason(result)
+            or not _is_relevant_result(result, tokens)
+        ):
             continue
         seen.add(website_url)
         results.append(result)

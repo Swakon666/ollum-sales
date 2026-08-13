@@ -441,6 +441,14 @@ class SalesCRM:
                 raise ValueError("campaign not found")
         return self.get_campaign(campaign_id)
 
+    def find_lead_by_website_url(self, website_url: str) -> dict[str, Any] | None:
+        website_url = canonical_company_url(website_url)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT id FROM leads WHERE website_url = ?", (website_url,)
+            ).fetchone()
+        return self.get_lead(row["id"]) if row is not None else None
+
     def upsert_lead(
         self,
         company_name: str,
@@ -623,6 +631,7 @@ class SalesCRM:
         timing: int | None = None,
         confidence: int | None = None,
         rationale: str | None = None,
+        qualify_at: int = 65,
     ) -> dict[str, Any]:
         lead = self.get_lead(lead_id)
         analysis = lead.get("analysis") or {}
@@ -668,15 +677,31 @@ class SalesCRM:
             f"Fit {details['fit']}, need {details['need']}, budget {details['budget']}, "
             f"timing {details['timing']}; confidence {details['confidence']}."
         )
+        threshold = max(0, min(int(qualify_at), 100))
+        details["qualify_at"] = threshold
         with self.connect() as connection:
             connection.execute(
                 """
                 UPDATE leads SET score = ?, score_reason = ?, score_details_json = ?,
-                    status = CASE WHEN status IN ('new','researching','analyzed') THEN 'qualified' ELSE status END,
+                    status = CASE
+                        WHEN ? >= ? AND status IN ('new','researching','analyzed','qualified') THEN 'qualified'
+                        WHEN ? < ? AND status IN ('new','researching','analyzed','qualified') THEN 'analyzed'
+                        ELSE status
+                    END,
                     updated_at = ?
                 WHERE id = ?
                 """,
-                (score, reason, _json(details), utc_now(), lead_id),
+                (
+                    score,
+                    reason,
+                    _json(details),
+                    score,
+                    threshold,
+                    score,
+                    threshold,
+                    utc_now(),
+                    lead_id,
+                ),
             )
         return self.get_lead(lead_id)
 

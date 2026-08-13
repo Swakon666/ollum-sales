@@ -4,6 +4,7 @@ import base64
 import unittest
 from unittest.mock import Mock, patch
 
+from app.candidate_quality import assess_company_candidate
 from app.company_search import (
     _decode_bing_target,
     build_company_query,
@@ -50,6 +51,46 @@ class CompanySearchTests(unittest.TestCase):
             ["Alpha Logistics", "Beta Cargo"],
         )
         self.assertEqual(results[0]["website_url"], "https://alpha.example/")
+
+    def test_parse_rejects_enterprise_and_editorial_results(self) -> None:
+        html = """
+        <li class="b_algo"><h2><a href="https://skillbox.ru/">Skillbox</a></h2></li>
+        <li class="b_algo"><h2><a href="https://agency.example/blog/top-company">
+          Топ компаний и рейтинг
+        </a></h2></li>
+        <li class="b_algo"><h2><a href="https://studio.example/services">
+          Studio — официальный сайт
+        </a></h2></li>
+        """
+        results = parse_bing_results(html, limit=10)
+        self.assertEqual([item["company_name"] for item in results], ["Studio"])
+
+    def test_post_fetch_quality_requires_a_commercial_company_site(self) -> None:
+        accepted = assess_company_candidate(
+            {"company_name": "Factory", "website_url": "https://factory.example/"},
+            {
+                "final_url": "https://factory.example/",
+                "title": "Factory",
+                "visible_text": "Наши услуги. Каталог продукции. Получить консультацию.",
+                "headings": [],
+                "contacts": {"phones": ["+79990000000"], "emails": []},
+                "forms": {"count": 1},
+            },
+        )
+        rejected = assess_company_candidate(
+            {"company_name": "Guide", "website_url": "https://guide.example/"},
+            {
+                "final_url": "https://guide.example/article/what-is-crm",
+                "title": "Что такое CRM: статья",
+                "visible_text": "Определение. Автор статьи. Читать новости и блог.",
+                "headings": [],
+                "contacts": {"phones": [], "emails": []},
+                "forms": {"count": 0},
+            },
+        )
+        self.assertTrue(accepted["accepted"])
+        self.assertFalse(rejected["accepted"])
+        self.assertIn(rejected["reason"], {"editorial_path", "editorial_result"})
 
     @patch("app.company_search.requests.post")
     def test_serper_results_are_filtered_and_normalized(self, post: Mock) -> None:

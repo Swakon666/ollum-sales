@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
+from .candidate_quality import assess_company_candidate
 from .company_search import search_company_websites
 from .crm import SalesCRM
 from .google_sheets import GoogleSheetsSync
@@ -421,6 +422,10 @@ class AutopilotService:
         state = self.crm.get_autopilot_state()
         metrics: dict[str, Any] = {
             "campaigns_created": 0,
+            "candidates_seen": 0,
+            "candidates_rejected": 0,
+            "duplicates_skipped": 0,
+            "rejection_reasons": {},
             "leads_found": 0,
             "analyzed": 0,
             "qualified": 0,
@@ -435,14 +440,15 @@ class AutopilotService:
                 cycle["id"], [item["id"] for item in verticals]
             )
             for vertical in verticals:
+                target_count = min(
+                    int(vertical["daily_target"]), int(state["leads_per_vertical"])
+                )
                 campaign = self.crm.create_campaign(
                     f"Autopilot — {vertical['name']} — {datetime.now(UTC).date().isoformat()}",
                     industry=vertical["name"],
                     location=vertical["region"],
                     search_query=vertical.get("search_query"),
-                    target_count=min(
-                        int(vertical["daily_target"]), int(state["leads_per_vertical"])
-                    ),
+                    target_count=target_count,
                     status="discovering",
                 )
                 self.crm.register_autopilot_campaign(
@@ -455,20 +461,36 @@ class AutopilotService:
                     discovery = self.discoverer(
                         vertical["name"],
                         vertical["region"],
-                        limit=min(
-                            int(vertical["daily_target"]),
-                            int(state["leads_per_vertical"]),
-                        ),
+                        limit=min(50, max(target_count, target_count * 4)),
                         extra_query=vertical.get("search_query"),
                         serper_api_key=self.settings.serper_api_key,
                         timeout=self.settings.company_search_timeout,
                     )
-                    leads: list[dict[str, Any]] = []
+                    leads: list[tuple[dict[str, Any], dict[str, Any]]] = []
                     for index, result in enumerate(
                         discovery.get("results") or [], start=1
                     ):
-                        leads.append(
-                            self.crm.upsert_lead(
+                        if len(leads) >= target_count:
+                            break
+                        metrics["candidates_seen"] += 1
+                        try:
+                            if self.crm.find_lead_by_website_url(result["website_url"]):
+                                metrics["duplicates_skipped"] += 1
+                                continue
+                            snapshot = self.inspector(
+                                result["website_url"],
+                                timeout=self.settings.website_inspection_timeout,
+                            )
+                            assessment = assess_company_candidate(result, snapshot)
+                            if not assessment["accepted"]:
+                                reason = str(
+                                    assessment["reason"] or "candidate_rejected"
+                                )
+                                metrics["candidates_rejected"] += 1
+                                reasons = metrics["rejection_reasons"]
+                                reasons[reason] = int(reasons.get(reason) or 0) + 1
+                                continue
+                            lead = self.crm.upsert_lead(
                                 result["company_name"],
                                 result["website_url"],
                                 industry=vertical["name"],
@@ -477,34 +499,44 @@ class AutopilotService:
                                 campaign_id=campaign["id"],
                                 source_rank=index,
                             )
-                        )
+                            leads.append((lead, snapshot))
+                        except Exception as exc:  # noqa: BLE001 - isolate candidate failure
+                            metrics["candidates_rejected"] += 1
+                            reasons = metrics["rejection_reasons"]
+                            reasons["inspection_error"] = (
+                                int(reasons.get("inspection_error") or 0) + 1
+                            )
+                            metrics["vertical_errors"].append(
+                                {
+                                    "vertical": vertical["name"],
+                                    "website_url": str(result.get("website_url") or "")[
+                                        :300
+                                    ],
+                                    "error": str(exc)[:300],
+                                }
+                            )
                     metrics["leads_found"] += len(leads)
                     self.crm.set_campaign_status(
                         campaign["id"], "analyzing" if leads else "paused"
                     )
-                    for lead in leads:
+                    threshold = max(
+                        int(vertical["min_score"]), int(state["score_threshold"])
+                    )
+                    for lead, snapshot in leads:
                         try:
-                            snapshot = self.inspector(
-                                lead["website_url"],
-                                timeout=self.settings.website_inspection_timeout,
-                            )
                             analysis = grounded_analysis(lead, snapshot)
                             self.crm.save_analysis(lead["id"], analysis)
                             scored = self.crm.score_lead(
-                                lead["id"], rationale=analysis["score_reason"]
+                                lead["id"],
+                                rationale=analysis["score_reason"],
+                                qualify_at=threshold,
                             )
                             metrics["analyzed"] += 1
-                            if int(scored.get("score") or 0) >= max(
-                                int(vertical["min_score"]),
-                                int(state["score_threshold"]),
-                            ):
+                            if int(scored.get("score") or 0) >= threshold:
                                 metrics["qualified"] += 1
                             if self._create_draft_if_needed(
                                 scored,
-                                threshold=max(
-                                    int(vertical["min_score"]),
-                                    int(state["score_threshold"]),
-                                ),
+                                threshold=threshold,
                             ):
                                 metrics["drafts_created"] += 1
                         except Exception as exc:  # noqa: BLE001 - isolate one lead failure
@@ -515,7 +547,9 @@ class AutopilotService:
                                     "error": str(exc)[:300],
                                 }
                             )
-                    self.crm.set_campaign_status(campaign["id"], "ready")
+                    self.crm.set_campaign_status(
+                        campaign["id"], "ready" if leads else "paused"
+                    )
                 except Exception as exc:  # noqa: BLE001 - isolate one vertical failure
                     self.crm.set_campaign_status(campaign["id"], "paused")
                     metrics["vertical_errors"].append(

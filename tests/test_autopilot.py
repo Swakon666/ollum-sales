@@ -128,6 +128,67 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(send_calls, [])
         self.assertEqual(sheets.sync_calls, 1)
 
+    def test_cycle_skips_duplicates_and_rejects_non_company_pages(self) -> None:
+        self.crm.create_vertical(
+            "ventilation", region="Moscow", daily_target=1, min_score=60
+        )
+        self.crm.upsert_lead("Known", "https://known.example/")
+
+        def discoverer(*_args: object, **kwargs: object) -> dict[str, object]:
+            self.assertEqual(kwargs["limit"], 4)
+            return {
+                "provider": "test",
+                "results": [
+                    {"company_name": "Known", "website_url": "https://known.example/x"},
+                    {
+                        "company_name": "Article",
+                        "website_url": "https://article.example/",
+                    },
+                    {
+                        "company_name": "Target",
+                        "website_url": "https://target.example/",
+                    },
+                ],
+            }
+
+        def inspector(url: str, **_kwargs: object) -> dict[str, object]:
+            if "article.example" in url:
+                return {
+                    "final_url": "https://article.example/blog/what-is-ventilation",
+                    "title": "Что такое вентиляция: статья",
+                    "visible_text": "Определение. Автор статьи. Новости и блог.",
+                    "headings": [],
+                    "contacts": {"phones": [], "emails": []},
+                    "forms": {"count": 0},
+                }
+            return {
+                "final_url": "https://target.example/",
+                "title": "Target",
+                "visible_text": "Наши услуги. Каталог. Оставить заявку. " * 50,
+                "mobile_viewport": False,
+                "headings": [],
+                "contacts": {"phones": ["+79990000001"], "emails": []},
+                "forms": {"count": 1},
+                "technologies": [],
+            }
+
+        service = AutopilotService(
+            self.crm,
+            settings(),
+            FakeSheets(),
+            discoverer=discoverer,
+            inspector=inspector,
+        )
+        self.assertTrue(service.start(mode="safe")["success"])
+        result = service.run_cycle(force=True)
+        metrics = result["cycle"]["metrics"]
+        self.assertEqual(metrics["candidates_seen"], 3)
+        self.assertEqual(metrics["duplicates_skipped"], 1)
+        self.assertEqual(metrics["candidates_rejected"], 1)
+        self.assertEqual(metrics["leads_found"], 1)
+        self.assertEqual(metrics["analyzed"], 1)
+        self.assertIn("editorial_path", metrics["rejection_reasons"])
+
     def test_sheet_approval_requires_exact_visible_draft(self) -> None:
         lead = self.crm.upsert_lead("Example", "https://example.org")
         draft = self.crm.save_outreach_draft(
