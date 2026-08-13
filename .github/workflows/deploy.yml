@@ -24,6 +24,7 @@ on:
           - report-autopilot
           - connect-whatsapp
           - deploy-whatsapp-prebuilt
+          - rollback-whatsapp
       cache_record_id:
         description: Exact reclaimable BuildKit cache record ID from diagnose-space
         type: string
@@ -454,6 +455,23 @@ jobs:
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "sudo -S -p '' bash -s -- '$SSH_USER' '$WHATSAPP_PREBUILT_REMOTE_BINARY' '$WHATSAPP_PREBUILT_SHA256'"
+
+      - name: Roll back only WhatsApp bridge
+        if: ${{ env.DEPLOY_MODE == 'rollback-whatsapp' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/rollback_whatsapp.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER'"
 
       - name: Transfer release over SSH
         if: ${{ env.DEPLOY_MODE == 'deploy' || env.DEPLOY_MODE == 'deploy-prebuilt' }}

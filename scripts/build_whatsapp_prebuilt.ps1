@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$GoVersion = '1.24.1',
+    [string]$GoVersion = '1.26.5',
     [string]$ZigVersion = '0.14.1'
 )
 
