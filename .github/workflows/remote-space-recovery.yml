@@ -1,0 +1,114 @@
+name: Remote production space recovery
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Diagnose remotely or recover one verified failed Ollum build
+        type: choice
+        required: true
+        default: diagnose
+        options:
+          - diagnose
+          - recover
+      cache_record_id:
+        description: Exact reclaimable Ollum BuildKit cache record ID from diagnose
+        type: string
+        required: false
+      failed_release_id:
+        description: Exact failed Ollum release ID from the failed deployment
+        type: string
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ollum-sales-production-recovery
+  cancel-in-progress: false
+
+jobs:
+  remote-space:
+    name: ${{ inputs.mode }} production space remotely
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    env:
+      SSH_HOST: ${{ secrets.OLLUM_SSH_HOST }}
+      SSH_PORT: ${{ secrets.OLLUM_SSH_PORT }}
+      SSH_USER: ${{ secrets.OLLUM_SSH_USER }}
+      SSH_PASSWORD: ${{ secrets.OLLUM_SSH_PASSWORD }}
+      SSHPASS: ${{ secrets.OLLUM_SSH_PASSWORD }}
+      SSH_HOST_KEY: ${{ secrets.OLLUM_SSH_HOST_KEY }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in SSH_HOST SSH_PORT SSH_USER SSH_PASSWORD SSH_HOST_KEY; do
+            [ -n "${!name:-}" ] || { echo "Missing $name" >&2; exit 1; }
+          done
+          [[ "$SSH_PORT" =~ ^[0-9]{2,5}$ ]] || { echo 'Invalid SSH port' >&2; exit 1; }
+          [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo 'Invalid SSH user' >&2; exit 1; }
+          [[ "$SSH_HOST_KEY" =~ ^SHA256:[A-Za-z0-9+/=]+$ ]] \
+            || { echo 'Invalid SSH host fingerprint' >&2; exit 1; }
+          command -v sshpass >/dev/null || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq sshpass
+          }
+
+      - name: Pin SSH host key
+        shell: bash
+        run: |
+          set -euo pipefail
+          known_hosts="$RUNNER_TEMP/known_hosts"
+          ssh-keyscan -t ed25519 -p "$SSH_PORT" -T 20 "$SSH_HOST" > "$known_hosts"
+          chmod 600 "$known_hosts"
+          actual_fingerprint=$(ssh-keygen -lf "$known_hosts" | awk 'NR == 1 {print $2}')
+          [ "$actual_fingerprint" = "$SSH_HOST_KEY" ] \
+            || { echo 'SSH host fingerprint mismatch' >&2; exit 1; }
+
+      - name: Read-only space diagnostics over SSH
+        if: ${{ inputs.mode == 'diagnose' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/space_diagnostics.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER'"
+
+      - name: Recover verified failed Ollum artifacts over SSH
+        if: ${{ inputs.mode == 'recover' }}
+        shell: bash
+        env:
+          CACHE_RECORD_ID: ${{ inputs.cache_record_id }}
+          FAILED_RELEASE_ID: ${{ inputs.failed_release_id }}
+        run: |
+          set -euo pipefail
+          [[ "$CACHE_RECORD_ID" =~ ^[a-z0-9]{25}$ ]] \
+            || { echo 'A valid cache_record_id is required' >&2; exit 1; }
+          [[ "$FAILED_RELEASE_ID" =~ ^[A-Fa-f0-9-]+$ ]] \
+            || { echo 'A valid failed_release_id is required' >&2; exit 1; }
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/space_recovery.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER' '$CACHE_RECORD_ID' '$FAILED_RELEASE_ID'"
