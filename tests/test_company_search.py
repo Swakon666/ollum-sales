@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import unittest
 from unittest.mock import Mock, patch
 
@@ -8,7 +9,9 @@ from app.candidate_quality import assess_company_candidate
 from app.company_search import (
     _decode_bing_target,
     build_company_query,
+    build_maps_query,
     parse_bing_results,
+    parse_yandex_maps_results,
     search_company_websites,
 )
 
@@ -43,6 +46,7 @@ class CompanySearchTests(unittest.TestCase):
         self.assertIn("логистика", query)
         self.assertIn("Москва", query)
         self.assertIn("B2B", query)
+        self.assertIn("official company website", query)
 
     def test_parse_filters_directories_and_deduplicates_domains(self) -> None:
         results = parse_bing_results(SAMPLE_HTML, limit=10)
@@ -64,6 +68,40 @@ class CompanySearchTests(unittest.TestCase):
         """
         results = parse_bing_results(html, limit=10)
         self.assertEqual([item["company_name"] for item in results], ["Studio"])
+
+    def test_yandex_maps_extracts_only_official_company_websites(self) -> None:
+        payload = {
+            "stack": [
+                {
+                    "results": {
+                        "items": [
+                            {
+                                "id": "1",
+                                "title": "Local School",
+                                "address": "Moscow",
+                                "urls": [
+                                    "https://school.example/about?utm_source=maps"
+                                ],
+                                "categories": [{"name": "Private school"}],
+                            },
+                            {
+                                "id": "2",
+                                "title": "Federal Course",
+                                "urls": ["https://skillbox.ru/course"],
+                            },
+                            {"id": "3", "title": "No site", "urls": []},
+                        ]
+                    }
+                }
+            ]
+        }
+        html = '<script type="application/json">' + json.dumps(payload) + "</script>"
+        results = parse_yandex_maps_results(html, limit=10)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["company_name"], "Local School")
+        self.assertEqual(results[0]["website_url"], "https://school.example/")
+        self.assertIn("Private school", results[0]["snippet"])
+        self.assertIn("частная школа", build_maps_query("образование", "Москва"))
 
     def test_post_fetch_quality_requires_a_commercial_company_site(self) -> None:
         accepted = assess_company_candidate(
