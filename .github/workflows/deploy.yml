@@ -37,11 +37,13 @@ concurrency:
 jobs:
   production:
     name: ${{ github.event_name == 'push' && 'Deploy' || inputs.mode }} production
-    runs-on:
-      - self-hosted
-      - linux
-      - x64
-      - ollum-sales-production
+    runs-on: >-
+      ${{ fromJSON(
+          github.event_name == 'workflow_dispatch' &&
+          (inputs.mode == 'diagnose-space' || inputs.mode == 'recover-space') &&
+          '["ubuntu-latest"]' ||
+          '["self-hosted","linux","x64","ollum-sales-production"]'
+        ) }}
     timeout-minutes: 45
     environment: production
     env:
