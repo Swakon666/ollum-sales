@@ -38,6 +38,7 @@ BLOCKED_RESULT_DOMAINS = {
 # Ollum's target check is sized for a 50–300k RUB project. These domains belong
 # to federal platforms or very large chains where that offer is not a credible fit.
 NON_TARGET_ENTERPRISE_DOMAINS = {
+    "1c.ru",
     "beeline.ru",
     "foxford.ru",
     "geekbrains.ru",

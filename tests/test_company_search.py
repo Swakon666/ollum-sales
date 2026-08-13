@@ -58,6 +58,7 @@ class CompanySearchTests(unittest.TestCase):
 
     def test_parse_rejects_enterprise_and_editorial_results(self) -> None:
         html = """
+        <li class="b_algo"><h2><a href="https://1c.ru/training">1C Training</a></h2></li>
         <li class="b_algo"><h2><a href="https://skillbox.ru/">Skillbox</a></h2></li>
         <li class="b_algo"><h2><a href="https://agency.example/blog/top-company">
           Топ компаний и рейтинг
