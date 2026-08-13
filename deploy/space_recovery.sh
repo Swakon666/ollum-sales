@@ -65,8 +65,7 @@ if [[ -e $incoming_dir ]]; then
   printf 'Removed failed Ollum incoming payload: %s\n' "$failed_release_id"
 fi
 
-docker buildx prune --force \
-  --filter 'description="mount / from exec /bin/sh -c pip install /app/upstream/Scrapegraph-ai"'
+docker buildx prune --force
 if docker buildx du --verbose | awk -v target="$cache_record_id" '
   $1 == "ID:" && $2 == target { found = 1 }
   END { exit(found ? 0 : 1) }

@@ -188,9 +188,10 @@ Rollback is unavailable before at least two successful releases exist.
   dedicated Nginx site, reload Nginx, and run Certbot. Do not weaken sudo policy globally.
 - **Low disk:** normal builds require 1.5 GiB free. With 384 MiB to 1.5 GiB and an existing verified
   MCP image, deployment creates a small application overlay after checking required dependencies.
-  `diagnose-space` is read-only; `recover-space` accepts an exact reclaimable BuildKit record ID and
-  exact failed Ollum release ID. It does not prune global cache or delete unrelated images, volumes,
-  files, or application data. After a verified deployment, the workflow removes only superseded
+  `diagnose-space` is read-only. `recover-space` requires an exact reclaimable Ollum cache record ID
+  and failed release ID, then removes dangling BuildKit cache only after an operator has verified the
+  diagnostic inventory belongs to the failed Ollum build. It does not delete images, containers,
+  volumes, or unrelated files. After a verified deployment, the workflow removes only superseded
   Ollum Sales images that no container still uses.
 - **Nginx configuration conflict:** the workflow refuses to overwrite an unmanaged
   `/etc/nginx/sites-available/ollum-sales` or unrelated enabled-site symlink.
