@@ -14,6 +14,7 @@ on:
         options:
           - preflight
           - diagnose-space
+          - deep-diagnose-space
           - recover-space
           - deploy
           - rollback
@@ -154,6 +155,23 @@ jobs:
           {
             printf '%s\n' "$SSH_PASSWORD"
             cat deploy/space_diagnostics.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER'"
+
+      - name: Read-only deep filesystem diagnostics
+        if: ${{ env.DEPLOY_MODE == 'deep-diagnose-space' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/deep_space_diagnostics.sh
           } | sshpass -e ssh \
             -o BatchMode=no \
             -o ConnectTimeout=20 \
