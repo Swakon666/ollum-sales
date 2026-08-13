@@ -47,15 +47,15 @@ try {
         draft = $false
         prerelease = $true
     } | ConvertTo-Json
-    $release = Invoke-RestMethod -Method Post -Headers $headers \
-        -Uri "https://api.github.com/repos/$Repository/releases" \
+    $release = Invoke-RestMethod -Method Post -Headers $headers `
+        -Uri "https://api.github.com/repos/$Repository/releases" `
         -ContentType 'application/json' -Body $body
 }
 
 $assetName = $metadata.asset_name
 $existing = @($release.assets) | Where-Object name -eq $assetName | Select-Object -First 1
 if ($existing) {
-    Invoke-RestMethod -Method Delete -Headers $headers \
+    Invoke-RestMethod -Method Delete -Headers $headers `
         -Uri "https://api.github.com/repos/$Repository/releases/assets/$($existing.id)"
 }
 
@@ -66,8 +66,8 @@ $uploadHeaders = @{
     'Content-Type' = 'application/octet-stream'
 }
 $uploadBase = $release.upload_url -replace '\{\?name,label\}$', ''
-$asset = Invoke-RestMethod -Method Post -Headers $uploadHeaders \
-    -Uri "$uploadBase?name=$([Uri]::EscapeDataString($assetName))" \
+$asset = Invoke-RestMethod -Method Post -Headers $uploadHeaders `
+    -Uri "$uploadBase?name=$([Uri]::EscapeDataString($assetName))" `
     -InFile $binaryPath
 
 [ordered]@{
