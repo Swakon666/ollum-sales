@@ -66,8 +66,10 @@ $uploadHeaders = @{
     'Content-Type' = 'application/octet-stream'
 }
 $uploadBase = $release.upload_url -replace '\{\?name,label\}$', ''
+$escapedAssetName = [Uri]::EscapeDataString($assetName)
+$uploadUri = '{0}?name={1}' -f $uploadBase, $escapedAssetName
 $asset = Invoke-RestMethod -Method Post -Headers $uploadHeaders `
-    -Uri "$uploadBase?name=$([Uri]::EscapeDataString($assetName))" `
+    -Uri $uploadUri `
     -InFile $binaryPath
 
 [ordered]@{
