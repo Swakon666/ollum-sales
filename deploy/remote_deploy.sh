@@ -153,8 +153,8 @@ fi
 
 available_kb=$(df -Pk / | awk 'NR==2 {print $4}')
 if [[ $reuse_images == true ]]; then
-  (( available_kb >= 1024 * 1024 )) \
-    || die 'at least 1 GiB of free disk space is required when reusing images'
+  (( available_kb >= 256 * 1024 )) \
+    || die 'at least 256 MiB of free disk space is required when reusing images'
   printf 'Reusing unchanged Ollum Sales images from release %s\n' \
     "$(basename "$previous_release")"
 else

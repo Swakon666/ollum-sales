@@ -188,6 +188,8 @@ Rollback is unavailable before at least two successful releases exist.
   dedicated Nginx site, reload Nginx, and run Certbot. Do not weaken sudo policy globally.
 - **Low disk:** normal builds require 1.5 GiB free. With 384 MiB to 1.5 GiB and an existing verified
   MCP image, deployment creates a small application overlay after checking required dependencies.
+  Releases with an unchanged runtime fingerprint reuse the verified images with at least 256 MiB
+  free and do not rebuild them.
   `diagnose-space` is read-only. `recover-space` requires an exact reclaimable Ollum cache record ID
   and failed release ID, then removes dangling BuildKit cache only after an operator has verified the
   diagnostic inventory belongs to the failed Ollum build. It does not delete images, containers,
