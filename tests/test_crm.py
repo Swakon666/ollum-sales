@@ -110,6 +110,45 @@ class SalesCRMTests(unittest.TestCase):
             "https://example.com/",
         )
 
+    def test_reports_include_vertical_performance_and_conversion(self) -> None:
+        vertical = self.crm.create_vertical("logistics", region="Moscow")
+        campaign = self.crm.create_campaign(
+            "Logistics", industry="logistics", location="Moscow"
+        )
+        cycle = self.crm.begin_autopilot_cycle(force=True)
+        self.crm.register_autopilot_campaign(
+            cycle_id=cycle["id"],
+            campaign_id=campaign["id"],
+            vertical_id=vertical["id"],
+        )
+        lead = self.crm.upsert_lead(
+            "Logistics Example",
+            "https://logistics.example",
+            campaign_id=campaign["id"],
+        )
+        self.crm.score_lead(lead["id"], fit=90, need=80, budget=60, timing=50)
+        self.crm.record_interaction(
+            lead["id"],
+            channel="whatsapp",
+            direction="outbound",
+            content="Hello",
+        )
+        self.crm.record_interaction(
+            lead["id"],
+            channel="whatsapp",
+            direction="inbound",
+            content="Interested",
+        )
+        performance = self.crm.vertical_performance()
+        self.assertEqual(performance[0]["leads"], 1)
+        self.assertEqual(performance[0]["replies"], 1)
+        self.assertEqual(performance[0]["reply_rate"], 100.0)
+        report = self.crm.conversion_report()
+        self.assertEqual(report["stages"]["contacted"], 1)
+        self.assertEqual(report["stages"]["replied"], 1)
+        self.assertEqual(report["rates"]["reply_per_contacted"], 100.0)
+        self.crm.complete_autopilot_cycle(cycle["id"], metrics={})
+
 
 if __name__ == "__main__":
     unittest.main()

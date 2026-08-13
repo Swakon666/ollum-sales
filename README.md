@@ -1,6 +1,9 @@
 # Ollum Sales MCP — Full Source Edition
 
-Version **0.3.0** adds a persistent sales-agent runtime while keeping both upstream projects **complete and unmodified** under `upstream/`. All Ollum-specific integration code remains separate in `app/`.
+Version **0.4.0** adds a persistent SAFE-first Autopilot worker, vertical rotation,
+conversion reports, and a bidirectional Google Sheets control panel while keeping both upstream
+projects **complete and unmodified** under `upstream/`. All Ollum-specific integration code remains
+separate in `app/`.
 
 ## Repository layout
 
@@ -23,12 +26,16 @@ ollum-sales-mcp/
 
 ## What the MCP exposes
 
-The server exposes 30 tools in four groups:
+The server exposes 42 tools. The original 30 remain compatible, with 12 v0.4 tools added:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
 - CRM and outreach: `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
 - WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
+- Autopilot: `autopilot_start`, `autopilot_stop`, `autopilot_status`, `autopilot_run_cycle`;
+- verticals: `vertical_create`, `vertical_list`, `vertical_update`;
+- Google Sheets: `google_sheets_sync`, `google_sheets_status`;
+- reports: `sales_daily_report`, `sales_vertical_performance`, `sales_conversion_report`.
 
 `ollum_status` reports runtime readiness and CRM counts without exposing secrets.
 
@@ -46,10 +53,10 @@ Host Nginx :443
         |
         | 127.0.0.1:18000
         v
-Ollum Sales MCP :8000 (container)
-   |                 |                       \
-   |                 |                        \
-CRM SQLite volume   website evidence       full WhatsApp MCP source
+Ollum Sales MCP :8000 (container)       Autopilot worker
+   |                 |                       |
+   |                 |                       +--> scheduled SAFE cycles
+CRM SQLite volume   website evidence        +--> Google Sheets panel
                      |                       |
                      +--> ScrapeGraphAI      +--> shared WhatsApp SQLite
                           when configured    |
@@ -72,6 +79,7 @@ CRM SQLite volume   website evidence       full WhatsApp MCP source
 - Chromium/Playwright dependencies
 - optionally, an API key/model supported by ScrapeGraphAI for provider-side analysis
 - optionally, a Serper API key for reliable server-side company discovery
+- optionally, a Google Cloud service account and a shared Google spreadsheet
 
 ## Docker quick start
 
@@ -97,7 +105,7 @@ docker compose logs --follow whatsapp-bridge
 ```
 
 Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
-Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys.
+Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys. The separate `ollum-sales-worker` service reads the same CRM volume and continues scheduled cycles while Codex is closed.
 
 5. MCP endpoint:
 
@@ -144,6 +152,69 @@ campaign -> verified companies -> website evidence -> grounded analysis
 
 The CRM is stored in `ollum-sales-crm-data`. Do not remove this volume during updates or rollback.
 
+## Ollum Sales Autopilot
+
+Autopilot stores its state, vertical schedule, cycle history, and performance data in the same CRM.
+On first SAFE start it seeds these Moscow/Moscow-region verticals: furniture, ventilation,
+logistics, cleaning, construction, manufacturing, dentistry, education, real estate, B2B services,
+auto service, and legal companies.
+
+```text
+worker -> choose scheduled verticals -> discover/dedupe -> inspect official sites
+       -> grounded deterministic analysis -> score -> save draft -> sync Sheets
+```
+
+Start the guarded mode:
+
+```text
+autopilot_start(mode="safe")
+```
+
+SAFE can discover, analyze, score, and prepare drafts. It never sends messages or executes
+follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot start unless all of these are true:
+
+- the operator passes `confirm_non_safe=true`;
+- the CRM has at least `OLLUM_AUTOPILOT_MIN_TRAINING_LEADS` (100 by default);
+- both WhatsApp sending and `OLLUM_AUTOPILOT_ALLOW_SEND` are explicitly enabled.
+
+The worker polls every 30 seconds and starts a cycle only when `next_cycle_at` is due. The cycle
+interval itself defaults to 60 minutes.
+
+## Google Sheets panel
+
+The integration creates and refreshes `LEADS`, `CAMPAIGNS`, `OUTREACH`, `FOLLOWUPS`, and
+`DASHBOARD`. The existing CRM remains the source of truth. This release deliberately keeps the
+current SQLite/WAL backend; the Sheets adapter is isolated so a later PostgreSQL repository can
+replace storage without changing the panel or worker contract.
+
+1. Create one spreadsheet and one Google Cloud service account with Sheets API access.
+2. Share the spreadsheet with the service-account email.
+3. Store the JSON key outside Git and mount it read-only into the MCP and worker containers.
+4. Configure:
+
+```env
+OLLUM_GOOGLE_SHEETS_ENABLED=true
+OLLUM_GOOGLE_SHEETS_ID=<spreadsheet-id>
+GOOGLE_SERVICE_ACCOUNT_FILE=/run/secrets/ollum-google-service-account.json
+```
+
+5. Run `google_sheets_status`, then `google_sheets_sync`.
+
+The server reads only two control cells as actions:
+
+- `APPROVE=YES` approves a draft only when the visible draft ID, recipient, and complete message
+  exactly match the CRM record;
+- `SEND=YES` is a separate confirmation that queues the already-approved exact draft. SAFE mode
+  never processes that queue.
+
+Every sync pulls these guarded actions first and then replaces the panel data from the CRM. The
+service-account JSON content is never returned by an MCP tool.
+
+Production accepts the complete JSON only through the
+`OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON` GitHub Actions secret and stores it on the server with mode
+`0600`. The non-sensitive spreadsheet ID belongs in the `OLLUM_GOOGLE_SHEETS_ID` repository
+variable.
+
 ## Write safety
 
 WhatsApp sending is disabled by default:
@@ -161,6 +232,9 @@ OLLUM_ALLOW_WHATSAPP_SEND=true
 Then restart the MCP process.
 
 Direct sends require `confirm_send=true`. The recommended workflow adds a stronger boundary: save the exact message, approve that immutable recipient/message pair, and separately confirm `sales_send_whatsapp_draft`.
+
+Autopilot adds the same two-step boundary to Google Sheets: `APPROVE` and `SEND` are separate, and
+the SAFE worker ignores send requests.
 
 ## First end-to-end test
 

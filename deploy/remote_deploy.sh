@@ -35,11 +35,13 @@ esac
 
 archive="$incoming_dir/release.tgz"
 incoming_env="$incoming_dir/production.env"
+incoming_google_credentials="$incoming_dir/google-service-account.json"
 [[ -f $archive ]] || die 'release archive is missing'
 [[ -f $incoming_env ]] || die 'production environment file is missing'
+[[ -f $incoming_google_credentials ]] || die 'Google service-account credential is missing'
 
 cleanup_incoming_secret() {
-  rm -f -- "$incoming_env"
+  rm -f -- "$incoming_env" "$incoming_google_credentials"
 }
 trap cleanup_incoming_secret EXIT
 
@@ -82,6 +84,8 @@ fi
 install -d -m 0750 -o "$deploy_user" -g "$deploy_group" "$deploy_root"
 install -d -m 0750 -o "$deploy_user" -g "$deploy_group" \
   "$deploy_root/releases" "$deploy_root/shared"
+install -d -m 0700 -o "$deploy_user" -g "$deploy_group" \
+  "$deploy_root/shared/secrets"
 
 release_dir="$deploy_root/releases/$release_id"
 [[ ! -e $release_dir ]] || die "release already exists: $release_id"
@@ -96,6 +100,9 @@ chown -R "$deploy_user:$deploy_group" "$release_dir"
 
 install -m 0600 -o "$deploy_user" -g "$deploy_group" \
   "$incoming_env" "$deploy_root/shared/.env"
+install -m 0600 -o "$deploy_user" -g "$deploy_group" \
+  "$incoming_google_credentials" \
+  "$deploy_root/shared/secrets/ollum-google-service-account.json"
 ln -sfn ../../shared/.env "$release_dir/.env"
 chown -h "$deploy_user:$deploy_group" "$release_dir/.env"
 

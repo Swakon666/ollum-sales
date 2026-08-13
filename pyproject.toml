@@ -1,10 +1,12 @@
 [project]
 name = "ollum-sales-mcp"
-version = "0.3.0"
+version = "0.4.0"
 description = "Ollum Group MCP server combining full-source ScrapeGraphAI and WhatsApp MCP upstream projects"
 requires-python = ">=3.12,<4.0"
 dependencies = [
   "beautifulsoup4>=4.12,<5",
+  "google-api-python-client>=2,<3",
+  "google-auth>=2,<3",
   "mcp[cli]>=1.12.4,<2",
   "python-dotenv>=1.0.0",
   "requests>=2.32.0",

@@ -5,7 +5,7 @@ import sqlite3
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -28,12 +28,26 @@ LEAD_STATUSES = {
     "approved",
     "contacted",
     "replied",
+    "interested",
+    "meeting",
+    "proposal",
+    "follow_up",
     "won",
     "lost",
     "archived",
 }
 DRAFT_STATUSES = {"draft", "approved", "sending", "sent", "cancelled", "failed"}
 FOLLOWUP_STATUSES = {"pending", "completed", "cancelled"}
+AUTOPILOT_MODES = {"safe", "semi_auto", "autopilot"}
+WEEKDAYS = {
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+}
 
 
 def utc_now() -> str:
@@ -183,14 +197,105 @@ class SalesCRM:
                     completed_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS verticals (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                    region TEXT NOT NULL,
+                    search_query TEXT,
+                    days_json TEXT NOT NULL DEFAULT '[]',
+                    daily_target INTEGER NOT NULL DEFAULT 10,
+                    min_score INTEGER NOT NULL DEFAULT 65,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    last_selected_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS autopilot_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    running INTEGER NOT NULL DEFAULT 0,
+                    mode TEXT NOT NULL DEFAULT 'safe',
+                    interval_minutes INTEGER NOT NULL DEFAULT 60,
+                    max_verticals_per_cycle INTEGER NOT NULL DEFAULT 2,
+                    leads_per_vertical INTEGER NOT NULL DEFAULT 10,
+                    score_threshold INTEGER NOT NULL DEFAULT 65,
+                    last_cycle_at TEXT,
+                    next_cycle_at TEXT,
+                    lock_until TEXT,
+                    current_cycle_id TEXT,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS autopilot_cycles (
+                    id TEXT PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    selected_verticals_json TEXT NOT NULL DEFAULT '[]',
+                    metrics_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT,
+                    started_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS autopilot_campaigns (
+                    cycle_id TEXT NOT NULL REFERENCES autopilot_cycles(id) ON DELETE CASCADE,
+                    campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
+                    vertical_id TEXT NOT NULL REFERENCES verticals(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (cycle_id, campaign_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS google_sheets_sync_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_sync_at TEXT,
+                    status TEXT NOT NULL DEFAULT 'never',
+                    error TEXT,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS outreach_send_requests (
+                    id TEXT PRIMARY KEY,
+                    draft_id TEXT NOT NULL REFERENCES outreach_drafts(id) ON DELETE CASCADE,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    requested_at TEXT NOT NULL,
+                    processed_at TEXT,
+                    error TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_campaign_leads_campaign ON campaign_leads(campaign_id);
                 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score DESC);
                 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
                 CREATE INDEX IF NOT EXISTS idx_drafts_lead ON outreach_drafts(lead_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_interactions_lead ON interactions(lead_id, occurred_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_followups_due ON followups(status, due_at);
-                PRAGMA user_version = 1;
+                CREATE INDEX IF NOT EXISTS idx_verticals_enabled ON verticals(enabled, weight DESC);
+                CREATE INDEX IF NOT EXISTS idx_autopilot_campaigns_vertical ON autopilot_campaigns(vertical_id, created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_send_requests_pending_draft
+                    ON outreach_send_requests(draft_id) WHERE status = 'pending';
+                PRAGMA user_version = 4;
                 """
+            )
+            timestamp = utc_now()
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO autopilot_state (
+                    id, running, mode, interval_minutes, max_verticals_per_cycle,
+                    leads_per_vertical, score_threshold, created_at, updated_at
+                ) VALUES (1, 0, 'safe', 60, 2, 10, 65, ?, ?)
+                """,
+                (timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO google_sheets_sync_state (
+                    id, status, details_json, updated_at
+                ) VALUES (1, 'never', '{}', ?)
+                """,
+                (timestamp,),
             )
 
     @staticmethod
@@ -211,6 +316,19 @@ class SalesCRM:
     @staticmethod
     def _draft_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return dict(row)
+
+    @staticmethod
+    def _vertical_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["days"] = _load_json(result.pop("days_json", None), [])
+        result["enabled"] = bool(result["enabled"])
+        return result
+
+    @staticmethod
+    def _autopilot_state_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["running"] = bool(result["running"])
+        return result
 
     def stats(self) -> dict[str, int]:
         with self.connect() as connection:
@@ -885,4 +1003,543 @@ class SalesCRM:
             "top_score": score_row[2] if score_row else None,
             "by_status": {row["status"]: row["count"] for row in status_rows},
             "pending_followups": pending_followups,
+        }
+
+    @staticmethod
+    def _normalize_days(days: list[str] | None) -> list[str]:
+        if not days:
+            return []
+        normalized = list(dict.fromkeys(str(day).strip().lower() for day in days))
+        invalid = [day for day in normalized if day not in WEEKDAYS]
+        if invalid:
+            raise ValueError(
+                f"days must use English weekday names; invalid: {', '.join(invalid)}"
+            )
+        return normalized
+
+    def create_vertical(
+        self,
+        name: str,
+        *,
+        region: str,
+        search_query: str | None = None,
+        days: list[str] | None = None,
+        daily_target: int = 10,
+        min_score: int = 65,
+        weight: float = 1.0,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        if not name.strip():
+            raise ValueError("vertical name must not be empty")
+        if not region.strip():
+            raise ValueError("vertical region must not be empty")
+        vertical_id = str(uuid.uuid4())
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO verticals (
+                    id, name, region, search_query, days_json, daily_target,
+                    min_score, weight, enabled, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    vertical_id,
+                    name.strip(),
+                    region.strip(),
+                    search_query.strip() if search_query else None,
+                    _json(self._normalize_days(days)),
+                    max(1, min(int(daily_target), 50)),
+                    max(0, min(int(min_score), 100)),
+                    max(0.1, min(float(weight), 100.0)),
+                    1 if enabled else 0,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return self.get_vertical(vertical_id)
+
+    def get_vertical(self, vertical_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM verticals WHERE id = ?", (vertical_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("vertical not found")
+        return self._vertical_from_row(row)
+
+    def list_verticals(
+        self, *, enabled: bool | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        where = "WHERE enabled = ?" if enabled is not None else ""
+        values: list[Any] = [1 if enabled else 0] if enabled is not None else []
+        values.append(max(1, min(int(limit), 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM verticals {where} ORDER BY weight DESC, name ASC LIMIT ?",
+                values,
+            ).fetchall()
+        return [self._vertical_from_row(row) for row in rows]
+
+    def update_vertical(
+        self,
+        vertical_id: str,
+        *,
+        name: str | None = None,
+        region: str | None = None,
+        search_query: str | None = None,
+        days: list[str] | None = None,
+        daily_target: int | None = None,
+        min_score: int | None = None,
+        weight: float | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        self.get_vertical(vertical_id)
+        updates: list[str] = []
+        values: list[Any] = []
+        if name is not None:
+            if not name.strip():
+                raise ValueError("vertical name must not be empty")
+            updates.append("name = ?")
+            values.append(name.strip())
+        if region is not None:
+            if not region.strip():
+                raise ValueError("vertical region must not be empty")
+            updates.append("region = ?")
+            values.append(region.strip())
+        if search_query is not None:
+            updates.append("search_query = ?")
+            values.append(search_query.strip() or None)
+        if days is not None:
+            updates.append("days_json = ?")
+            values.append(_json(self._normalize_days(days)))
+        if daily_target is not None:
+            updates.append("daily_target = ?")
+            values.append(max(1, min(int(daily_target), 50)))
+        if min_score is not None:
+            updates.append("min_score = ?")
+            values.append(max(0, min(int(min_score), 100)))
+        if weight is not None:
+            updates.append("weight = ?")
+            values.append(max(0.1, min(float(weight), 100.0)))
+        if enabled is not None:
+            updates.append("enabled = ?")
+            values.append(1 if enabled else 0)
+        if not updates:
+            return self.get_vertical(vertical_id)
+        updates.append("updated_at = ?")
+        values.extend([utc_now(), vertical_id])
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE verticals SET {', '.join(updates)} WHERE id = ?", values
+            )
+        return self.get_vertical(vertical_id)
+
+    def get_autopilot_state(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM autopilot_state WHERE id = 1"
+            ).fetchone()
+        assert row is not None
+        return self._autopilot_state_from_row(row)
+
+    def start_autopilot(
+        self,
+        *,
+        mode: str = "safe",
+        interval_minutes: int = 60,
+        max_verticals_per_cycle: int = 2,
+        leads_per_vertical: int = 10,
+        score_threshold: int = 65,
+    ) -> dict[str, Any]:
+        mode = self._validate_status(mode, AUTOPILOT_MODES, "autopilot mode")
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE autopilot_state SET
+                    running = 1, mode = ?, interval_minutes = ?,
+                    max_verticals_per_cycle = ?, leads_per_vertical = ?,
+                    score_threshold = ?, next_cycle_at = ?, last_error = NULL,
+                    updated_at = ?
+                WHERE id = 1
+                """,
+                (
+                    mode,
+                    max(5, min(int(interval_minutes), 24 * 60)),
+                    max(1, min(int(max_verticals_per_cycle), 10)),
+                    max(1, min(int(leads_per_vertical), 50)),
+                    max(0, min(int(score_threshold), 100)),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+        return self.get_autopilot_state()
+
+    def stop_autopilot(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE autopilot_state SET running = 0, next_cycle_at = NULL,
+                    lock_until = NULL, current_cycle_id = NULL, updated_at = ?
+                WHERE id = 1
+                """,
+                (utc_now(),),
+            )
+        return self.get_autopilot_state()
+
+    def begin_autopilot_cycle(self, *, force: bool = False) -> dict[str, Any] | None:
+        now = datetime.now(UTC)
+        timestamp = now.isoformat(timespec="seconds")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            state = connection.execute(
+                "SELECT * FROM autopilot_state WHERE id = 1"
+            ).fetchone()
+            assert state is not None
+            if not force and not bool(state["running"]):
+                return None
+            if state["lock_until"]:
+                lock_until = datetime.fromisoformat(state["lock_until"])
+                if lock_until > now:
+                    return None
+            if not force and state["next_cycle_at"]:
+                next_cycle = datetime.fromisoformat(state["next_cycle_at"])
+                if next_cycle > now:
+                    return None
+            cycle_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO autopilot_cycles (
+                    id, mode, status, selected_verticals_json, metrics_json, started_at
+                ) VALUES (?, ?, 'running', '[]', '{}', ?)
+                """,
+                (cycle_id, state["mode"], timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE autopilot_state SET current_cycle_id = ?, lock_until = ?,
+                    updated_at = ? WHERE id = 1
+                """,
+                (
+                    cycle_id,
+                    (now + timedelta(minutes=120)).isoformat(timespec="seconds"),
+                    timestamp,
+                ),
+            )
+        return {
+            "id": cycle_id,
+            "mode": state["mode"],
+            "status": "running",
+            "started_at": timestamp,
+        }
+
+    def set_cycle_verticals(
+        self, cycle_id: str, vertical_ids: list[str]
+    ) -> dict[str, Any]:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE autopilot_cycles SET selected_verticals_json = ? WHERE id = ? AND status = 'running'",
+                (_json(vertical_ids), cycle_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("running autopilot cycle not found")
+        return self.get_autopilot_cycle(cycle_id)
+
+    def get_autopilot_cycle(self, cycle_id: str) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM autopilot_cycles WHERE id = ?", (cycle_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("autopilot cycle not found")
+        result = dict(row)
+        result["selected_verticals"] = _load_json(
+            result.pop("selected_verticals_json", None), []
+        )
+        result["metrics"] = _load_json(result.pop("metrics_json", None), {})
+        return result
+
+    def complete_autopilot_cycle(
+        self,
+        cycle_id: str,
+        *,
+        metrics: dict[str, Any],
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        state = self.get_autopilot_state()
+        now = datetime.now(UTC)
+        timestamp = now.isoformat(timespec="seconds")
+        next_cycle = (
+            now + timedelta(minutes=int(state["interval_minutes"]))
+        ).isoformat(timespec="seconds")
+        status = "failed" if error else "completed"
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE autopilot_cycles SET status = ?, metrics_json = ?, error = ?,
+                    completed_at = ? WHERE id = ? AND status = 'running'
+                """,
+                (status, _json(metrics), error, timestamp, cycle_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("running autopilot cycle not found")
+            connection.execute(
+                """
+                UPDATE autopilot_state SET current_cycle_id = NULL, lock_until = NULL,
+                    last_cycle_at = ?, next_cycle_at = CASE WHEN running = 1 THEN ? ELSE NULL END,
+                    last_error = ?, updated_at = ? WHERE id = 1
+                """,
+                (timestamp, next_cycle, error, timestamp),
+            )
+        return self.get_autopilot_cycle(cycle_id)
+
+    def register_autopilot_campaign(
+        self, *, cycle_id: str, campaign_id: str, vertical_id: str
+    ) -> None:
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO autopilot_campaigns (
+                    cycle_id, campaign_id, vertical_id, created_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (cycle_id, campaign_id, vertical_id, timestamp),
+            )
+            connection.execute(
+                "UPDATE verticals SET last_selected_at = ?, updated_at = ? WHERE id = ?",
+                (timestamp, timestamp, vertical_id),
+            )
+
+    def record_google_sheets_sync(
+        self,
+        *,
+        status: str,
+        details: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                UPDATE google_sheets_sync_state SET last_sync_at = ?, status = ?,
+                    error = ?, details_json = ?, updated_at = ? WHERE id = 1
+                """,
+                (timestamp, status, error, _json(details or {}), timestamp),
+            )
+        return self.get_google_sheets_sync_state()
+
+    def get_google_sheets_sync_state(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM google_sheets_sync_state WHERE id = 1"
+            ).fetchone()
+        assert row is not None
+        result = dict(row)
+        result["details"] = _load_json(result.pop("details_json", None), {})
+        return result
+
+    def queue_outreach_send_request(self, draft_id: str) -> dict[str, Any]:
+        draft = self.get_outreach_draft(draft_id)
+        if draft["status"] != "approved":
+            raise ValueError("only an approved draft can be queued for sending")
+        request_id = str(uuid.uuid4())
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO outreach_send_requests (
+                    id, draft_id, status, requested_at
+                ) VALUES (?, ?, 'pending', ?)
+                """,
+                (request_id, draft_id, timestamp),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM outreach_send_requests
+                WHERE draft_id = ? AND status = 'pending'
+                """,
+                (draft_id,),
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def list_pending_send_requests(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.*, d.lead_id, d.channel, d.recipient, d.message,
+                    d.status AS draft_status
+                FROM outreach_send_requests r
+                JOIN outreach_drafts d ON d.id = r.draft_id
+                WHERE r.status = 'pending'
+                ORDER BY r.requested_at ASC
+                LIMIT ?
+                """,
+                (max(1, min(int(limit), 200)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def complete_send_request(
+        self, request_id: str, *, success: bool, error: str | None = None
+    ) -> dict[str, Any]:
+        status = "completed" if success else "failed"
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE outreach_send_requests SET status = ?, processed_at = ?, error = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (status, utc_now(), error, request_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("pending send request not found")
+            row = connection.execute(
+                "SELECT * FROM outreach_send_requests WHERE id = ?", (request_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def daily_report(self, day: str | None = None) -> dict[str, Any]:
+        report_day = day or datetime.now(UTC).date().isoformat()
+        try:
+            datetime.fromisoformat(report_day)
+        except ValueError as exc:
+            raise ValueError("day must be an ISO date") from exc
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM leads WHERE substr(created_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM leads WHERE substr(last_analyzed_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM leads WHERE score IS NOT NULL AND score >= 65
+                        AND substr(updated_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM outreach_drafts WHERE substr(created_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM interactions WHERE direction = 'outbound'
+                        AND substr(occurred_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM interactions WHERE direction = 'inbound'
+                        AND substr(occurred_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM leads WHERE status = 'meeting'
+                        AND substr(updated_at, 1, 10) = ?),
+                    (SELECT COUNT(*) FROM leads WHERE status = 'won'
+                        AND substr(updated_at, 1, 10) = ?)
+                """,
+                (report_day,) * 8,
+            ).fetchone()
+            due_followups = connection.execute(
+                "SELECT COUNT(*) FROM followups WHERE status = 'pending' AND substr(due_at, 1, 10) <= ?",
+                (report_day,),
+            ).fetchone()[0]
+        assert row is not None
+        return {
+            "day": report_day,
+            "leads_found": row[0],
+            "analyzed": row[1],
+            "qualified": row[2],
+            "drafts_created": row[3],
+            "messages_sent": row[4],
+            "replies": row[5],
+            "meetings": row[6],
+            "deals": row[7],
+            "due_followups": due_followups,
+        }
+
+    def vertical_performance(self, *, since: str | None = None) -> list[dict[str, Any]]:
+        since_value = (
+            normalize_datetime(since) if since else "0001-01-01T00:00:00+00:00"
+        )
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT v.id, v.name, v.region, v.weight, v.min_score,
+                    COUNT(DISTINCT cl.lead_id) AS leads,
+                    COUNT(DISTINCT CASE WHEN l.score >= v.min_score THEN l.id END) AS qualified,
+                    COUNT(DISTINCT d.id) AS drafts,
+                    COUNT(DISTINCT CASE WHEN i.direction = 'outbound' THEN i.id END) AS messages,
+                    COUNT(DISTINCT CASE WHEN i.direction = 'inbound' THEN i.id END) AS replies,
+                    COUNT(DISTINCT CASE WHEN l.status = 'meeting' THEN l.id END) AS meetings,
+                    COUNT(DISTINCT CASE WHEN l.status = 'won' THEN l.id END) AS deals,
+                    ROUND(AVG(l.score), 1) AS average_score
+                FROM verticals v
+                LEFT JOIN autopilot_campaigns ac ON ac.vertical_id = v.id
+                    AND ac.created_at >= ?
+                LEFT JOIN campaign_leads cl ON cl.campaign_id = ac.campaign_id
+                LEFT JOIN leads l ON l.id = cl.lead_id
+                LEFT JOIN outreach_drafts d ON d.lead_id = l.id
+                LEFT JOIN interactions i ON i.lead_id = l.id
+                GROUP BY v.id
+                ORDER BY replies DESC, meetings DESC, qualified DESC, v.weight DESC
+                """,
+                (since_value,),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            messages = int(item["messages"] or 0)
+            leads = int(item["leads"] or 0)
+            item["reply_rate"] = round(
+                (int(item["replies"] or 0) / messages * 100) if messages else 0.0,
+                1,
+            )
+            item["qualified_rate"] = round(
+                (int(item["qualified"] or 0) / leads * 100) if leads else 0.0,
+                1,
+            )
+            result.append(item)
+        return result
+
+    def conversion_report(
+        self, *, since: str | None = None, until: str | None = None
+    ) -> dict[str, Any]:
+        start = normalize_datetime(since) if since else "0001-01-01T00:00:00+00:00"
+        end = normalize_datetime(until) if until else "9999-12-31T23:59:59+00:00"
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(DISTINCT l.id) AS leads,
+                    COUNT(DISTINCT CASE WHEN l.score >= 65 THEN l.id END) AS qualified,
+                    COUNT(DISTINCT d.lead_id) AS drafted,
+                    COUNT(DISTINCT CASE WHEN i.direction = 'outbound' THEN i.lead_id END) AS contacted,
+                    COUNT(DISTINCT CASE WHEN i.direction = 'inbound' THEN i.lead_id END) AS replied,
+                    COUNT(DISTINCT CASE WHEN l.status = 'interested' THEN l.id END) AS interested,
+                    COUNT(DISTINCT CASE WHEN l.status = 'meeting' THEN l.id END) AS meetings,
+                    COUNT(DISTINCT CASE WHEN l.status = 'proposal' THEN l.id END) AS proposals,
+                    COUNT(DISTINCT CASE WHEN l.status = 'won' THEN l.id END) AS won
+                FROM leads l
+                LEFT JOIN outreach_drafts d ON d.lead_id = l.id
+                    AND d.created_at BETWEEN ? AND ?
+                LEFT JOIN interactions i ON i.lead_id = l.id
+                    AND i.occurred_at BETWEEN ? AND ?
+                WHERE l.created_at BETWEEN ? AND ?
+                """,
+                (start, end, start, end, start, end),
+            ).fetchone()
+        assert row is not None
+        counts = dict(row)
+        leads = int(counts["leads"] or 0)
+        contacted = int(counts["contacted"] or 0)
+        replied = int(counts["replied"] or 0)
+        return {
+            "since": None if since is None else start,
+            "until": None if until is None else end,
+            "stages": counts,
+            "rates": {
+                "qualified_per_lead": round(
+                    (int(counts["qualified"] or 0) / leads * 100) if leads else 0.0,
+                    1,
+                ),
+                "reply_per_contacted": round(
+                    (replied / contacted * 100) if contacted else 0.0, 1
+                ),
+                "meeting_per_reply": round(
+                    (int(counts["meetings"] or 0) / replied * 100) if replied else 0.0,
+                    1,
+                ),
+                "win_per_lead": round(
+                    (int(counts["won"] or 0) / leads * 100) if leads else 0.0,
+                    1,
+                ),
+            },
         }

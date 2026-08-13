@@ -37,6 +37,7 @@ services:
     volumes:
       - crm-data:/data/crm
       - whatsapp-data:/data/whatsapp:ro
+      - ${OLLUM_GOOGLE_SERVICE_ACCOUNT_HOST_FILE:-./secrets/ollum-google-service-account.json}:/run/secrets/ollum-google-service-account.json:ro
     ports:
       - "127.0.0.1:${OLLUM_MCP_BIND_PORT:-18000}:8000"
     networks:
@@ -55,6 +56,33 @@ services:
       timeout: 6s
       retries: 10
       start_period: 30s
+    stop_grace_period: 30s
+
+  ollum-sales-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    restart: unless-stopped
+    command:
+      - python
+      - -m
+      - app.worker
+    env_file:
+      - ${OLLUM_ENV_FILE:-.env}
+    environment:
+      OLLUM_CRM_DB_PATH: /data/crm/ollum-sales.db
+      WHATSAPP_API_BASE_URL: http://whatsapp-bridge:8080/api
+      WHATSAPP_MESSAGES_DB_PATH: /data/whatsapp/messages.db
+    volumes:
+      - crm-data:/data/crm
+      - whatsapp-data:/data/whatsapp:ro
+      - ${OLLUM_GOOGLE_SERVICE_ACCOUNT_HOST_FILE:-./secrets/ollum-google-service-account.json}:/run/secrets/ollum-google-service-account.json:ro
+    networks:
+      - backend
+      - egress
+    depends_on:
+      whatsapp-bridge:
+        condition: service_started
     stop_grace_period: 30s
 
 volumes:

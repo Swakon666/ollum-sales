@@ -12,6 +12,7 @@ __pycache__/
 htmlcov/
 .DS_Store
 /data/
+/secrets/
 store/
 *.db
 *.sqlite
