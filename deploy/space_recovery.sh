@@ -66,7 +66,7 @@ if [[ -e $incoming_dir ]]; then
 fi
 
 docker buildx prune --force \
-  --filter 'description=pip install /app/upstream/Scrapegraph-ai'
+  --filter 'description="mount / from exec /bin/sh -c pip install /app/upstream/Scrapegraph-ai"'
 if docker buildx du --verbose | awk -v target="$cache_record_id" '
   $1 == "ID:" && $2 == target { found = 1 }
   END { exit(found ? 0 : 1) }
