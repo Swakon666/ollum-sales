@@ -860,38 +860,79 @@ func main() {
 		}
 	})
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
+		pairingTimeout := 10 * time.Minute
+		if rawTimeout := strings.TrimSpace(os.Getenv("WHATSAPP_PAIRING_TIMEOUT")); rawTimeout != "" {
+			parsedTimeout, parseErr := time.ParseDuration(rawTimeout)
+			if parseErr != nil || parsedTimeout < 3*time.Minute || parsedTimeout > 30*time.Minute {
+				logger.Errorf("WHATSAPP_PAIRING_TIMEOUT must be a duration between 3m and 30m")
+				return
+			}
+			pairingTimeout = parsedTimeout
 		}
 
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
+		pairingContext, cancelPairing := context.WithTimeout(context.Background(), pairingTimeout)
+		defer cancelPairing()
+
+		paired := false
+		for !paired {
+			// Whatsmeow emits a finite batch of rotating QR codes. When that batch
+			// expires, reconnect and request a fresh batch until our operator window
+			// closes. This keeps pairing interactive without restarting other services.
+			qrChan, qrErr := client.GetQRChannel(pairingContext)
+			if qrErr != nil {
+				logger.Errorf("Failed to initialize QR pairing: %v", qrErr)
+				return
+			}
+
+			err = client.Connect()
+			if err != nil {
+				logger.Errorf("Failed to connect: %v", err)
+				return
+			}
+
+			retryWithFreshBatch := false
+			for evt := range qrChan {
+				switch evt.Event {
+				case "code":
+					fmt.Println("\nScan this QR code with your WhatsApp app:")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				case "success":
+					paired = true
+				case "timeout":
+					retryWithFreshBatch = true
+					logger.Infof("QR batch expired; requesting a fresh batch")
+				case "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
+					logger.Errorf("QR pairing failed: %s", evt.Event)
+					return
+				default:
+					logger.Infof("QR pairing event: %s", evt.Event)
+				}
+			}
+
+			if paired {
 				break
+			}
+			if pairingContext.Err() != nil {
+				logger.Errorf("Timeout waiting for QR code scan")
+				return
+			}
+			if !retryWithFreshBatch {
+				logger.Errorf("QR pairing channel closed without a terminal result")
+				return
+			}
+
+			client.Disconnect()
+			select {
+			case <-time.After(2 * time.Second):
+			case <-pairingContext.Done():
+				logger.Errorf("Timeout waiting for QR code scan")
+				return
 			}
 		}
 
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
-		}
+		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
 		// Already logged in, just connect
 		err = client.Connect()
@@ -899,7 +940,6 @@ func main() {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
-		connected <- true
 	}
 
 	// Wait a moment for connection to stabilize

@@ -8,6 +8,7 @@ services:
     restart: unless-stopped
     environment:
       WHATSAPP_PROXY_URL: ${WHATSAPP_PROXY_URL:-}
+      WHATSAPP_PAIRING_TIMEOUT: ${WHATSAPP_PAIRING_TIMEOUT:-10m}
     volumes:
       - whatsapp-data:/app/store
     stdin_open: true

@@ -30,13 +30,13 @@ send_flag=$(grep -E '^OLLUM_ALLOW_WHATSAPP_SEND=' "$deploy_root/shared/.env" | t
 [[ $send_flag == false ]] || die 'OLLUM_ALLOW_WHATSAPP_SEND must remain false during pairing'
 
 printf 'Restarting only whatsapp-bridge; its persistent Docker volume is preserved.\n'
-docker compose restart whatsapp-bridge
+docker compose up -d --no-deps --force-recreate --no-build whatsapp-bridge
 
 printf '\nOpen WhatsApp on the phone: Settings -> Linked devices -> Link a device.\n'
-printf 'Scan the newest QR code below. The action waits up to four minutes.\n\n'
+printf 'Scan the newest QR code below. Fresh QR batches rotate for up to ten minutes.\n\n'
 
 set +e
-timeout --signal=INT --kill-after=10s 240s \
+timeout --signal=INT --kill-after=10s 660s \
   docker compose logs --no-color --follow --since=30s whatsapp-bridge
 log_status=$?
 set -e

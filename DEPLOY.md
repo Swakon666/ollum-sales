@@ -149,6 +149,26 @@ either named volume. They survive container recreation, release changes, and ser
 The bridge health status remains `starting` until WhatsApp authentication succeeds. This does not
 prevent the MCP health endpoint from running; WhatsApp operations become available after pairing.
 
+The production workflow also provides `connect-whatsapp`, which recreates only the bridge and keeps
+fresh QR batches rotating for up to ten minutes. The persistent WhatsApp volume is preserved and the
+script refuses to run unless `OLLUM_ALLOW_WHATSAPP_SEND=false`.
+
+## Fast WhatsApp-only update
+
+For bridge-only changes, cross-compile the static Linux binary on the operator computer instead of
+rebuilding MCP and worker on production:
+
+```powershell
+.\scripts\build_whatsapp_prebuilt.ps1
+```
+
+Upload the resulting ELF binary as a private GitHub release asset, then run the production workflow in
+`deploy-whatsapp-prebuilt` mode with the release tag, asset name, and SHA-256 from the generated JSON
+metadata. The workflow verifies the binary before and after transfer, builds only a tiny overlay layer
+on the existing bridge image, and recreates only `whatsapp-bridge` with `--no-deps --no-build`. It
+preserves the named volume, keeps WhatsApp sending disabled, and restores the previous bridge image if
+the new container fails to start.
+
 ## Logs and status
 
 ```bash
