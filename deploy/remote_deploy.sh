@@ -8,19 +8,27 @@ die() {
 }
 
 [[ $EUID -eq 0 ]] || die 'remote_deploy.sh must run through sudo'
-[[ $# -eq 5 ]] || die 'expected deploy user, domain, release id, incoming path, and bind port'
+[[ $# -eq 5 || $# -eq 7 ]] \
+  || die 'expected deploy user, domain, release id, incoming path, bind port, and optional prebuilt image metadata'
 
 deploy_user=$1
 domain=$2
 release_id=$3
 incoming_relative=$4
 bind_port=$5
+prebuilt_image_tag=${6:-}
+expected_prebuilt_image_id=${7:-}
 
 [[ $deploy_user =~ ^[a-z_][a-z0-9_-]*$ ]] || die 'invalid deploy user'
 [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die 'invalid domain'
 [[ $release_id =~ ^[A-Fa-f0-9-]+$ ]] || die 'invalid release id'
 [[ $incoming_relative =~ ^\.ollum-sales-incoming/[A-Za-z0-9._-]+$ ]] || die 'invalid incoming path'
 [[ $bind_port =~ ^[0-9]{2,5}$ ]] || die 'invalid bind port'
+if [[ -n $prebuilt_image_tag || -n $expected_prebuilt_image_id ]]; then
+  [[ $prebuilt_image_tag =~ ^[A-Za-z0-9._-]+$ ]] || die 'invalid prebuilt image tag'
+  [[ $expected_prebuilt_image_id =~ ^sha256:[A-Fa-f0-9]{64}$ ]] \
+    || die 'invalid expected prebuilt image ID'
+fi
 
 deploy_home=$(getent passwd "$deploy_user" | cut -d: -f6)
 deploy_group=$(id -gn "$deploy_user")
@@ -36,12 +44,16 @@ esac
 archive="$incoming_dir/release.tgz"
 incoming_env="$incoming_dir/production.env"
 incoming_google_credentials="$incoming_dir/google-service-account.json"
+prebuilt_image_archive="$incoming_dir/ollum-sales-mcp-image.tar.gz"
 [[ -f $archive ]] || die 'release archive is missing'
 [[ -f $incoming_env ]] || die 'production environment file is missing'
 [[ -f $incoming_google_credentials ]] || die 'Google service-account credential is missing'
+if [[ -n $prebuilt_image_tag ]]; then
+  [[ -f $prebuilt_image_archive ]] || die 'prebuilt MCP image archive is missing'
+fi
 
 cleanup_incoming_secret() {
-  rm -f -- "$incoming_env" "$incoming_google_credentials"
+  rm -f -- "$incoming_env" "$incoming_google_credentials" "$prebuilt_image_archive"
 }
 trap cleanup_incoming_secret EXIT
 
@@ -137,14 +149,44 @@ cd "$release_dir"
 docker compose config --quiet
 
 declare -a prior_ollum_image_ids=()
+previous_mcp_image_id=''
 while IFS= read -r image; do
   if image_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null); then
     prior_ollum_image_ids+=("$image_id")
+    if [[ $image == *ollum-sales-mcp* ]]; then
+      previous_mcp_image_id=$image_id
+    fi
   fi
 done < <(docker compose config --images)
 
+prebuilt_images=false
+if [[ -n $prebuilt_image_tag ]]; then
+  gzip -t "$prebuilt_image_archive" || die 'prebuilt MCP image archive is invalid'
+  gzip -dc "$prebuilt_image_archive" | docker load
+  loaded_image="ollum-sales-ollum-sales-mcp:$prebuilt_image_tag"
+  loaded_image_id=$(docker image inspect --format '{{.Id}}' "$loaded_image" 2>/dev/null) \
+    || die 'expected prebuilt MCP image tag was not loaded'
+  [[ $loaded_image_id == "$expected_prebuilt_image_id" ]] \
+    || die 'loaded MCP image ID does not match the verified artifact'
+  mapfile -t runtime_images < <(
+    docker compose config --images | grep -E 'ollum-sales-(mcp|worker)$'
+  )
+  [[ ${#runtime_images[@]} -eq 2 ]] \
+    || die 'could not identify both MCP and worker image names'
+  for runtime_image in "${runtime_images[@]}"; do
+    docker tag "$loaded_image" "$runtime_image"
+  done
+  rm -f -- "$prebuilt_image_archive"
+  while IFS= read -r image; do
+    docker image inspect "$image" >/dev/null 2>&1 \
+      || die "required prebuilt deployment image is unavailable: $image"
+  done < <(docker compose config --images)
+  prebuilt_images=true
+  printf 'Loaded verified prebuilt MCP image %s\n' "$loaded_image_id"
+fi
+
 reuse_images=false
-if [[ -n $previous_release ]]; then
+if [[ $prebuilt_images == false && -n $previous_release ]]; then
   current_fingerprint=$(build_fingerprint "$release_dir")
   previous_fingerprint=$(build_fingerprint "$previous_release")
   if [[ $current_fingerprint == "$previous_fingerprint" ]]; then
@@ -159,7 +201,11 @@ if [[ -n $previous_release ]]; then
 fi
 
 available_kb=$(df -Pk / | awk 'NR==2 {print $4}')
-if [[ $reuse_images == true ]]; then
+if [[ $prebuilt_images == true ]]; then
+  (( available_kb >= 512 * 1024 )) \
+    || die 'at least 512 MiB of free disk space is required for a prebuilt deployment'
+  printf 'Using verified prebuilt Ollum Sales MCP and worker image\n'
+elif [[ $reuse_images == true ]]; then
   (( available_kb >= 256 * 1024 )) \
     || die 'at least 256 MiB of free disk space is required when reusing images'
   printf 'Reusing unchanged Ollum Sales images from release %s\n' \
@@ -191,8 +237,10 @@ fi
 restore_previous() {
   if [[ -n $previous_release && -f $previous_release/docker-compose.yml ]]; then
     printf 'Restoring previous release %s\n' "$(basename "$previous_release")" >&2
+    if [[ -n $previous_mcp_image_id ]]; then
+      docker tag "$previous_mcp_image_id" ollum-sales-ollum-sales-mcp:latest
+    fi
     cd "$previous_release"
-    docker compose build
     docker compose up -d --remove-orphans
     ln -sfn "$previous_release" "$deploy_root/current"
   fi
