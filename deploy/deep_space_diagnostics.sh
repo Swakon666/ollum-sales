@@ -21,6 +21,16 @@ deploy_home=$(getent passwd "$deploy_user" | cut -d: -f6)
   exit 1
 }
 
+printf '\n== block devices and LVM ==\n'
+lsblk -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINTS
+if command -v pvs >/dev/null; then
+  pvs --units g --nosuffix -o pv_name,pv_size,pv_free
+  vgs --units g --nosuffix -o vg_name,vg_size,vg_free
+  lvs --units g --nosuffix -o lv_name,vg_name,lv_size
+else
+  printf 'lvm_tools=absent\n'
+fi
+
 printf '\n== filesystem blocks and inodes ==\n'
 df -hT /
 df -ih /
