@@ -10,6 +10,15 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from .data_quality import (
+    company_domain_key,
+    company_name_key,
+    location_key,
+    normalize_contacts,
+    normalize_phone,
+    phone_keys,
+)
+
 CAMPAIGN_STATUSES = {
     "draft",
     "discovering",
@@ -150,7 +159,10 @@ class SalesCRM:
                     analysis_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    last_analyzed_at TEXT
+                    last_analyzed_at TEXT,
+                    inspection_json TEXT,
+                    last_inspected_at TEXT,
+                    evidence_expires_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS campaign_leads (
@@ -276,9 +288,22 @@ class SalesCRM:
                 CREATE INDEX IF NOT EXISTS idx_autopilot_campaigns_vertical ON autopilot_campaigns(vertical_id, created_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_send_requests_pending_draft
                     ON outreach_send_requests(draft_id) WHERE status = 'pending';
-                PRAGMA user_version = 4;
+                PRAGMA user_version = 5;
                 """
             )
+            lead_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(leads)").fetchall()
+            }
+            for name, column_type in (
+                ("inspection_json", "TEXT"),
+                ("last_inspected_at", "TEXT"),
+                ("evidence_expires_at", "TEXT"),
+            ):
+                if name not in lead_columns:
+                    connection.execute(
+                        f"ALTER TABLE leads ADD COLUMN {name} {column_type}"
+                    )
             timestamp = utc_now()
             connection.execute(
                 """
@@ -311,6 +336,7 @@ class SalesCRM:
         result["contacts"] = _load_json(result.pop("contacts_json", None), {})
         result["analysis"] = _load_json(result.pop("analysis_json", None), {})
         result["score_details"] = _load_json(result.pop("score_details_json", None), {})
+        result["inspection"] = _load_json(result.pop("inspection_json", None), {})
         return result
 
     @staticmethod
@@ -381,6 +407,42 @@ class SalesCRM:
             )
         return self.get_campaign(campaign_id)
 
+    def get_or_create_campaign(
+        self,
+        name: str,
+        *,
+        industry: str | None = None,
+        location: str | None = None,
+        search_query: str | None = None,
+        target_count: int = 20,
+        status: str = "draft",
+    ) -> tuple[dict[str, Any], bool]:
+        normalized_name = name.strip()
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id FROM campaigns
+                WHERE name = ? COLLATE NOCASE
+                  AND COALESCE(industry, '') = COALESCE(?, '') COLLATE NOCASE
+                  AND COALESCE(location, '') = COALESCE(?, '') COLLATE NOCASE
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (normalized_name, industry, location),
+            ).fetchone()
+        if row is not None:
+            return self.get_campaign(row["id"]), False
+        return (
+            self.create_campaign(
+                normalized_name,
+                industry=industry,
+                location=location,
+                search_query=search_query,
+                target_count=target_count,
+                status=status,
+            ),
+            True,
+        )
+
     def get_campaign(self, campaign_id: str) -> dict[str, Any]:
         with self.connect() as connection:
             row = connection.execute(
@@ -442,12 +504,93 @@ class SalesCRM:
         return self.get_campaign(campaign_id)
 
     def find_lead_by_website_url(self, website_url: str) -> dict[str, Any] | None:
-        website_url = canonical_company_url(website_url)
+        duplicate = self.find_duplicate_lead(
+            company_name="", website_url=website_url, phones=None, location=None
+        )
+        return duplicate
+
+    def find_duplicate_lead(
+        self,
+        *,
+        company_name: str,
+        website_url: str,
+        phones: list[str] | None = None,
+        location: str | None = None,
+        exclude_lead_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        domain = company_domain_key(website_url)
+        name = company_name_key(company_name)
+        region = location_key(location)
+        candidate_phone_keys = phone_keys(phones or [])
         with self.connect() as connection:
-            row = connection.execute(
-                "SELECT id FROM leads WHERE website_url = ?", (website_url,)
-            ).fetchone()
-        return self.get_lead(row["id"]) if row is not None else None
+            rows = connection.execute(
+                "SELECT * FROM leads ORDER BY created_at ASC"
+            ).fetchall()
+
+        domain_match: str | None = None
+        phone_match: str | None = None
+        name_match: str | None = None
+        for row in rows:
+            if row["id"] == exclude_lead_id:
+                continue
+            if company_domain_key(row["website_url"]) == domain:
+                domain_match = row["id"]
+                break
+            contacts = _load_json(row["contacts_json"], {})
+            existing_phones = phone_keys(
+                (contacts.get("phones") or []) if isinstance(contacts, dict) else []
+            )
+            if candidate_phone_keys and candidate_phone_keys & existing_phones:
+                phone_match = phone_match or row["id"]
+            existing_name = company_name_key(row["company_name"])
+            existing_region = location_key(row["location"])
+            cautious_name_match = (
+                name
+                and name == existing_name
+                and (
+                    (region and region == existing_region)
+                    or (
+                        not region
+                        and not existing_region
+                        and len(name) >= 10
+                        and len(name.split()) >= 2
+                    )
+                )
+            )
+            if cautious_name_match:
+                name_match = name_match or row["id"]
+        matched_id = domain_match or phone_match or name_match
+        return self.get_lead(matched_id) if matched_id else None
+
+    def find_leads_by_phone(
+        self, value: str, *, limit: int = 5
+    ) -> list[dict[str, Any]]:
+        phone = normalize_phone(value)
+        if not phone:
+            return []
+        matches: list[dict[str, Any]] = []
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM leads ORDER BY updated_at DESC"
+            ).fetchall()
+        for row in rows:
+            contacts = _load_json(row["contacts_json"], {})
+            existing = phone_keys(
+                (contacts.get("phones") or []) if isinstance(contacts, dict) else []
+            )
+            if phone in existing:
+                lead = self._lead_from_row(row)
+                matches.append(
+                    {
+                        "lead_id": lead["id"],
+                        "company_name": lead["company_name"],
+                        "website_url": lead["website_url"],
+                        "status": lead["status"],
+                    }
+                )
+                if len(matches) >= max(1, min(int(limit), 20)):
+                    break
+        return matches
 
     def upsert_lead(
         self,
@@ -459,39 +602,67 @@ class SalesCRM:
         source: str = "manual",
         campaign_id: str | None = None,
         source_rank: int | None = None,
+        phones: list[str] | None = None,
     ) -> dict[str, Any]:
         website_url = canonical_company_url(website_url)
         name = company_name.strip() or urlsplit(website_url).hostname or website_url
         timestamp = utc_now()
-        lead_id = str(uuid.uuid4())
+        duplicate = self.find_duplicate_lead(
+            company_name=name,
+            website_url=website_url,
+            phones=phones,
+            location=location,
+        )
+        lead_id = duplicate["id"] if duplicate else str(uuid.uuid4())
         with self.connect() as connection:
-            connection.execute(
-                """
-                INSERT INTO leads (
-                    id, company_name, website_url, industry, location, source, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(website_url) DO UPDATE SET
-                    company_name = CASE WHEN excluded.company_name <> '' THEN excluded.company_name ELSE leads.company_name END,
-                    industry = COALESCE(excluded.industry, leads.industry),
-                    location = COALESCE(excluded.location, leads.location),
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    lead_id,
-                    name,
-                    website_url,
-                    industry.strip() if industry else None,
-                    location.strip() if location else None,
-                    source.strip() or "manual",
-                    timestamp,
-                    timestamp,
-                ),
-            )
-            row = connection.execute(
-                "SELECT id FROM leads WHERE website_url = ?", (website_url,)
-            ).fetchone()
-            assert row is not None
-            lead_id = row["id"]
+            if duplicate:
+                connection.execute(
+                    """
+                    UPDATE leads SET
+                        industry = COALESCE(industry, ?),
+                        location = COALESCE(location, ?),
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        industry.strip() if industry else None,
+                        location.strip() if location else None,
+                        timestamp,
+                        lead_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO leads (
+                        id, company_name, website_url, industry, location, source,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        lead_id,
+                        name,
+                        website_url,
+                        industry.strip() if industry else None,
+                        location.strip() if location else None,
+                        source.strip() or "manual",
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            normalized_phones = sorted(phone_keys(phones or []))
+            if normalized_phones:
+                row = connection.execute(
+                    "SELECT contacts_json FROM leads WHERE id = ?", (lead_id,)
+                ).fetchone()
+                contacts = normalize_contacts(_load_json(row["contacts_json"], {}))
+                contacts["phones"] = sorted(
+                    set(contacts["phones"]) | set(normalized_phones)
+                )
+                connection.execute(
+                    "UPDATE leads SET contacts_json = ?, updated_at = ? WHERE id = ?",
+                    (_json(contacts), timestamp, lead_id),
+                )
             if campaign_id:
                 if (
                     connection.execute(
@@ -564,6 +735,83 @@ class SalesCRM:
             ).fetchall()
         return [self._lead_from_row(row) for row in rows]
 
+    def save_inspection(
+        self,
+        lead_id: str,
+        snapshot: dict[str, Any],
+        *,
+        ttl_hours: int = 168,
+    ) -> dict[str, Any]:
+        if not isinstance(snapshot, dict) or not snapshot:
+            raise ValueError("snapshot must be a non-empty object")
+        lead = self.get_lead(lead_id)
+        evidence_url = str(
+            snapshot.get("final_url") or snapshot.get("requested_url") or ""
+        ).strip()
+        if evidence_url:
+            lead_domain = company_domain_key(lead["website_url"]).split(":", 1)[0]
+            evidence_domain = company_domain_key(evidence_url).split(":", 1)[0]
+            related_domains = (
+                lead_domain == evidence_domain
+                or lead_domain.endswith(f".{evidence_domain}")
+                or evidence_domain.endswith(f".{lead_domain}")
+            )
+            if not related_domains:
+                raise ValueError(
+                    "inspection evidence URL does not match the lead domain"
+                )
+        inspected_at = datetime.now(UTC)
+        expires_at = inspected_at + timedelta(hours=max(1, min(int(ttl_hours), 720)))
+        timestamp = inspected_at.isoformat(timespec="seconds")
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE leads SET inspection_json = ?, last_inspected_at = ?,
+                    evidence_expires_at = ?, updated_at = ? WHERE id = ?
+                """,
+                (
+                    _json(snapshot),
+                    timestamp,
+                    expires_at.isoformat(timespec="seconds"),
+                    timestamp,
+                    lead_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("lead not found")
+        return self.get_lead(lead_id)
+
+    def get_inspection(
+        self, lead_id: str, *, allow_stale: bool = False
+    ) -> dict[str, Any] | None:
+        lead = self.get_lead(lead_id)
+        snapshot = lead.get("inspection")
+        expires_at = lead.get("evidence_expires_at")
+        if not isinstance(snapshot, dict) or not snapshot or not expires_at:
+            return None
+        expires = datetime.fromisoformat(str(expires_at))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        expires = expires.astimezone(UTC)
+        fresh = expires > datetime.now(UTC)
+        if not fresh and not allow_stale:
+            return None
+        return {
+            "snapshot": snapshot,
+            "fresh": fresh,
+            "inspected_at": lead.get("last_inspected_at"),
+            "expires_at": expires.isoformat(timespec="seconds"),
+        }
+
+    def require_fresh_evidence(self, lead_id: str) -> dict[str, Any]:
+        inspection = self.get_inspection(lead_id)
+        if inspection is None:
+            raise ValueError(
+                "Fresh website evidence is required; call sales_analyze_lead or "
+                "sales_inspect_website again."
+            )
+        return inspection
+
     def update_lead_status(self, lead_id: str, status: str) -> dict[str, Any]:
         status = self._validate_status(status, LEAD_STATUSES, "lead status")
         with self.connect() as connection:
@@ -581,11 +829,13 @@ class SalesCRM:
         timestamp = utc_now()
         score = analysis.get("lead_score")
         normalized_score = max(0, min(int(score), 100)) if score is not None else None
-        contacts = (
+        contacts_value = (
             analysis.get("contacts")
             if isinstance(analysis.get("contacts"), dict)
             else {}
         )
+        contacts = normalize_contacts(contacts_value)
+        analysis = {**analysis, "contacts": contacts}
         with self.connect() as connection:
             cursor = connection.execute(
                 """
@@ -1203,6 +1453,18 @@ class SalesCRM:
 
     def stop_autopilot(self) -> dict[str, Any]:
         with self.connect() as connection:
+            state = connection.execute(
+                "SELECT current_cycle_id FROM autopilot_state WHERE id = 1"
+            ).fetchone()
+            if state is not None and state["current_cycle_id"]:
+                connection.execute(
+                    """
+                    UPDATE autopilot_cycles SET status = 'failed',
+                        error = 'Autopilot was stopped by the operator.', completed_at = ?
+                    WHERE id = ? AND status = 'running'
+                    """,
+                    (utc_now(), state["current_cycle_id"]),
+                )
             connection.execute(
                 """
                 UPDATE autopilot_state SET running = 0, next_cycle_at = NULL,
@@ -1228,6 +1490,22 @@ class SalesCRM:
                 lock_until = datetime.fromisoformat(state["lock_until"])
                 if lock_until > now:
                     return None
+            if state["current_cycle_id"]:
+                stale_error = "Recovered stale Autopilot cycle after its lock expired."
+                connection.execute(
+                    """
+                    UPDATE autopilot_cycles SET status = 'failed', error = ?,
+                        completed_at = ? WHERE id = ? AND status = 'running'
+                    """,
+                    (stale_error, timestamp, state["current_cycle_id"]),
+                )
+                connection.execute(
+                    """
+                    UPDATE autopilot_state SET current_cycle_id = NULL,
+                        lock_until = NULL, last_error = ?, updated_at = ? WHERE id = 1
+                    """,
+                    (stale_error, timestamp),
+                )
             if not force and state["next_cycle_at"]:
                 next_cycle = datetime.fromisoformat(state["next_cycle_at"])
                 if next_cycle > now:

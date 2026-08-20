@@ -27,6 +27,9 @@ def settings(**overrides: object) -> SimpleNamespace:
         "serper_api_key": None,
         "company_search_timeout": 5,
         "website_inspection_timeout": 5,
+        "evidence_ttl_hours": 168,
+        "retry_attempts": 3,
+        "retry_base_delay_seconds": 0,
         "autopilot_default_mode": "safe",
         "autopilot_interval_minutes": 60,
         "autopilot_max_verticals_per_cycle": 1,
@@ -188,6 +191,89 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(metrics["leads_found"], 1)
         self.assertEqual(metrics["analyzed"], 1)
         self.assertIn("editorial_path", metrics["rejection_reasons"])
+
+    def test_autopilot_retries_transient_discovery_idempotently(self) -> None:
+        self.crm.create_vertical(
+            "services", region="Moscow", daily_target=1, min_score=60
+        )
+        discover_calls = 0
+
+        def discoverer(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal discover_calls
+            discover_calls += 1
+            if discover_calls == 1:
+                raise ConnectionError("temporary discovery failure")
+            return {
+                "provider": "test",
+                "results": [
+                    {
+                        "company_name": "Retry Company",
+                        "website_url": "https://retry-company.test",
+                    }
+                ],
+            }
+
+        def inspector(*_args: object, **_kwargs: object) -> dict[str, object]:
+            return {
+                "final_url": "https://retry-company.test",
+                "title": "Retry Company",
+                "visible_text": "Services catalog request form " * 80,
+                "mobile_viewport": True,
+                "headings": [],
+                "contacts": {"phones": ["+79990000009"], "emails": []},
+                "forms": {"count": 1},
+                "technologies": [],
+            }
+
+        service = AutopilotService(
+            self.crm,
+            settings(retry_attempts=2),
+            FakeSheets(),
+            discoverer=discoverer,
+            inspector=inspector,
+        )
+        self.assertTrue(service.start(mode="safe")["success"])
+        result = service.run_cycle(force=True)
+        self.assertTrue(result["success"])
+        self.assertEqual(discover_calls, 2)
+        self.assertEqual(result["cycle"]["metrics"]["retry_count"], 1)
+        self.assertEqual(len(self.crm.list_leads()), 1)
+        lead = self.crm.list_leads()[0]
+        with self.crm.connect() as connection:
+            connection.execute(
+                "UPDATE leads SET evidence_expires_at = '2000-01-01T00:00:00+00:00' "
+                "WHERE id = ?",
+                (lead["id"],),
+            )
+        repeated = service.run_cycle(force=True)
+        repeated_metrics = repeated["cycle"]["metrics"]
+        self.assertEqual(repeated_metrics["campaigns_reused"], 1)
+        self.assertEqual(repeated_metrics["stale_evidence_refreshed"], 1)
+        self.assertEqual(len(self.crm.list_campaigns()), 1)
+
+    def test_google_sheets_request_retries_transient_failure(self) -> None:
+        sync = GoogleSheetsSync(
+            self.crm,
+            enabled=False,
+            spreadsheet_id=None,
+            service_account_file=None,
+            retry_attempts=2,
+            retry_base_delay_seconds=0,
+        )
+
+        class FlakyRequest:
+            calls = 0
+
+            def execute(self) -> dict[str, bool]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise ConnectionError("temporary sheets failure")
+                return {"ok": True}
+
+        request = FlakyRequest()
+        self.assertEqual(sync._execute(request), {"ok": True})
+        self.assertEqual(request.calls, 2)
+        self.assertEqual(sync._retry_count, 1)
 
     def test_sheet_approval_requires_exact_visible_draft(self) -> None:
         lead = self.crm.upsert_lead("Example", "https://example.org")

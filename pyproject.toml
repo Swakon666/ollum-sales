@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=8,<9",
+  "ruff>=0.16,<1",
 ]
 
 [build-system]

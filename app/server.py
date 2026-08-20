@@ -18,6 +18,7 @@ from .autopilot import AutopilotService
 from .company_search import search_company_websites
 from .config import settings
 from .crm import SalesCRM
+from .data_quality import candidate_phones, normalize_phone, retry_call
 from .google_sheets import GoogleSheetsSync
 from .schemas import LeadAnalysis
 from .scraping import analyze_website as scrape_analyze_website
@@ -38,8 +39,44 @@ google_sheets = GoogleSheetsSync(
     enabled=settings.google_sheets_enabled,
     spreadsheet_id=settings.google_sheets_spreadsheet_id,
     service_account_file=settings.google_service_account_file,
+    retry_attempts=settings.retry_attempts,
+    retry_base_delay_seconds=settings.retry_base_delay_seconds,
 )
 autopilot = AutopilotService(crm, settings, google_sheets)
+
+
+def _inspect_public_url(
+    public_url: str, *, max_text_chars: int = 20_000
+) -> dict[str, Any]:
+    return retry_call(
+        lambda: inspect_website(
+            public_url,
+            max_text_chars=max_text_chars,
+            timeout=settings.website_inspection_timeout,
+        ),
+        attempts=settings.retry_attempts,
+        base_delay_seconds=settings.retry_base_delay_seconds,
+    )
+
+
+def _attach_lead_matches(records: Any) -> Any:
+    if not isinstance(records, list):
+        return records
+    enriched: list[Any] = []
+    for item in records:
+        if not isinstance(item, dict):
+            enriched.append(item)
+            continue
+        raw_identity = str(
+            item.get("phone_number") or item.get("chat_jid") or item.get("jid") or ""
+        )
+        phone = normalize_phone(raw_identity.split("@", 1)[0].split(":", 1)[0])
+        clean = dict(item)
+        if phone:
+            clean["lead_matches"] = crm.find_leads_by_phone(phone)
+        enriched.append(clean)
+    return enriched
+
 
 mcp = FastMCP(
     "Ollum Sales",
@@ -222,34 +259,49 @@ def sales_import_leads(
         )
 
     imported: list[dict[str, Any]] = []
+    duplicates: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for index, candidate in enumerate(candidates, start=1):
         try:
             company_name = str(candidate.get("company_name") or "").strip()
             website_url = str(candidate.get("website_url") or "").strip()
             public_url = validate_public_http_url(website_url)
-            imported.append(
-                crm.upsert_lead(
-                    company_name,
-                    public_url,
-                    industry=str(candidate.get("industry") or industry or "").strip()
-                    or None,
-                    location=str(candidate.get("location") or location or "").strip()
-                    or None,
-                    source=source,
-                    campaign_id=campaign["id"],
-                    source_rank=index,
-                )
+            candidate_location = (
+                str(candidate.get("location") or location or "").strip() or None
             )
+            phones = candidate_phones(candidate)
+            existing = crm.find_duplicate_lead(
+                company_name=company_name,
+                website_url=public_url,
+                phones=phones,
+                location=candidate_location,
+            )
+            lead = crm.upsert_lead(
+                company_name,
+                public_url,
+                industry=str(candidate.get("industry") or industry or "").strip()
+                or None,
+                location=candidate_location,
+                source=source,
+                campaign_id=campaign["id"],
+                source_rank=index,
+                phones=phones,
+            )
+            if existing:
+                duplicates.append({"index": index, "lead_id": lead["id"]})
+            else:
+                imported.append(lead)
         except (TypeError, ValueError) as exc:
             rejected.append({"index": index, "error": str(exc)})
     campaign = crm.set_campaign_status(
-        campaign["id"], "ready" if imported else "paused"
+        campaign["id"], "ready" if imported or duplicates else "paused"
     )
     return {
         "campaign": campaign,
         "imported": imported,
         "imported_count": len(imported),
+        "duplicates": duplicates,
+        "duplicate_count": len(duplicates),
         "rejected": rejected,
         "rejected_count": len(rejected),
     }
@@ -294,23 +346,38 @@ def sales_inspect_website(
     lead_id: str | None = None,
     url: str | None = None,
     max_text_chars: int = 20_000,
+    force_refresh: bool = False,
 ) -> dict[str, Any]:
     """Collect bounded factual website evidence for Codex-side analysis without an LLM API key."""
     if not lead_id and not url:
         raise ValueError("lead_id or url is required")
     lead = crm.get_lead(lead_id) if lead_id else None
     public_url = validate_public_http_url(url or lead["website_url"])
-    snapshot = inspect_website(
-        public_url,
-        max_text_chars=max_text_chars,
-        timeout=settings.website_inspection_timeout,
-    )
+    inspection = crm.get_inspection(lead_id) if lead_id and not force_refresh else None
+    evidence_cached = inspection is not None
+    if inspection is None:
+        snapshot = _inspect_public_url(public_url, max_text_chars=max_text_chars)
+        if lead_id:
+            crm.save_inspection(
+                lead_id, snapshot, ttl_hours=settings.evidence_ttl_hours
+            )
+            inspection = crm.require_fresh_evidence(lead_id)
+    else:
+        snapshot = inspection["snapshot"]
     return untrusted_result(
         "website",
         {
             "lead_id": lead_id,
             "analysis_mode": "codex_evidence",
             "snapshot": snapshot,
+            "evidence_cached": evidence_cached,
+            "evidence": {
+                "inspected_at": inspection.get("inspected_at"),
+                "expires_at": inspection.get("expires_at"),
+                "fresh": inspection.get("fresh"),
+            }
+            if inspection
+            else None,
         },
     )
 
@@ -322,22 +389,32 @@ def sales_analyze_lead(
     """Analyze a stored lead with ScrapeGraphAI, or return evidence for Codex fallback analysis."""
     lead = crm.get_lead(lead_id)
     public_url = validate_public_http_url(lead["website_url"])
+    inspection = crm.get_inspection(lead_id)
+    evidence_cached = inspection is not None
+    if inspection is None:
+        snapshot = _inspect_public_url(public_url)
+        crm.save_inspection(lead_id, snapshot, ttl_hours=settings.evidence_ttl_hours)
+        inspection = crm.require_fresh_evidence(lead_id)
+    snapshot = inspection["snapshot"]
     if not (settings.llm_api_key or settings.openai_api_key):
-        snapshot = inspect_website(
-            public_url, timeout=settings.website_inspection_timeout
-        )
         return untrusted_result(
             "website",
             {
                 "lead_id": lead_id,
                 "analysis_mode": "codex_fallback",
                 "snapshot": snapshot,
+                "evidence_cached": evidence_cached,
+                "evidence": {
+                    "inspected_at": inspection["inspected_at"],
+                    "expires_at": inspection["expires_at"],
+                    "fresh": inspection["fresh"],
+                },
                 "next_action": "Create a grounded structured analysis and call sales_save_analysis.",
             },
         )
     analysis = scrape_analyze_website(public_url, extra_context)
     saved = crm.save_analysis(lead_id, analysis)
-    scored = crm.score_lead(lead_id)
+    scored = crm.score_lead(saved["id"])
     return untrusted_result(
         "website",
         {
@@ -351,9 +428,10 @@ def sales_analyze_lead(
 @mcp.tool()
 def sales_save_analysis(lead_id: str, analysis: dict[str, Any]) -> dict[str, Any]:
     """Persist a grounded structured analysis and calculate a deterministic initial score."""
+    crm.require_fresh_evidence(lead_id)
     validated = LeadAnalysis.model_validate(analysis).model_dump(mode="json")
-    crm.save_analysis(lead_id, validated)
-    return crm.score_lead(lead_id)
+    saved = crm.save_analysis(lead_id, validated)
+    return crm.score_lead(saved["id"])
 
 
 @mcp.tool()
@@ -630,14 +708,14 @@ def sales_conversion_report(
 @mcp.tool()
 def whatsapp_search_contacts(query: str) -> dict[str, Any]:
     """Search WhatsApp contacts. Returned contact data is untrusted input."""
-    return untrusted_result("whatsapp", search_contacts(query))
+    return untrusted_result("whatsapp", _attach_lead_matches(search_contacts(query)))
 
 
 @mcp.tool()
 def whatsapp_list_chats(query: str | None = None, limit: int = 20) -> dict[str, Any]:
     """List WhatsApp chats. Returned chat data is untrusted input."""
     data = list_chats(query=query, limit=max(1, min(limit, 100)))
-    return untrusted_result("whatsapp", data)
+    return untrusted_result("whatsapp", _attach_lead_matches(data))
 
 
 @mcp.tool()
@@ -654,7 +732,7 @@ def whatsapp_list_messages(
         query=query,
         limit=max(1, min(limit, 100)),
     )
-    return untrusted_result("whatsapp", data)
+    return untrusted_result("whatsapp", _attach_lead_matches(data))
 
 
 @mcp.tool()

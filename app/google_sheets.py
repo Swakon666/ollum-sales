@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .crm import SalesCRM
+from .data_quality import retry_call
 
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 
@@ -95,6 +96,8 @@ class GoogleSheetsSync:
         spreadsheet_id: str | None,
         service_account_file: str | None,
         service_factory: Callable[[], Any] | None = None,
+        retry_attempts: int = 3,
+        retry_base_delay_seconds: float = 0.5,
     ) -> None:
         self.crm = crm
         self.enabled = bool(enabled)
@@ -104,6 +107,19 @@ class GoogleSheetsSync:
         )
         self._service_factory = service_factory
         self._service: Any | None = None
+        self.retry_attempts = max(1, min(int(retry_attempts), 5))
+        self.retry_base_delay_seconds = max(0.0, float(retry_base_delay_seconds))
+        self._retry_count = 0
+
+    def _execute(self, request: Any, *, attempts: int | None = None) -> Any:
+        return retry_call(
+            request.execute,
+            attempts=attempts or self.retry_attempts,
+            base_delay_seconds=self.retry_base_delay_seconds,
+            on_retry=lambda _attempt, _exc: setattr(
+                self, "_retry_count", self._retry_count + 1
+            ),
+        )
 
     @property
     def configured(self) -> bool:
@@ -191,12 +207,12 @@ class GoogleSheetsSync:
         return actions
 
     def _get_values(self, service: Any, range_name: str) -> list[list[Any]]:
-        result = (
+        request = (
             service.spreadsheets()
             .values()
             .get(spreadsheetId=self.spreadsheet_id, range=range_name)
-            .execute()
         )
+        result = self._execute(request)
         return result.get("values", [])
 
     def _pull_actions(self, service: Any) -> dict[str, Any]:
@@ -443,39 +459,51 @@ class GoogleSheetsSync:
         }
 
     def _ensure_tabs(self, service: Any) -> tuple[dict[str, int], list[int]]:
-        metadata = (
-            service.spreadsheets()
-            .get(
+        def load_sheet_ids() -> dict[str, int]:
+            request = service.spreadsheets().get(
                 spreadsheetId=self.spreadsheet_id,
                 fields="sheets.properties(sheetId,title)",
             )
-            .execute()
-        )
-        sheet_ids = {
-            sheet["properties"]["title"]: sheet["properties"]["sheetId"]
-            for sheet in metadata.get("sheets", [])
-        }
+            metadata = self._execute(request)
+            return {
+                sheet["properties"]["title"]: sheet["properties"]["sheetId"]
+                for sheet in metadata.get("sheets", [])
+            }
+
+        sheet_ids = load_sheet_ids()
         missing = [name for name in self.tab_names if name not in sheet_ids]
         created_ids: list[int] = []
         if missing:
-            response = (
-                service.spreadsheets()
-                .batchUpdate(
+
+            def add_tabs(names: list[str]) -> Any:
+                request = service.spreadsheets().batchUpdate(
                     spreadsheetId=self.spreadsheet_id,
                     body={
                         "requests": [
                             {"addSheet": {"properties": {"title": name}}}
-                            for name in missing
+                            for name in names
                         ]
                     },
                 )
-                .execute()
-            )
-            for reply in response.get("replies", []):
-                properties = reply.get("addSheet", {}).get("properties", {})
-                if properties:
-                    sheet_ids[properties["title"]] = properties["sheetId"]
-                    created_ids.append(properties["sheetId"])
+                return self._execute(request, attempts=1)
+
+            try:
+                add_tabs(missing)
+            except Exception:
+                self._retry_count += 1
+                refreshed = load_sheet_ids()
+                remaining = [name for name in missing if name not in refreshed]
+                if remaining:
+                    try:
+                        add_tabs(remaining)
+                    except Exception:  # noqa: BLE001 - provider errors vary by transport
+                        self._retry_count += 1
+                sheet_ids = load_sheet_ids()
+                if any(name not in sheet_ids for name in missing):
+                    raise
+            else:
+                sheet_ids = load_sheet_ids()
+            created_ids = [sheet_ids[name] for name in missing]
         return sheet_ids, created_ids
 
     def _format_new_tabs(
@@ -570,9 +598,10 @@ class GoogleSheetsSync:
                         }
                     }
                 )
-        service.spreadsheets().batchUpdate(
+        request = service.spreadsheets().batchUpdate(
             spreadsheetId=self.spreadsheet_id, body={"requests": requests}
-        ).execute()
+        )
+        self._execute(request)
 
     def sync(self) -> dict[str, Any]:
         if not self.configured:
@@ -585,18 +614,20 @@ class GoogleSheetsSync:
                 ),
                 "status": self.status(),
             }
+        self._retry_count = 0
+        self.crm.record_google_sheets_sync(status="running", details={"retry_count": 0})
         try:
             service = self._build_service()
             sheet_ids, created_ids = self._ensure_tabs(service)
             actions = self._pull_actions(service)
             snapshot = self._snapshot()
             ranges = [f"'{name}'!A:Z" for name in self.tab_names]
-            (
+            clear_request = (
                 service.spreadsheets()
                 .values()
                 .batchClear(spreadsheetId=self.spreadsheet_id, body={"ranges": ranges})
-                .execute()
             )
+            self._execute(clear_request)
             body = {
                 "valueInputOption": "RAW",
                 "data": [
@@ -604,12 +635,12 @@ class GoogleSheetsSync:
                     for name, values in snapshot.items()
                 ],
             }
-            result = (
+            update_request = (
                 service.spreadsheets()
                 .values()
                 .batchUpdate(spreadsheetId=self.spreadsheet_id, body=body)
-                .execute()
             )
+            result = self._execute(update_request)
             self._format_new_tabs(service, sheet_ids, created_ids)
             details = {
                 "tabs": {
@@ -617,11 +648,14 @@ class GoogleSheetsSync:
                 },
                 "updated_cells": result.get("totalUpdatedCells", 0),
                 "actions": actions,
+                "retry_count": self._retry_count,
             }
             self.crm.record_google_sheets_sync(status="success", details=details)
             return {"success": True, **details}
         except Exception as exc:
             self.crm.record_google_sheets_sync(
-                status="failed", details={}, error=str(exc)[:1000]
+                status="failed",
+                details={"retry_count": self._retry_count},
+                error=str(exc)[:1000],
             )
             raise

@@ -40,6 +40,11 @@ jobs:
       - name: Run Python tests
         run: python -m pytest -q tests
 
+      - name: Check Python formatting and lint
+        run: |
+          python -m ruff format --check app tests
+          python -m ruff check app tests
+
   whatsapp-go:
     name: WhatsApp Go tests
     runs-on: ubuntu-latest

@@ -40,6 +40,11 @@ class Settings:
     website_inspection_timeout: int = int(
         os.getenv("OLLUM_WEBSITE_INSPECTION_TIMEOUT", "20")
     )
+    evidence_ttl_hours: int = int(os.getenv("OLLUM_EVIDENCE_TTL_HOURS", "168"))
+    retry_attempts: int = int(os.getenv("OLLUM_RETRY_ATTEMPTS", "3"))
+    retry_base_delay_seconds: float = float(
+        os.getenv("OLLUM_RETRY_BASE_DELAY_SECONDS", "0.5")
+    )
     whatsapp_db_path: str = os.getenv("WHATSAPP_MESSAGES_DB_PATH", str(DEFAULT_WA_DB))
     whatsapp_api_base_url: str = os.getenv(
         "WHATSAPP_API_BASE_URL", "http://localhost:8080/api"

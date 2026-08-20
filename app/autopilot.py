@@ -6,15 +6,19 @@ from typing import Any, Protocol
 from .candidate_quality import assess_company_candidate
 from .company_search import search_company_websites
 from .crm import SalesCRM
+from .data_quality import candidate_phones, retry_call
 from .google_sheets import GoogleSheetsSync
 from .website_inspector import inspect_website
-from .whatsapp_service import send_message
+from .whatsapp_service import normalize_recipient, send_message
 
 
 class SettingsLike(Protocol):
     serper_api_key: str | None
     company_search_timeout: int
     website_inspection_timeout: int
+    evidence_ttl_hours: int
+    retry_attempts: int
+    retry_base_delay_seconds: float
     autopilot_default_mode: str
     autopilot_interval_minutes: int
     autopilot_max_verticals_per_cycle: int
@@ -318,10 +322,23 @@ class AutopilotService:
     def _recipient(lead: dict[str, Any]) -> str | None:
         contacts = lead.get("contacts") or {}
         candidates = [
+            *(contacts.get("messengers") or []),
             *(contacts.get("phones") or []),
             *(contacts.get("emails") or []),
         ]
-        return str(candidates[0]).strip() if candidates else None
+        for candidate in candidates:
+            value = str(candidate).strip()
+            if not value:
+                continue
+            if "@" in value and not value.endswith(
+                ("@s.whatsapp.net", "@g.us", "@lid")
+            ):
+                return value
+            try:
+                return normalize_recipient(value)
+            except ValueError:
+                continue
+        return None
 
     def _create_draft_if_needed(
         self, lead: dict[str, Any], *, threshold: int
@@ -422,9 +439,11 @@ class AutopilotService:
         state = self.crm.get_autopilot_state()
         metrics: dict[str, Any] = {
             "campaigns_created": 0,
+            "campaigns_reused": 0,
             "candidates_seen": 0,
             "candidates_rejected": 0,
             "duplicates_skipped": 0,
+            "stale_evidence_refreshed": 0,
             "rejection_reasons": {},
             "leads_found": 0,
             "analyzed": 0,
@@ -433,7 +452,21 @@ class AutopilotService:
             "due_followups": 0,
             "send_requests": {},
             "vertical_errors": [],
+            "retry_count": 0,
         }
+
+        def with_retry(operation: Any) -> Any:
+            return retry_call(
+                operation,
+                attempts=int(getattr(self.settings, "retry_attempts", 3)),
+                base_delay_seconds=float(
+                    getattr(self.settings, "retry_base_delay_seconds", 0.5)
+                ),
+                on_retry=lambda _attempt, _exc: metrics.__setitem__(
+                    "retry_count", int(metrics["retry_count"]) + 1
+                ),
+            )
+
         try:
             verticals = self._select_verticals(int(state["max_verticals_per_cycle"]))
             self.crm.set_cycle_verticals(
@@ -443,7 +476,7 @@ class AutopilotService:
                 target_count = min(
                     int(vertical["daily_target"]), int(state["leads_per_vertical"])
                 )
-                campaign = self.crm.create_campaign(
+                campaign, campaign_created = self.crm.get_or_create_campaign(
                     f"Autopilot — {vertical['name']} — {datetime.now(UTC).date().isoformat()}",
                     industry=vertical["name"],
                     location=vertical["region"],
@@ -456,15 +489,22 @@ class AutopilotService:
                     campaign_id=campaign["id"],
                     vertical_id=vertical["id"],
                 )
-                metrics["campaigns_created"] += 1
+                metric_key = (
+                    "campaigns_created" if campaign_created else "campaigns_reused"
+                )
+                metrics[metric_key] += 1
                 try:
-                    discovery = self.discoverer(
-                        vertical["name"],
-                        vertical["region"],
-                        limit=min(50, max(target_count, target_count * 4)),
-                        extra_query=vertical.get("search_query"),
-                        serper_api_key=self.settings.serper_api_key,
-                        timeout=self.settings.company_search_timeout,
+                    discovery = with_retry(
+                        lambda vertical=vertical, target_count=target_count: (
+                            self.discoverer(
+                                vertical["name"],
+                                vertical["region"],
+                                limit=min(50, max(target_count, target_count * 4)),
+                                extra_query=vertical.get("search_query"),
+                                serper_api_key=self.settings.serper_api_key,
+                                timeout=self.settings.company_search_timeout,
+                            )
+                        )
                     )
                     leads: list[tuple[dict[str, Any], dict[str, Any]]] = []
                     for index, result in enumerate(
@@ -474,12 +514,26 @@ class AutopilotService:
                             break
                         metrics["candidates_seen"] += 1
                         try:
-                            if self.crm.find_lead_by_website_url(result["website_url"]):
-                                metrics["duplicates_skipped"] += 1
-                                continue
-                            snapshot = self.inspector(
-                                result["website_url"],
-                                timeout=self.settings.website_inspection_timeout,
+                            phones = candidate_phones(result)
+                            existing = self.crm.find_duplicate_lead(
+                                company_name=str(result.get("company_name") or ""),
+                                website_url=result["website_url"],
+                                phones=phones,
+                                location=vertical["region"],
+                            )
+                            if existing:
+                                previous_evidence = self.crm.get_inspection(
+                                    existing["id"], allow_stale=True
+                                )
+                                if not previous_evidence or previous_evidence["fresh"]:
+                                    metrics["duplicates_skipped"] += 1
+                                    continue
+                                metrics["stale_evidence_refreshed"] += 1
+                            snapshot = with_retry(
+                                lambda result=result: self.inspector(
+                                    result["website_url"],
+                                    timeout=self.settings.website_inspection_timeout,
+                                )
                             )
                             assessment = assess_company_candidate(result, snapshot)
                             if not assessment["accepted"]:
@@ -498,6 +552,14 @@ class AutopilotService:
                                 source=f"autopilot:{discovery.get('provider', 'search')}",
                                 campaign_id=campaign["id"],
                                 source_rank=index,
+                                phones=phones,
+                            )
+                            self.crm.save_inspection(
+                                lead["id"],
+                                snapshot,
+                                ttl_hours=int(
+                                    getattr(self.settings, "evidence_ttl_hours", 168)
+                                ),
                             )
                             leads.append((lead, snapshot))
                         except Exception as exc:  # noqa: BLE001 - isolate candidate failure
@@ -525,9 +587,9 @@ class AutopilotService:
                     for lead, snapshot in leads:
                         try:
                             analysis = grounded_analysis(lead, snapshot)
-                            self.crm.save_analysis(lead["id"], analysis)
+                            saved = self.crm.save_analysis(lead["id"], analysis)
                             scored = self.crm.score_lead(
-                                lead["id"],
+                                saved["id"],
                                 rationale=analysis["score_reason"],
                                 qualify_at=threshold,
                             )

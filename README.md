@@ -246,6 +246,24 @@ disabled:
 sudo bash deploy/verify_whatsapp_persistence.sh <deploy-user>
 ```
 
+## Data quality and retries
+
+Lead imports and Autopilot use deterministic company identity keys:
+
+- website host independent of `http`/`https`, path, and a leading `www.`;
+- normalized public phone numbers;
+- an exact normalized company name, with legal-form noise removed, plus a matching location.
+
+WhatsApp user JIDs are normalized before matching. Technical records such as
+`0@s.whatsapp.net`, status/broadcast chats, and newsletter entries are excluded from contact and
+chat results and cannot be used as recipients.
+
+Website evidence is cached for `OLLUM_EVIDENCE_TTL_HOURS` (seven days by default). Saving a
+Codex fallback analysis requires fresh stored evidence; expired evidence must be inspected again.
+Transient discovery, inspection, and Google Sheets requests use bounded exponential retries
+configured by `OLLUM_RETRY_ATTEMPTS` and `OLLUM_RETRY_BASE_DELAY_SECONDS`. Autopilot reuses the
+same vertical/day campaign and recovers expired cycle locks instead of leaving a cycle running.
+
 Autopilot adds the same two-step boundary to Google Sheets: `APPROVE` and `SEND` are separate, and
 the SAFE worker ignores send requests.
 

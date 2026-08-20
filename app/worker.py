@@ -29,6 +29,8 @@ def create_service() -> AutopilotService:
         enabled=settings.google_sheets_enabled,
         spreadsheet_id=settings.google_sheets_spreadsheet_id,
         service_account_file=settings.google_service_account_file,
+        retry_attempts=settings.retry_attempts,
+        retry_base_delay_seconds=settings.retry_base_delay_seconds,
     )
     return AutopilotService(crm, settings, sheets)
 

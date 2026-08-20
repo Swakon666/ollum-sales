@@ -65,3 +65,33 @@ class TestWhatsAppService(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["send_enabled"])
         self.assertEqual(result["error"], "ConnectionError")
+
+    def test_contacts_are_normalized_and_technical_jids_are_filtered(self) -> None:
+        contacts = [
+            {
+                "jid": "79990000000:17@s.whatsapp.net",
+                "phone_number": "79990000000:17",
+                "name": "Customer",
+            },
+            {"jid": "0@s.whatsapp.net", "phone_number": "0", "name": "System"},
+            {"jid": "status@broadcast", "phone_number": "status", "name": None},
+        ]
+        with patch.object(
+            whatsapp_service.wa, "search_contacts", return_value=contacts
+        ):
+            result = whatsapp_service.search_contacts("customer")
+
+        self.assertEqual(
+            result,
+            [
+                {
+                    "jid": "79990000000@s.whatsapp.net",
+                    "phone_number": "79990000000",
+                    "name": "Customer",
+                }
+            ],
+        )
+
+    def test_technical_recipient_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "Technical WhatsApp JIDs"):
+            whatsapp_service.normalize_recipient("0@s.whatsapp.net")
