@@ -1,9 +1,9 @@
 # Ollum Sales production deployment
 
 Production is deployed by `.github/workflows/deploy.yml`. The workflow supports a read-only
-preflight, deployment, one-step rollback, and an explicit SAFE Autopilot verification. A push to
-`main` deploys automatically; a manual run defaults to preflight so an operator cannot accidentally
-change production.
+preflight, deployment, one-step rollback, and an explicit SAFE Autopilot verification. Every
+production operation requires a manual workflow dispatch; merging or pushing to `main` never changes
+production. A manual run defaults to preflight so an operator cannot accidentally deploy.
 
 Production jobs run on the dedicated repository runner labelled `ollum-sales-production`. The
 runner is installed as a separate system service under the deployment user and connects outbound to
@@ -76,17 +76,15 @@ Header: Authorization: Bearer <OLLUM_MCP_BEARER_TOKEN>
 
 ## Deployment
 
-Automatic deployment runs after a push to `main`.
-
-For a manual operation:
+Merging or pushing to `main` does not deploy. Every production operation is manual:
 
 1. Open **Actions → Production deployment → Run workflow**.
 2. Choose `preflight` to inspect the server without changing it.
 3. Choose `deploy` to deploy the selected Git ref.
 4. After deployment, choose `verify-autopilot` once. It stops only the Ollum Sales worker, starts
-   Autopilot in SAFE mode at a 45-minute interval, exercises Google Sheets APPROVE/SEND with a
-   non-deliverable verification draft, runs one cycle, restarts the worker, and checks persistence.
-   Both send flags remain disabled and no message is sent.
+   Autopilot in SAFE mode at a 45-minute interval, verifies that pending send requests remain
+   untouched, runs one cycle, restarts the worker, and checks persistence. Both send flags remain
+   disabled and no draft is approved or sent by the verification.
 
 The deployment performs these operations:
 
@@ -198,7 +196,7 @@ sudo docker compose restart ollum-sales-mcp
 sudo docker compose restart whatsapp-bridge
 ```
 
-For an update, push the reviewed commit to `main` or manually run the workflow in `deploy` mode.
+For an update, merge the reviewed commit, then separately run the workflow in `deploy` mode.
 Do not run `docker compose down --volumes`; that would remove persistent WhatsApp and CRM state.
 
 ## Rollback

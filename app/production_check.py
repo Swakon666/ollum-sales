@@ -81,79 +81,20 @@ def _cycle_sheet_rows(crm: SalesCRM, cycle_id: str) -> dict[str, list[dict[str, 
     return {"CAMPAIGNS": campaigns, "LEADS": leads, "OUTREACH": outreach}
 
 
-def _verify_sheet_actions(
-    crm: SalesCRM, sheets: GoogleSheetsSync, autopilot: AutopilotService
+def _verify_safe_send_guardrail(
+    crm: SalesCRM, autopilot: AutopilotService
 ) -> dict[str, Any]:
-    lead = crm.upsert_lead(
-        "Ollum Autopilot SAFE Sync Check",
-        "https://safe-sync-check.invalid/",
-        industry="Production verification",
-        location="Moscow",
-        source="production-safe-check",
-    )
-    draft = crm.save_outreach_draft(
-        lead["id"],
-        channel="whatsapp",
-        recipient="+70000000000",
-        message="SAFE sync verification only. This message must never be sent.",
-    )
-    sheets.sync()
-    service = sheets._build_service()
-    rows = sheets._get_values(service, "OUTREACH!A1:K")
-    row_number = next(
-        (
-            index
-            for index, row in enumerate(rows, start=1)
-            if row and row[0] == draft["id"]
-        ),
-        None,
-    )
-    if row_number is None:
-        raise RuntimeError("SAFE verification draft was not written to OUTREACH")
-    (
-        service.spreadsheets()
-        .values()
-        .update(
-            spreadsheetId=sheets.spreadsheet_id,
-            range=f"OUTREACH!I{row_number}:J{row_number}",
-            valueInputOption="RAW",
-            body={"values": [["YES", "YES"]]},
-        )
-        .execute()
-    )
-    imported = sheets.sync()
-    actions = imported["actions"]
-    if draft["id"] not in actions["approved_draft_ids"]:
-        raise RuntimeError("APPROVE was not imported from OUTREACH")
-    if draft["id"] not in actions["send_requested_draft_ids"]:
-        raise RuntimeError("SEND was not imported from OUTREACH")
-
+    pending_before = crm.list_pending_send_requests(limit=200)
     blocked = autopilot._process_send_requests(mode="safe")
-    if not blocked["blocked"] or blocked["sent"] != 0:
-        raise RuntimeError("SAFE did not block the imported SEND action")
-    request = next(
-        (
-            item
-            for item in crm.list_pending_send_requests(limit=200)
-            if item["draft_id"] == draft["id"]
-        ),
-        None,
-    )
-    if request is None:
-        raise RuntimeError("imported SEND action did not create a pending request")
-    completed = crm.complete_send_request(
-        request["id"],
-        success=False,
-        error="SAFE production verification: deliberately not sent",
-    )
-    sheets.sync()
+    pending_after = crm.list_pending_send_requests(limit=200)
+    if not blocked["blocked"] or blocked["sent"] != 0 or blocked["failed"] != 0:
+        raise RuntimeError("SAFE did not block send-request processing")
+    if pending_after != pending_before:
+        raise RuntimeError("SAFE send guardrail mutated pending send requests")
     return {
-        "lead_row": {"id": lead["id"], "company_name": lead["company_name"]},
-        "outreach_row": {"id": draft["id"], "status": "approved"},
-        "approve_imported": True,
-        "send_imported": True,
+        "pending_requests": len(pending_before),
         "send_execution": blocked,
-        "request_final_status": completed["status"],
+        "pending_requests_unchanged": True,
     }
 
 
@@ -170,7 +111,7 @@ def run_check() -> dict[str, Any]:
     if not started["success"]:
         raise RuntimeError("could not start Autopilot in SAFE mode")
     initial_sync = sheets.sync()
-    action_check = _verify_sheet_actions(crm, sheets, autopilot)
+    send_guardrail_check = _verify_safe_send_guardrail(crm, autopilot)
     cycle_result = autopilot.run_cycle(force=True)
     if not cycle_result.get("success"):
         raise RuntimeError(f"SAFE cycle failed: {cycle_result}")
@@ -212,7 +153,7 @@ def run_check() -> dict[str, Any]:
         "sheet_rows_before_cycle": initial_sync["tabs"],
         "sheet_rows_after_cycle": _sheet_row_counts(sheets),
         "sheet_rows_from_cycle": _cycle_sheet_rows(crm, cycle["id"]),
-        "approve_send_sync_check": action_check,
+        "safe_send_guardrail_check": send_guardrail_check,
         "rotation": rotation,
         "autopilot": state,
     }

@@ -1,9 +1,6 @@
 name: Production deployment
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       mode:
@@ -76,10 +73,9 @@ concurrency:
 
 jobs:
   production:
-    name: ${{ github.event_name == 'push' && 'Deploy' || inputs.mode }} production
+    name: ${{ inputs.mode }} production
     runs-on: >-
       ${{ fromJSON(
-          github.event_name == 'workflow_dispatch' &&
           (inputs.mode == 'diagnose-space' || inputs.mode == 'recover-space') &&
           '["ubuntu-latest"]' ||
           '["self-hosted","linux","x64","ollum-sales-production"]'
@@ -87,7 +83,7 @@ jobs:
     timeout-minutes: 45
     environment: production
     env:
-      DEPLOY_MODE: ${{ github.event_name == 'push' && 'deploy' || inputs.mode }}
+      DEPLOY_MODE: ${{ inputs.mode }}
       SSH_HOST: ${{ secrets.OLLUM_SSH_HOST }}
       SSH_PORT: ${{ secrets.OLLUM_SSH_PORT }}
       SSH_USER: ${{ secrets.OLLUM_SSH_USER }}
@@ -641,14 +637,12 @@ jobs:
     name: Verify public production endpoints
     needs: production
     if: >-
-      ${{ github.event_name == 'push' ||
-          (github.event_name == 'workflow_dispatch' &&
-           (inputs.mode == 'deploy' || inputs.mode == 'deploy-prebuilt' || inputs.mode == 'rollback')) }}
+      ${{ inputs.mode == 'deploy' || inputs.mode == 'deploy-prebuilt' || inputs.mode == 'rollback' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     environment: production
     env:
-      DEPLOY_MODE: ${{ github.event_name == 'push' && 'deploy' || inputs.mode }}
+      DEPLOY_MODE: ${{ inputs.mode }}
       OLLUM_DOMAIN: ${{ secrets.OLLUM_DOMAIN }}
       MCP_BEARER_TOKEN: ${{ secrets.OLLUM_MCP_BEARER_TOKEN }}
 
