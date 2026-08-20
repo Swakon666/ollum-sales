@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -19,8 +20,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-
-	"bytes"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -193,6 +192,17 @@ func extractTextContent(msg *waProto.Message) string {
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+// BridgeStatusResponse reports bridge readiness without exposing session secrets.
+type BridgeStatusResponse struct {
+	Status        string `json:"status"`
+	Ready         bool   `json:"ready"`
+	Connected     bool   `json:"connected"`
+	LoggedIn      bool   `json:"logged_in"`
+	SendEnabled   bool   `json:"send_enabled"`
+	AccountJID    string `json:"account_jid,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -369,6 +379,105 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
+}
+
+func whatsappSendEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("OLLUM_ALLOW_WHATSAPP_SEND")), "true")
+}
+
+func currentBridgeStatus(client *whatsmeow.Client, startedAt time.Time) BridgeStatusResponse {
+	connected := client.IsConnected()
+	loggedIn := client.IsLoggedIn()
+	ready := connected && loggedIn
+	status := "not_ready"
+	if ready {
+		status = "ready"
+	}
+
+	accountJID := ""
+	if client.Store != nil && client.Store.ID != nil {
+		accountJID = client.Store.ID.String()
+	}
+
+	uptimeSeconds := int64(time.Since(startedAt).Seconds())
+	if uptimeSeconds < 0 {
+		uptimeSeconds = 0
+	}
+
+	return BridgeStatusResponse{
+		Status:        status,
+		Ready:         ready,
+		Connected:     connected,
+		LoggedIn:      loggedIn,
+		SendEnabled:   whatsappSendEnabled(),
+		AccountJID:    accountJID,
+		UptimeSeconds: uptimeSeconds,
+	}
+}
+
+type bridgeStatusProvider func() BridgeStatusResponse
+
+func bridgeStatusHandler(provider bridgeStatusProvider, requireReady bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		status := provider()
+		w.Header().Set("Content-Type", "application/json")
+		if requireReady && !status.Ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			fmt.Printf("Failed to encode bridge status: %v\n", err)
+		}
+	}
+}
+
+func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if !sendEnabled {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "WhatsApp sending is disabled by bridge policy",
+			})
+			return
+		}
+
+		var req SendMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if req.Message == "" && req.MediaPath == "" {
+			http.Error(w, "Message or media path is required", http.StatusBadRequest)
+			return
+		}
+
+		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		fmt.Println("Message sent", success, message)
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	}
 }
 
 // Extract media info from a message
@@ -641,7 +750,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	}
 
 	// Download the media using whatsmeow client
-	mediaData, err := client.Download(downloader)
+	mediaData, err := client.Download(context.Background(), downloader)
 	if err != nil {
 		return false, "", "", "", fmt.Errorf("failed to download media: %v", err)
 	}
@@ -677,54 +786,17 @@ func extractDirectPathFromURL(url string) string {
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
-	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req SendMessageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.Recipient == "" {
-			http.Error(w, "Recipient is required", http.StatusBadRequest)
-			return
-		}
-
-		if req.Message == "" && req.MediaPath == "" {
-			http.Error(w, "Message or media path is required", http.StatusBadRequest)
-			return
-		}
-
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
-
-		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
-		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
-
-		// Set appropriate status code
-		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-
-		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
-		})
-	})
+	serverStartedAt := time.Now()
+	statusProvider := func() BridgeStatusResponse {
+		return currentBridgeStatus(client, serverStartedAt)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", bridgeStatusHandler(statusProvider, false))
+	mux.HandleFunc("/api/status", bridgeStatusHandler(statusProvider, true))
+	mux.HandleFunc("/api/send", sendMessageHandler(client, whatsappSendEnabled()))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -780,7 +852,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.ListenAndServe(serverAddr, mux); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()
@@ -800,14 +872,14 @@ func main() {
 		return
 	}
 
-	container, err := sqlstore.New("sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
+	container, err := sqlstore.New(context.Background(), "sqlite3", "file:store/whatsapp.db?_foreign_keys=on", dbLog)
 	if err != nil {
 		logger.Errorf("Failed to connect to database: %v", err)
 		return
 	}
 
 	// Get device store - This contains session information
-	deviceStore, err := container.GetFirstDevice()
+	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		if err == sql.ErrNoRows {
 			// No device exists, create one
@@ -824,6 +896,13 @@ func main() {
 	if client == nil {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
+	}
+	if proxyAddress := strings.TrimSpace(os.Getenv("WHATSAPP_PROXY_URL")); proxyAddress != "" {
+		if err := client.SetProxyAddress(proxyAddress); err != nil {
+			logger.Errorf("Failed to configure WhatsApp proxy: %v", err)
+			return
+		}
+		logger.Infof("WhatsApp proxy configured")
 	}
 
 	// Initialize message store
@@ -853,38 +932,79 @@ func main() {
 		}
 	})
 
-	// Create channel to track connection success
-	connected := make(chan bool, 1)
-
 	// Connect to WhatsApp
 	if client.Store.ID == nil {
-		// No ID stored, this is a new client, need to pair with phone
-		qrChan, _ := client.GetQRChannel(context.Background())
-		err = client.Connect()
-		if err != nil {
-			logger.Errorf("Failed to connect: %v", err)
-			return
+		pairingTimeout := 10 * time.Minute
+		if rawTimeout := strings.TrimSpace(os.Getenv("WHATSAPP_PAIRING_TIMEOUT")); rawTimeout != "" {
+			parsedTimeout, parseErr := time.ParseDuration(rawTimeout)
+			if parseErr != nil || parsedTimeout < 3*time.Minute || parsedTimeout > 30*time.Minute {
+				logger.Errorf("WHATSAPP_PAIRING_TIMEOUT must be a duration between 3m and 30m")
+				return
+			}
+			pairingTimeout = parsedTimeout
 		}
 
-		// Print QR code for pairing with phone
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				fmt.Println("\nScan this QR code with your WhatsApp app:")
-				qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-			} else if evt.Event == "success" {
-				connected <- true
+		pairingContext, cancelPairing := context.WithTimeout(context.Background(), pairingTimeout)
+		defer cancelPairing()
+
+		paired := false
+		for !paired {
+			// Whatsmeow emits a finite batch of rotating QR codes. When that batch
+			// expires, reconnect and request a fresh batch until our operator window
+			// closes. This keeps pairing interactive without restarting other services.
+			qrChan, qrErr := client.GetQRChannel(pairingContext)
+			if qrErr != nil {
+				logger.Errorf("Failed to initialize QR pairing: %v", qrErr)
+				return
+			}
+
+			err = client.Connect()
+			if err != nil {
+				logger.Errorf("Failed to connect: %v", err)
+				return
+			}
+
+			retryWithFreshBatch := false
+			for evt := range qrChan {
+				switch evt.Event {
+				case "code":
+					fmt.Println("\nScan this QR code with your WhatsApp app:")
+					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+				case "success":
+					paired = true
+				case "timeout":
+					retryWithFreshBatch = true
+					logger.Infof("QR batch expired; requesting a fresh batch")
+				case "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
+					logger.Errorf("QR pairing failed: %s", evt.Event)
+					return
+				default:
+					logger.Infof("QR pairing event: %s", evt.Event)
+				}
+			}
+
+			if paired {
 				break
+			}
+			if pairingContext.Err() != nil {
+				logger.Errorf("Timeout waiting for QR code scan")
+				return
+			}
+			if !retryWithFreshBatch {
+				logger.Errorf("QR pairing channel closed without a terminal result")
+				return
+			}
+
+			client.Disconnect()
+			select {
+			case <-time.After(2 * time.Second):
+			case <-pairingContext.Done():
+				logger.Errorf("Timeout waiting for QR code scan")
+				return
 			}
 		}
 
-		// Wait for connection
-		select {
-		case <-connected:
-			fmt.Println("\nSuccessfully connected and authenticated!")
-		case <-time.After(3 * time.Minute):
-			logger.Errorf("Timeout waiting for QR code scan")
-			return
-		}
+		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
 		// Already logged in, just connect
 		err = client.Connect()
@@ -892,7 +1012,6 @@ func main() {
 			logger.Errorf("Failed to connect: %v", err)
 			return
 		}
-		connected <- true
 	}
 
 	// Wait a moment for connection to stabilize
@@ -973,7 +1092,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 		// If we didn't get a name, try group info
 		if name == "" {
-			groupInfo, err := client.GetGroupInfo(jid)
+			groupInfo, err := client.GetGroupInfo(context.Background(), jid)
 			if err == nil && groupInfo.Name != "" {
 				name = groupInfo.Name
 			} else {
@@ -988,7 +1107,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 		logger.Infof("Getting name for contact: %s", chatJID)
 
 		// Just use contact info (full name)
-		contact, err := client.Store.Contacts.GetContact(jid)
+		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
 		if err == nil && contact.FullName != "" {
 			name = contact.FullName
 		} else if sender != "" {

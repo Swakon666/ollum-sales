@@ -40,6 +40,11 @@ class Settings:
     website_inspection_timeout: int = int(
         os.getenv("OLLUM_WEBSITE_INSPECTION_TIMEOUT", "20")
     )
+    evidence_ttl_hours: int = int(os.getenv("OLLUM_EVIDENCE_TTL_HOURS", "168"))
+    retry_attempts: int = int(os.getenv("OLLUM_RETRY_ATTEMPTS", "3"))
+    retry_base_delay_seconds: float = float(
+        os.getenv("OLLUM_RETRY_BASE_DELAY_SECONDS", "0.5")
+    )
     whatsapp_db_path: str = os.getenv("WHATSAPP_MESSAGES_DB_PATH", str(DEFAULT_WA_DB))
     whatsapp_api_base_url: str = os.getenv(
         "WHATSAPP_API_BASE_URL", "http://localhost:8080/api"
@@ -47,6 +52,34 @@ class Settings:
     allow_whatsapp_send: bool = os.getenv(
         "OLLUM_ALLOW_WHATSAPP_SEND", "false"
     ).lower() in {"1", "true", "yes", "on"}
+    autopilot_default_mode: str = (
+        os.getenv("OLLUM_AUTOPILOT_DEFAULT_MODE", "safe").strip().lower()
+    )
+    autopilot_interval_minutes: int = int(
+        os.getenv("OLLUM_AUTOPILOT_INTERVAL_MINUTES", "60")
+    )
+    autopilot_max_verticals_per_cycle: int = int(
+        os.getenv("OLLUM_AUTOPILOT_MAX_VERTICALS_PER_CYCLE", "2")
+    )
+    autopilot_leads_per_vertical: int = int(
+        os.getenv("OLLUM_AUTOPILOT_LEADS_PER_VERTICAL", "10")
+    )
+    autopilot_score_threshold: int = int(
+        os.getenv("OLLUM_AUTOPILOT_SCORE_THRESHOLD", "65")
+    )
+    autopilot_min_training_leads: int = int(
+        os.getenv("OLLUM_AUTOPILOT_MIN_TRAINING_LEADS", "100")
+    )
+    allow_autopilot_send: bool = os.getenv(
+        "OLLUM_AUTOPILOT_ALLOW_SEND", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+    google_sheets_enabled: bool = os.getenv(
+        "OLLUM_GOOGLE_SHEETS_ENABLED", "false"
+    ).lower() in {"1", "true", "yes", "on"}
+    google_sheets_spreadsheet_id: str | None = os.getenv("OLLUM_GOOGLE_SHEETS_ID")
+    google_service_account_file: str | None = os.getenv(
+        "GOOGLE_SERVICE_ACCOUNT_FILE"
+    ) or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
 
 settings = Settings()

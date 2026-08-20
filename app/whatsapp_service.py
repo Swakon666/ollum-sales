@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 import importlib.util
-import re
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+import requests
+
 from .config import settings
+from .data_quality import (
+    is_technical_whatsapp_jid,
+    normalize_phone,
+    normalize_whatsapp_jid,
+    normalize_whatsapp_records,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UPSTREAM_WHATSAPP_SERVER = (
@@ -46,6 +53,49 @@ def _load_upstream_whatsapp():
 wa = _load_upstream_whatsapp()
 
 
+def bridge_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Return a whitelisted bridge status without exposing session data."""
+    status_url = f"{settings.whatsapp_api_base_url.rstrip('/')}/status"
+    unavailable = {
+        "reachable": False,
+        "ready": False,
+        "connected": False,
+        "logged_in": False,
+        "send_enabled": False,
+    }
+    try:
+        response = requests.get(status_url, timeout=timeout_seconds)
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return {**unavailable, "error": type(exc).__name__}
+
+    if not isinstance(payload, dict):
+        return {**unavailable, "error": "InvalidStatusPayload"}
+
+    account_jid = payload.get("account_jid")
+    if isinstance(account_jid, str):
+        try:
+            account_jid = normalize_whatsapp_jid(account_jid)
+        except ValueError:
+            account_jid = None
+    uptime_seconds = payload.get("uptime_seconds")
+    return {
+        "reachable": True,
+        "http_status": response.status_code,
+        "status": payload.get("status")
+        if isinstance(payload.get("status"), str)
+        else "unknown",
+        "ready": payload.get("ready") is True,
+        "connected": payload.get("connected") is True,
+        "logged_in": payload.get("logged_in") is True,
+        "send_enabled": payload.get("send_enabled") is True,
+        "account_jid": account_jid if isinstance(account_jid, str) else None,
+        "uptime_seconds": uptime_seconds
+        if isinstance(uptime_seconds, int) and not isinstance(uptime_seconds, bool)
+        else None,
+    }
+
+
 def _serialize(value: Any) -> Any:
     if is_dataclass(value):
         return asdict(value)
@@ -59,22 +109,21 @@ def _serialize(value: Any) -> Any:
 
 
 def normalize_recipient(recipient: str) -> str:
-    recipient = recipient.strip()
-    if "@" in recipient:
-        return recipient
-    digits = re.sub(r"\D", "", recipient)
-    if not digits:
-        raise ValueError("Recipient must contain a phone number or a WhatsApp JID")
-    return digits
+    if is_technical_whatsapp_jid(recipient):
+        raise ValueError("Technical WhatsApp JIDs cannot be used as recipients")
+    jid = normalize_whatsapp_jid(recipient)
+    return jid.split("@", 1)[0] if jid.endswith("@s.whatsapp.net") else jid
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
-    return _serialize(wa.search_contacts(query))
+    return normalize_whatsapp_records(_serialize(wa.search_contacts(query)))
 
 
 def list_chats(query: str | None = None, limit: int = 20) -> Any:
-    return _serialize(
-        wa.list_chats(query=query, limit=limit, page=0, include_last_message=True)
+    return normalize_whatsapp_records(
+        _serialize(
+            wa.list_chats(query=query, limit=limit, page=0, include_last_message=True)
+        )
     )
 
 
@@ -84,10 +133,14 @@ def list_messages(
     query: str | None = None,
     limit: int = 20,
 ) -> Any:
-    return _serialize(
+    normalized_phone = normalize_phone(phone) if phone else None
+    normalized_jid = normalize_whatsapp_jid(chat_jid) if chat_jid else None
+    if normalized_jid and is_technical_whatsapp_jid(normalized_jid):
+        raise ValueError("Technical WhatsApp chats are excluded")
+    records = _serialize(
         wa.list_messages(
-            sender_phone_number=phone,
-            chat_jid=chat_jid,
+            sender_phone_number=normalized_phone,
+            chat_jid=normalized_jid,
             query=query,
             limit=limit,
             page=0,
@@ -96,10 +149,22 @@ def list_messages(
             context_after=2,
         )
     )
+    if not isinstance(records, list):
+        return []
+    return [
+        item
+        for item in records
+        if not isinstance(item, dict)
+        or not item.get("chat_jid")
+        or not is_technical_whatsapp_jid(str(item["chat_jid"]))
+    ]
 
 
 def get_last_interaction(jid: str) -> Any:
-    return _serialize(wa.get_last_interaction(jid))
+    normalized = normalize_whatsapp_jid(jid)
+    if is_technical_whatsapp_jid(normalized):
+        raise ValueError("Technical WhatsApp chats are excluded")
+    return _serialize(wa.get_last_interaction(normalized))
 
 
 def send_message(recipient: str, message: str) -> dict[str, Any]:

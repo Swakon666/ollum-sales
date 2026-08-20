@@ -1,8 +1,9 @@
 # Ollum Sales production deployment
 
 Production is deployed by `.github/workflows/deploy.yml`. The workflow supports a read-only
-preflight, deployment, and one-step rollback. A push to `main` deploys automatically; a manual run
-defaults to preflight so an operator cannot accidentally change production.
+preflight, deployment, one-step rollback, and an explicit SAFE Autopilot verification. Every
+production operation requires a manual workflow dispatch; merging or pushing to `main` never changes
+production. A manual run defaults to preflight so an operator cannot accidentally deploy.
 
 Production jobs run on the dedicated repository runner labelled `ollum-sales-production`. The
 runner is installed as a separate system service under the deployment user and connects outbound to
@@ -55,7 +56,11 @@ Configure these repository secrets under **Settings → Secrets and variables �
 | `LLM_API_KEY` | optional | Generic provider credential override |
 | `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
 | `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
-| `OLLUM_ALLOW_WHATSAPP_SEND` | optional | Defaults to `false`; set exactly `true` to permit sends |
+| `OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON` | yes for v0.4 | Complete Google service-account JSON; transferred as a mode-`0600` file and never written to `.env` |
+
+Configure the non-sensitive repository variable `OLLUM_GOOGLE_SHEETS_ID` with the target
+spreadsheet ID. Production deployment forces both `OLLUM_ALLOW_WHATSAPP_SEND=false` and
+`OLLUM_AUTOPILOT_ALLOW_SEND=false`; changing a repository secret cannot enable sends.
 
 Never commit or print any of these values. The workflow passes the SSH password through `sshpass`
 environment input and streams the sudo password over SSH. The generated production `.env` is copied
@@ -71,13 +76,15 @@ Header: Authorization: Bearer <OLLUM_MCP_BEARER_TOKEN>
 
 ## Deployment
 
-Automatic deployment runs after a push to `main`.
-
-For a manual operation:
+Merging or pushing to `main` does not deploy. Every production operation is manual:
 
 1. Open **Actions → Production deployment → Run workflow**.
 2. Choose `preflight` to inspect the server without changing it.
 3. Choose `deploy` to deploy the selected Git ref.
+4. After deployment, choose `verify-autopilot` once. It stops only the Ollum Sales worker, starts
+   Autopilot in SAFE mode at a 45-minute interval, verifies that pending send requests remain
+   untouched, runs one cycle, restarts the worker, and checks persistence. Both send flags remain
+   disabled and no draft is approved or sent by the verification.
 
 The deployment performs these operations:
 
@@ -85,7 +92,7 @@ The deployment performs these operations:
 2. runs the read-only server preflight;
 3. copies a source archive and mode-`0600` production environment over SSH;
 4. installs Docker Engine and the Compose plugin only when absent;
-5. builds and starts the two Compose services without touching unrelated services;
+5. builds and starts the three Ollum Sales Compose services without touching unrelated services;
 6. waits for the local MCP health endpoint;
 7. installs a dedicated Nginx vhost and validates the entire Nginx configuration before reload;
 8. obtains or reuses a Let's Encrypt certificate through the existing Certbot Nginx plugin;
@@ -140,12 +147,33 @@ either named volume. They survive container recreation, release changes, and ser
 The bridge health status remains `starting` until WhatsApp authentication succeeds. This does not
 prevent the MCP health endpoint from running; WhatsApp operations become available after pairing.
 
+The production workflow also provides `connect-whatsapp`, which recreates only the bridge and keeps
+fresh QR batches rotating for up to ten minutes. The persistent WhatsApp volume is preserved and the
+script refuses to run unless `OLLUM_ALLOW_WHATSAPP_SEND=false`.
+
+## Fast WhatsApp-only update
+
+For bridge-only changes, cross-compile the static Linux binary on the operator computer instead of
+rebuilding MCP and worker on production:
+
+```powershell
+.\scripts\build_whatsapp_prebuilt.ps1
+```
+
+Upload the resulting ELF binary as a private GitHub release asset, then run the production workflow in
+`deploy-whatsapp-prebuilt` mode with the release tag, asset name, and SHA-256 from the generated JSON
+metadata. The workflow verifies the binary before and after transfer, builds only a tiny overlay layer
+on the existing bridge image, and recreates only `whatsapp-bridge` with `--no-deps --no-build`. It
+preserves the named volume, keeps WhatsApp sending disabled, and restores the previous bridge image if
+the new container fails to start.
+
 ## Logs and status
 
 ```bash
 cd /home/<ssh-user>/ollum-sales/current
 sudo docker compose ps
 sudo docker compose logs --tail=200 ollum-sales-mcp
+sudo docker compose logs --tail=200 ollum-sales-worker
 sudo docker compose logs --tail=200 whatsapp-bridge
 ```
 
@@ -168,7 +196,7 @@ sudo docker compose restart ollum-sales-mcp
 sudo docker compose restart whatsapp-bridge
 ```
 
-For an update, push the reviewed commit to `main` or manually run the workflow in `deploy` mode.
+For an update, merge the reviewed commit, then separately run the workflow in `deploy` mode.
 Do not run `docker compose down --volumes`; that would remove persistent WhatsApp and CRM state.
 
 ## Rollback
@@ -206,5 +234,11 @@ Rollback is unavailable before at least two successful releases exist.
   agent research and persist them with `sales_import_leads`.
 - **WhatsApp bridge not healthy:** follow the QR/auth logs and pair the device. A timed-out QR attempt
   is restarted automatically.
-- **WhatsApp sends blocked:** both `OLLUM_ALLOW_WHATSAPP_SEND=true` and the tool argument
-  `confirm_send=true` are required. Keep sending disabled until recipient and message are reviewed.
+- **WhatsApp sends blocked:** expected in this production profile. The deployment workflow pins
+  `OLLUM_ALLOW_WHATSAPP_SEND=false` and `OLLUM_AUTOPILOT_ALLOW_SEND=false`.
+- **Google Sheets not configured:** create/share the spreadsheet, mount the service-account JSON
+  read-only into both Python services, and set `OLLUM_GOOGLE_SHEETS_ENABLED`,
+  `OLLUM_GOOGLE_SHEETS_ID`, and `GOOGLE_SERVICE_ACCOUNT_FILE`. Never put the JSON key in `.env`.
+- **Autopilot does not run:** inspect `autopilot_status`, then check the worker logs. SAFE is the
+  default. Non-SAFE modes remain blocked until the explicit flags, confirmation, and minimum lead
+  history are all present.
