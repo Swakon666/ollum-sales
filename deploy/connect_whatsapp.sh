@@ -35,15 +35,62 @@ docker compose up -d --no-deps --force-recreate --no-build whatsapp-bridge
 printf '\nOpen WhatsApp on the phone: Settings -> Linked devices -> Link a device.\n'
 printf 'Scan the newest QR code below. Fresh QR batches rotate for up to ten minutes.\n\n'
 
-set +e
-timeout --signal=INT --kill-after=10s 660s \
-  docker compose logs --no-color --follow --since=30s whatsapp-bridge
-log_status=$?
-set -e
+bridge_status() {
+  docker compose exec -T ollum-sales-mcp python - <<'PY'
+import json
+import urllib.request
 
-if [[ $log_status -ne 0 && $log_status -ne 124 && $log_status -ne 130 ]]; then
-  die "WhatsApp bridge log stream failed with status $log_status"
-fi
+with urllib.request.urlopen(
+    "http://whatsapp-bridge:8080/api/status", timeout=5
+) as response:
+    print(json.dumps(json.load(response), separators=(",", ":")))
+PY
+}
+
+status_is_safe_and_ready() {
+  python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+if not (
+    payload.get("ready") is True
+    and payload.get("connected") is True
+    and payload.get("logged_in") is True
+    and payload.get("send_enabled") is False
+):
+    raise SystemExit(1)
+'
+}
+
+log_pid=''
+cleanup() {
+  if [[ -n $log_pid ]]; then
+    kill "$log_pid" >/dev/null 2>&1 || true
+    wait "$log_pid" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup EXIT
+
+timeout --signal=INT --kill-after=10s 660s \
+  docker compose logs --no-color --follow --since=30s whatsapp-bridge &
+log_pid=$!
+
+paired=false
+deadline=$((SECONDS + 660))
+while (( SECONDS < deadline )); do
+  if payload=$(bridge_status 2>/dev/null) \
+    && status_is_safe_and_ready <<<"$payload" 2>/dev/null; then
+    paired=true
+    break
+  fi
+  kill -0 "$log_pid" >/dev/null 2>&1 || break
+  sleep 2
+done
+
+cleanup
+trap - EXIT
+[[ $paired == true ]] || die 'pairing window closed without an authenticated bridge status'
 
 container_id=$(docker compose ps -q whatsapp-bridge)
 [[ -n $container_id ]] || die 'whatsapp-bridge container is not running'
@@ -51,4 +98,4 @@ container_id=$(docker compose ps -q whatsapp-bridge)
 container_status=$(docker inspect --format '{{.State.Status}}' "$container_id")
 [[ $container_status == running ]] || die "whatsapp-bridge is not running: $container_status"
 
-printf '\nPairing window closed. whatsapp-bridge is still running and send remains disabled.\n'
+printf '\nPairing succeeded. whatsapp-bridge is authenticated and send remains disabled.\n'

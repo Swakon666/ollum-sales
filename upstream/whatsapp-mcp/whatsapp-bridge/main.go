@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/binary"
@@ -19,8 +20,6 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
-
-	"bytes"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -193,6 +192,17 @@ func extractTextContent(msg *waProto.Message) string {
 type SendMessageResponse struct {
 	Success bool   `json:"success"`
 	Message string `json:"message"`
+}
+
+// BridgeStatusResponse reports bridge readiness without exposing session secrets.
+type BridgeStatusResponse struct {
+	Status        string `json:"status"`
+	Ready         bool   `json:"ready"`
+	Connected     bool   `json:"connected"`
+	LoggedIn      bool   `json:"logged_in"`
+	SendEnabled   bool   `json:"send_enabled"`
+	AccountJID    string `json:"account_jid,omitempty"`
+	UptimeSeconds int64  `json:"uptime_seconds"`
 }
 
 // SendMessageRequest represents the request body for the send message API
@@ -369,6 +379,105 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 	}
 
 	return true, fmt.Sprintf("Message sent to %s", recipient)
+}
+
+func whatsappSendEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("OLLUM_ALLOW_WHATSAPP_SEND")), "true")
+}
+
+func currentBridgeStatus(client *whatsmeow.Client, startedAt time.Time) BridgeStatusResponse {
+	connected := client.IsConnected()
+	loggedIn := client.IsLoggedIn()
+	ready := connected && loggedIn
+	status := "not_ready"
+	if ready {
+		status = "ready"
+	}
+
+	accountJID := ""
+	if client.Store != nil && client.Store.ID != nil {
+		accountJID = client.Store.ID.String()
+	}
+
+	uptimeSeconds := int64(time.Since(startedAt).Seconds())
+	if uptimeSeconds < 0 {
+		uptimeSeconds = 0
+	}
+
+	return BridgeStatusResponse{
+		Status:        status,
+		Ready:         ready,
+		Connected:     connected,
+		LoggedIn:      loggedIn,
+		SendEnabled:   whatsappSendEnabled(),
+		AccountJID:    accountJID,
+		UptimeSeconds: uptimeSeconds,
+	}
+}
+
+type bridgeStatusProvider func() BridgeStatusResponse
+
+func bridgeStatusHandler(provider bridgeStatusProvider, requireReady bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		status := provider()
+		w.Header().Set("Content-Type", "application/json")
+		if requireReady && !status.Ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		if err := json.NewEncoder(w).Encode(status); err != nil {
+			fmt.Printf("Failed to encode bridge status: %v\n", err)
+		}
+	}
+}
+
+func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if !sendEnabled {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "WhatsApp sending is disabled by bridge policy",
+			})
+			return
+		}
+
+		var req SendMessageRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request format", http.StatusBadRequest)
+			return
+		}
+
+		if req.Recipient == "" {
+			http.Error(w, "Recipient is required", http.StatusBadRequest)
+			return
+		}
+		if req.Message == "" && req.MediaPath == "" {
+			http.Error(w, "Message or media path is required", http.StatusBadRequest)
+			return
+		}
+
+		fmt.Println("Received request to send message", req.Message, req.MediaPath)
+		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		fmt.Println("Message sent", success, message)
+		if !success {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+		_ = json.NewEncoder(w).Encode(SendMessageResponse{
+			Success: success,
+			Message: message,
+		})
+	}
 }
 
 // Extract media info from a message
@@ -677,54 +786,17 @@ func extractDirectPathFromURL(url string) string {
 
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
-	// Handler for sending messages
-	http.HandleFunc("/api/send", func(w http.ResponseWriter, r *http.Request) {
-		// Only allow POST requests
-		if r.Method != http.MethodPost {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		// Parse the request body
-		var req SendMessageRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request format", http.StatusBadRequest)
-			return
-		}
-
-		// Validate request
-		if req.Recipient == "" {
-			http.Error(w, "Recipient is required", http.StatusBadRequest)
-			return
-		}
-
-		if req.Message == "" && req.MediaPath == "" {
-			http.Error(w, "Message or media path is required", http.StatusBadRequest)
-			return
-		}
-
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
-
-		// Send the message
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
-		// Set response headers
-		w.Header().Set("Content-Type", "application/json")
-
-		// Set appropriate status code
-		if !success {
-			w.WriteHeader(http.StatusInternalServerError)
-		}
-
-		// Send response
-		json.NewEncoder(w).Encode(SendMessageResponse{
-			Success: success,
-			Message: message,
-		})
-	})
+	serverStartedAt := time.Now()
+	statusProvider := func() BridgeStatusResponse {
+		return currentBridgeStatus(client, serverStartedAt)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", bridgeStatusHandler(statusProvider, false))
+	mux.HandleFunc("/api/status", bridgeStatusHandler(statusProvider, true))
+	mux.HandleFunc("/api/send", sendMessageHandler(client, whatsappSendEnabled()))
 
 	// Handler for downloading media
-	http.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {
 		// Only allow POST requests
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -780,7 +852,7 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 
 	// Run server in a goroutine so it doesn't block
 	go func() {
-		if err := http.ListenAndServe(serverAddr, nil); err != nil {
+		if err := http.ListenAndServe(serverAddr, mux); err != nil {
 			fmt.Printf("REST API server error: %v\n", err)
 		}
 	}()

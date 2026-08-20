@@ -233,6 +233,19 @@ Then restart the MCP process.
 
 Direct sends require `confirm_send=true`. The recommended workflow adds a stronger boundary: save the exact message, approve that immutable recipient/message pair, and separately confirm `sales_send_whatsapp_draft`.
 
+The bridge exposes read-only operational checks at `GET /health` and `GET /api/status`.
+`/api/status` returns `503` until the persisted session is both connected and logged in, and
+always reports the effective `send_enabled` policy without exposing session data. The MCP
+`ollum_status` tool includes the same whitelisted bridge state.
+
+After pairing, the production smoke test recreates only `whatsapp-bridge` and verifies that the
+authenticated account identity and `/app/store` volume are unchanged while sending remains
+disabled:
+
+```bash
+sudo bash deploy/verify_whatsapp_persistence.sh <deploy-user>
+```
+
 Autopilot adds the same two-step boundary to Google Sheets: `APPROVE` and `SEND` are separate, and
 the SAFE worker ignores send requests.
 

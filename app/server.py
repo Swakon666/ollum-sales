@@ -24,6 +24,7 @@ from .scraping import analyze_website as scrape_analyze_website
 from .security import untrusted_result, validate_public_http_url
 from .website_inspector import inspect_website
 from .whatsapp_service import (
+    bridge_status,
     get_last_interaction,
     list_chats,
     list_messages,
@@ -74,6 +75,7 @@ def ollum_status() -> dict[str, Any]:
         "crm": crm.stats(),
         "whatsapp_db_exists": db.exists(),
         "whatsapp_api_configured": bool(settings.whatsapp_api_base_url),
+        "whatsapp": bridge_status(),
         "whatsapp_send_enabled": settings.allow_whatsapp_send,
         "mcp_auth_required": settings.mcp_require_auth,
         "autopilot": autopilot.status(),

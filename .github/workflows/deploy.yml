@@ -21,6 +21,7 @@ on:
           - deploy-prebuilt
           - rollback
           - verify-autopilot
+          - verify-whatsapp
           - report-autopilot
           - connect-whatsapp
           - deploy-whatsapp-prebuilt
@@ -610,6 +611,23 @@ jobs:
           {
             printf '%s\n' "$SSH_PASSWORD"
             cat deploy/connect_whatsapp.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER'"
+
+      - name: Verify WhatsApp session persistence after restart
+        if: ${{ env.DEPLOY_MODE == 'connect-whatsapp' || env.DEPLOY_MODE == 'verify-whatsapp' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/verify_whatsapp_persistence.sh
           } | sshpass -e ssh \
             -o BatchMode=no \
             -o ConnectTimeout=20 \

@@ -9,6 +9,7 @@ services:
     environment:
       WHATSAPP_PROXY_URL: ${WHATSAPP_PROXY_URL:-}
       WHATSAPP_PAIRING_TIMEOUT: ${WHATSAPP_PAIRING_TIMEOUT:-10m}
+      OLLUM_ALLOW_WHATSAPP_SEND: ${OLLUM_ALLOW_WHATSAPP_SEND:-false}
     volumes:
       - whatsapp-data:/app/store
     stdin_open: true
@@ -19,7 +20,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - 'code=$$(curl --silent --output /dev/null --write-out "%{http_code}" http://127.0.0.1:8080/api/send || true); [ "$$code" = "405" ]'
+        - 'curl --fail --silent --show-error http://127.0.0.1:8080/health >/dev/null'
       interval: 15s
       timeout: 5s
       retries: 5
