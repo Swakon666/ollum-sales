@@ -392,6 +392,8 @@ async def admin_home(request: Request) -> Response:
 
 async def auth_login(request: Request) -> Response:
     context: AdminContext = request.app.state.admin_context
+    if context.sessions.login_must_start_on_redirect_host(request):
+        return RedirectResponse(context.sessions.login_start_url(), status_code=303)
     return await context.sessions.begin_login(request)
 
 
@@ -412,7 +414,47 @@ async def auth_callback(request: Request) -> Response:
         action="admin.login",
         outcome="success",
     )
-    return RedirectResponse("/admin", status_code=303)
+    if context.sessions.uses_cross_origin_handoff:
+        code = context.sessions.issue_login_handoff(user)
+        return RedirectResponse(
+            f"{context.sessions.dashboard_url('/auth/handoff')}?code={code}",
+            status_code=303,
+            headers={"Cache-Control": "no-store"},
+        )
+    return RedirectResponse(
+        context.sessions.dashboard_url("/admin"),
+        status_code=303,
+    )
+
+
+async def auth_handoff(request: Request) -> Response:
+    context: AdminContext = request.app.state.admin_context
+    user = context.sessions.consume_login_handoff(
+        str(request.query_params.get("code") or "")
+    )
+    if user is None:
+        context.crm.record_admin_audit(
+            actor="unknown",
+            action="admin.login_handoff",
+            outcome="denied",
+        )
+        return JSONResponse(
+            {"error": "The login handoff expired or was already used"},
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+    request.session.clear()
+    request.session["user"] = user
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="admin.login_handoff",
+        outcome="success",
+    )
+    return RedirectResponse(
+        context.sessions.dashboard_url("/admin"),
+        status_code=303,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def auth_logout(request: Request) -> Response:
@@ -429,7 +471,10 @@ async def auth_logout(request: Request) -> Response:
             outcome="success",
         )
     context.sessions.logout(request)
-    return RedirectResponse("/auth/login", status_code=303)
+    return RedirectResponse(
+        context.sessions.dashboard_url("/auth/login"),
+        status_code=303,
+    )
 
 
 @admin_endpoint()
@@ -927,6 +972,7 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
         Route("/admin", admin_home, methods=["GET"]),
         Route("/auth/login", auth_login, methods=["GET"]),
         Route("/auth/callback", auth_callback, methods=["GET"]),
+        Route("/auth/handoff", auth_handoff, methods=["GET"]),
         Route("/auth/logout", auth_logout, methods=["POST"]),
         Route("/api/admin/bootstrap", api_bootstrap, methods=["GET"]),
         Route("/api/admin/session", api_session, methods=["GET"]),
