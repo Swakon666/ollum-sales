@@ -132,6 +132,11 @@ def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> 
     ) not in deploy
     assert "'$PREBUILT_IMAGE_TAG' '$PREBUILT_IMAGE_ID' '$PREBUILT_SHA256'" in workflow
     assert "OLLUM_DASHBOARD_BASE_URL" in workflow
+    assert "OLLUM_OIDC_REDIRECT_BASE_URL" in workflow
+    assert (
+        "oidc_redirect_base_url=${OIDC_REDIRECT_BASE_URL:-https://$OLLUM_DOMAIN}"
+        in workflow
+    )
     assert "https://$api_domain/api/v1/session" in workflow
 
 

@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
 import jwt
+from authlib.common.errors import AuthlibBaseError
 from authlib.integrations.starlette_client import OAuth
 from jwt import InvalidTokenError, PyJWKClient, PyJWKClientError
 from mcp.server.auth.provider import AccessToken, TokenVerifier
@@ -172,6 +175,8 @@ def build_mcp_auth(settings: Settings) -> MCPAuthBundle | None:
 class OIDCSessionManager:
     """Run the dashboard's OIDC code flow without placing tokens in cookies."""
 
+    _HANDOFF_TTL_SECONDS = 120.0
+
     def __init__(
         self,
         settings: Settings,
@@ -179,6 +184,7 @@ class OIDCSessionManager:
         identity_authorizer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> None:
         dashboard_base_url = settings.dashboard_base_url or settings.public_base_url
+        redirect_base_url = settings.oidc_redirect_base_url or dashboard_base_url
         required = [
             name
             for name, value in (
@@ -208,6 +214,15 @@ class OIDCSessionManager:
             raise AuthConfigurationError(
                 "OLLUM_DASHBOARD_BASE_URL must not contain a path or query"
             )
+        parsed_redirect = urlsplit(str(redirect_base_url))
+        if parsed_redirect.scheme != "https" or not parsed_redirect.netloc:
+            raise AuthConfigurationError(
+                "OLLUM_OIDC_REDIRECT_BASE_URL must be an absolute HTTPS origin"
+            )
+        if parsed_redirect.path not in {"", "/"} or parsed_redirect.query:
+            raise AuthConfigurationError(
+                "OLLUM_OIDC_REDIRECT_BASE_URL must not contain a path or query"
+            )
         assert settings.oidc_issuer_url is not None
         assert settings.admin_oidc_client_id is not None
         assert settings.admin_oidc_client_secret is not None
@@ -215,6 +230,11 @@ class OIDCSessionManager:
         self.token_verifier = token_verifier
         self.identity_authorizer = identity_authorizer
         self.dashboard_base_url = dashboard_base_url
+        self.redirect_base_url = redirect_base_url
+        self._dashboard_host = parsed_dashboard.hostname
+        self._redirect_host = parsed_redirect.hostname
+        self._handoffs: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._handoff_lock = threading.Lock()
         self.oauth = OAuth()
         self.oauth.register(
             "ollum",
@@ -232,17 +252,67 @@ class OIDCSessionManager:
     async def begin_login(self, request: Request):
         client = self.oauth.create_client("ollum")
         assert client is not None
-        assert self.dashboard_base_url is not None
-        redirect_uri = f"{self.dashboard_base_url.rstrip('/')}/auth/callback"
+        assert self.redirect_base_url is not None
+        redirect_uri = f"{self.redirect_base_url.rstrip('/')}/auth/callback"
         kwargs: dict[str, Any] = {}
         if self.settings.oidc_audience:
             kwargs["audience"] = self.settings.oidc_audience
         return await client.authorize_redirect(request, redirect_uri, **kwargs)
 
+    def login_must_start_on_redirect_host(self, request: Request) -> bool:
+        """Keep Authlib's state cookie on the same host as the OAuth callback."""
+        return request.url.hostname != self._redirect_host
+
+    def login_start_url(self) -> str:
+        return f"{self.redirect_base_url.rstrip('/')}/auth/login"
+
+    def dashboard_url(self, path: str) -> str:
+        return f"{self.dashboard_base_url.rstrip('/')}/{path.lstrip('/')}"
+
+    @property
+    def uses_cross_origin_handoff(self) -> bool:
+        return self._dashboard_host != self._redirect_host
+
+    def issue_login_handoff(self, user: dict[str, Any]) -> str:
+        """Create a short-lived opaque, single-use code for the dashboard host."""
+        now = time.monotonic()
+        code = secrets.token_urlsafe(32)
+        with self._handoff_lock:
+            self._discard_expired_handoffs(now)
+            self._handoffs[code] = (
+                now + self._HANDOFF_TTL_SECONDS,
+                dict(user),
+            )
+        return code
+
+    def consume_login_handoff(self, code: str) -> dict[str, Any] | None:
+        """Consume a handoff exactly once without putting identity data in the URL."""
+        if not code or len(code) > 256:
+            return None
+        now = time.monotonic()
+        with self._handoff_lock:
+            self._discard_expired_handoffs(now)
+            item = self._handoffs.pop(code, None)
+        if item is None or item[0] <= now:
+            return None
+        return dict(item[1])
+
+    def _discard_expired_handoffs(self, now: float) -> None:
+        expired = [
+            code for code, (deadline, _) in self._handoffs.items() if deadline <= now
+        ]
+        for code in expired:
+            self._handoffs.pop(code, None)
+
     async def complete_login(self, request: Request) -> dict[str, Any]:
         client = self.oauth.create_client("ollum")
         assert client is not None
-        token = await client.authorize_access_token(request)
+        try:
+            token = await client.authorize_access_token(request)
+        except AuthlibBaseError as exc:
+            raise AuthenticationError(
+                "The login session expired or is invalid; start sign-in again"
+            ) from exc
         raw_access_token = str(token.get("access_token") or "")
         verified = (
             await self.token_verifier.verify_token(raw_access_token)

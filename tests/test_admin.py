@@ -75,11 +75,48 @@ class FakeSheets:
 
 
 class FakeSessions:
+    def __init__(self) -> None:
+        self.handoffs: dict[str, dict[str, Any]] = {}
+
     async def begin_login(self, _request: Request):
         return JSONResponse({"login": True})
 
     async def complete_login(self, _request: Request):
-        raise AssertionError("The callback is not used in these integration tests")
+        return {
+            "sub": "auth0|beta-user",
+            "email": "operator@example.com",
+            "name": "Beta Operator",
+            "scopes": ["sales:read", "sales:write"],
+            "csrf": "callback-csrf-token",
+            "expires_at": int(time.time()) + 600,
+            "workspace_id": "ollum-group",
+            "workspace_name": "Ollum Group",
+            "member_id": "test-member",
+            "role": "owner",
+        }
+
+    @staticmethod
+    def login_must_start_on_redirect_host(request: Request) -> bool:
+        return request.url.hostname != "mcp.sales.example"
+
+    @staticmethod
+    def login_start_url() -> str:
+        return "https://mcp.sales.example/auth/login"
+
+    @staticmethod
+    def dashboard_url(path: str) -> str:
+        return f"https://api.sales.example/{path.lstrip('/')}"
+
+    @property
+    def uses_cross_origin_handoff(self) -> bool:
+        return True
+
+    def issue_login_handoff(self, user: dict[str, Any]) -> str:
+        self.handoffs["single-use-code"] = dict(user)
+        return "single-use-code"
+
+    def consume_login_handoff(self, code: str) -> dict[str, Any] | None:
+        return self.handoffs.pop(code, None)
 
     @staticmethod
     def logout(request: Request) -> None:
@@ -96,6 +133,8 @@ def admin_client(tmp_path, monkeypatch):
         settings,
         auth_mode="oidc",
         public_base_url="https://sales.example",
+        dashboard_base_url="https://api.sales.example",
+        oidc_redirect_base_url="https://mcp.sales.example",
         mcp_resource_url="https://sales.example/mcp",
         oidc_issuer_url="https://identity.example/",
         oidc_audience="https://api.example",
@@ -226,6 +265,34 @@ def test_admin_requires_session_and_sets_security_headers(admin_client) -> None:
     assert "default-src 'self'" in page.headers["content-security-policy"]
     assert page.headers["strict-transport-security"].startswith("max-age=")
     assert page.headers["cache-control"] == "no-store"
+
+
+def test_cross_origin_oauth_handoff_finishes_on_api_and_is_single_use(
+    admin_client,
+) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+
+    login = client.get("https://api.sales.example/auth/login", follow_redirects=False)
+    assert login.status_code == 303
+    assert login.headers["location"] == "https://mcp.sales.example/auth/login"
+
+    callback = client.get(
+        "https://mcp.sales.example/auth/callback", follow_redirects=False
+    )
+    assert callback.status_code == 303
+    handoff_url = callback.headers["location"]
+    assert handoff_url == (
+        "https://api.sales.example/auth/handoff?code=single-use-code"
+    )
+    assert "operator@example.com" not in handoff_url
+
+    handoff = client.get(handoff_url, follow_redirects=False)
+    assert handoff.status_code == 303
+    assert handoff.headers["location"] == "https://api.sales.example/admin"
+    assert client.get("https://api.sales.example/api/v1/session").status_code == 200
+
+    replay = client.get(handoff_url, follow_redirects=False)
+    assert replay.status_code == 403
 
 
 def test_expired_admin_session_is_rejected(admin_client) -> None:

@@ -48,6 +48,7 @@ class Settings:
     auth_mode: str = os.getenv("OLLUM_AUTH_MODE", "bearer").strip().lower()
     public_base_url: str | None = os.getenv("OLLUM_PUBLIC_BASE_URL")
     dashboard_base_url: str | None = os.getenv("OLLUM_DASHBOARD_BASE_URL")
+    oidc_redirect_base_url: str | None = os.getenv("OLLUM_OIDC_REDIRECT_BASE_URL")
     mcp_resource_url: str | None = os.getenv("OLLUM_MCP_RESOURCE_URL")
     mcp_required_scopes: tuple[str, ...] = _env_csv(
         "OLLUM_MCP_REQUIRED_SCOPES", "sales:read,sales:write"

@@ -96,6 +96,7 @@ jobs:
       AUTH_MODE: ${{ vars.OLLUM_AUTH_MODE }}
       PUBLIC_BASE_URL: ${{ vars.OLLUM_PUBLIC_BASE_URL }}
       DASHBOARD_BASE_URL: ${{ vars.OLLUM_DASHBOARD_BASE_URL }}
+      OIDC_REDIRECT_BASE_URL: ${{ vars.OLLUM_OIDC_REDIRECT_BASE_URL }}
       MCP_RESOURCE_URL: ${{ vars.OLLUM_MCP_RESOURCE_URL }}
       MCP_REQUIRED_SCOPES: ${{ vars.OLLUM_MCP_REQUIRED_SCOPES }}
       OIDC_ISSUER_URL: ${{ vars.OLLUM_OIDC_ISSUER_URL }}
@@ -363,6 +364,7 @@ jobs:
           public_base_url=${PUBLIC_BASE_URL:-https://$OLLUM_DOMAIN}
           api_domain=${OLLUM_API_DOMAIN:-$OLLUM_DOMAIN}
           dashboard_base_url=${DASHBOARD_BASE_URL:-https://$api_domain}
+          oidc_redirect_base_url=${OIDC_REDIRECT_BASE_URL:-https://$OLLUM_DOMAIN}
           mcp_resource_url=${MCP_RESOURCE_URL:-$public_base_url/mcp}
           mcp_required_scopes=${MCP_REQUIRED_SCOPES:-sales:read,sales:write}
           oidc_algorithms=${OIDC_ALGORITHMS:-RS256}
@@ -393,6 +395,7 @@ jobs:
             printf 'OLLUM_AUTH_MODE=%s\n' "$auth_mode"
             printf 'OLLUM_PUBLIC_BASE_URL=%s\n' "$public_base_url"
             printf 'OLLUM_DASHBOARD_BASE_URL=%s\n' "$dashboard_base_url"
+            printf 'OLLUM_OIDC_REDIRECT_BASE_URL=%s\n' "$oidc_redirect_base_url"
             printf 'OLLUM_MCP_RESOURCE_URL=%s\n' "$mcp_resource_url"
             printf 'OLLUM_MCP_REQUIRED_SCOPES=%s\n' "$mcp_required_scopes"
             printf 'OLLUM_OIDC_ISSUER_URL=%s\n' "${OIDC_ISSUER_URL:-}"
@@ -646,6 +649,32 @@ jobs:
               echo "Expected unauthenticated /admin redirect, got $admin_status" >&2
               exit 1
             }
+            login_headers=$(mktemp)
+            provider_headers=$(mktemp)
+            curl --silent --show-error --max-time 20 \
+              --resolve "$api_domain:443:127.0.0.1" \
+              --output /dev/null --dump-header "$login_headers" \
+              "https://$api_domain/auth/login"
+            login_location=$(awk 'tolower($1) == "location:" {$1=""; sub(/^ /, ""); print; exit}' \
+              "$login_headers" | tr -d '\r')
+            [ "$login_location" = "https://$OLLUM_DOMAIN/auth/login" ] || {
+              echo "Dashboard login did not move OAuth state to the callback host" >&2
+              exit 1
+            }
+            curl --silent --show-error --max-time 20 \
+              --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
+              --output /dev/null --dump-header "$provider_headers" \
+              "$login_location"
+            provider_location=$(awk 'tolower($1) == "location:" {$1=""; sub(/^ /, ""); print; exit}' \
+              "$provider_headers" | tr -d '\r')
+            expected_callback=$(python3 -c \
+              'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+              "https://$OLLUM_DOMAIN/auth/callback")
+            [[ "$provider_location" == *"redirect_uri=$expected_callback"* ]] || {
+              echo "OIDC provider redirect does not use the configured MCP callback" >&2
+              exit 1
+            }
+            rm -f -- "$login_headers" "$provider_headers"
             session_status=$(curl --silent --show-error --max-time 20 \
               --resolve "$api_domain:443:127.0.0.1" \
               --output /dev/null --write-out '%{http_code}' \
@@ -819,6 +848,30 @@ jobs:
               echo "Public /admin returned $admin_status instead of an auth redirect" >&2
               exit 1
             }
+            login_headers=$(mktemp)
+            provider_headers=$(mktemp)
+            curl --silent --show-error --max-time 20 \
+              --output /dev/null --dump-header "$login_headers" \
+              "https://$api_domain/auth/login"
+            login_location=$(awk 'tolower($1) == "location:" {$1=""; sub(/^ /, ""); print; exit}' \
+              "$login_headers" | tr -d '\r')
+            [ "$login_location" = "https://$OLLUM_DOMAIN/auth/login" ] || {
+              echo "Public dashboard login did not move OAuth state to the callback host" >&2
+              exit 1
+            }
+            curl --silent --show-error --max-time 20 \
+              --output /dev/null --dump-header "$provider_headers" \
+              "$login_location"
+            provider_location=$(awk 'tolower($1) == "location:" {$1=""; sub(/^ /, ""); print; exit}' \
+              "$provider_headers" | tr -d '\r')
+            expected_callback=$(python3 -c \
+              'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' \
+              "https://$OLLUM_DOMAIN/auth/callback")
+            [[ "$provider_location" == *"redirect_uri=$expected_callback"* ]] || {
+              echo "Public OIDC redirect does not use the configured MCP callback" >&2
+              exit 1
+            }
+            rm -f -- "$login_headers" "$provider_headers"
             session_status=$(curl --silent --show-error --max-time 20 \
               --output /dev/null --write-out '%{http_code}' \
               "https://$api_domain/api/v1/session")

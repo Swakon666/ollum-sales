@@ -8,6 +8,7 @@ from typing import Any
 
 import jwt
 import pytest
+from authlib.oauth2.rfc6749.errors import MismatchingStateException
 from cryptography.hazmat.primitives.asymmetric import rsa
 from mcp.server.auth.provider import AccessToken
 from starlette.requests import Request
@@ -126,16 +127,30 @@ def test_build_mcp_auth_is_fail_closed_and_derives_resource_url() -> None:
 class _FakeOIDCClient:
     def __init__(self, token: dict[str, Any]) -> None:
         self.token = token
+        self.redirect_uri: str | None = None
+        self.redirect_kwargs: dict[str, Any] = {}
 
     async def authorize_access_token(self, _request: Request) -> dict[str, Any]:
         return self.token
 
+    async def authorize_redirect(
+        self, _request: Request, redirect_uri: str, **kwargs: Any
+    ) -> SimpleNamespace:
+        self.redirect_uri = redirect_uri
+        self.redirect_kwargs = kwargs
+        return SimpleNamespace(status_code=302)
+
+
+class _FailingOIDCClient:
+    async def authorize_access_token(self, _request: Request) -> dict[str, Any]:
+        raise MismatchingStateException()
+
 
 class _FakeOAuth:
-    def __init__(self, client: _FakeOIDCClient) -> None:
+    def __init__(self, client: Any) -> None:
         self.client = client
 
-    def create_client(self, _name: str) -> _FakeOIDCClient:
+    def create_client(self, _name: str) -> Any:
         return self.client
 
 
@@ -172,6 +187,62 @@ def test_admin_oidc_requires_https_dashboard_origin() -> None:
         match="OLLUM_DASHBOARD_BASE_URL must be an absolute HTTPS origin",
     ):
         OIDCSessionManager(configured, _FakeVerifier(None))  # type: ignore[arg-type]
+
+
+def _request_for_host(host: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "scheme": "https",
+            "path": "/auth/login",
+            "headers": [(b"host", host.encode("ascii"))],
+            "server": (host, 443),
+            "session": {},
+        }
+    )
+
+
+def test_admin_oidc_supports_separate_callback_origin_with_one_time_handoff() -> None:
+    configured = replace(
+        _admin_settings(),
+        dashboard_base_url="https://api.sales.example",
+        oidc_redirect_base_url="https://mcp.sales.example",
+    )
+    oidc_client = _FakeOIDCClient({})
+    manager = OIDCSessionManager(configured, _FakeVerifier(None))  # type: ignore[arg-type]
+    manager.oauth = _FakeOAuth(oidc_client)  # type: ignore[assignment]
+
+    asyncio.run(manager.begin_login(_request_for_host("mcp.sales.example")))
+
+    assert oidc_client.redirect_uri == "https://mcp.sales.example/auth/callback"
+    assert oidc_client.redirect_kwargs["audience"] == "https://api.example"
+    assert manager.login_must_start_on_redirect_host(
+        _request_for_host("api.sales.example")
+    )
+    assert not manager.login_must_start_on_redirect_host(
+        _request_for_host("mcp.sales.example")
+    )
+    assert manager.login_start_url() == "https://mcp.sales.example/auth/login"
+    assert manager.dashboard_url("/admin") == "https://api.sales.example/admin"
+
+    code = manager.issue_login_handoff({"email": "operator@example.com"})
+    assert manager.consume_login_handoff(code) == {"email": "operator@example.com"}
+    assert manager.consume_login_handoff(code) is None
+
+    manager._HANDOFF_TTL_SECONDS = -1
+    expired_code = manager.issue_login_handoff({"email": "operator@example.com"})
+    assert manager.consume_login_handoff(expired_code) is None
+
+
+def test_admin_oidc_turns_invalid_state_into_safe_authentication_error() -> None:
+    manager = OIDCSessionManager(_admin_settings(), _FakeVerifier(None))  # type: ignore[arg-type]
+    manager.oauth = _FakeOAuth(_FailingOIDCClient())  # type: ignore[assignment]
+
+    with pytest.raises(
+        AuthenticationError, match="login session expired or is invalid"
+    ):
+        asyncio.run(manager.complete_login(_request_for_host("sales.example")))
 
 
 def test_admin_login_keeps_access_token_out_of_signed_session() -> None:
