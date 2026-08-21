@@ -189,14 +189,17 @@ def test_admin_oidc_requires_https_dashboard_origin() -> None:
         OIDCSessionManager(configured, _FakeVerifier(None))  # type: ignore[arg-type]
 
 
-def _request_for_host(host: str) -> Request:
+def _request_for_host(host: str, *, forwarded_host: str | None = None) -> Request:
+    headers = [(b"host", host.encode("ascii"))]
+    if forwarded_host is not None:
+        headers.append((b"x-forwarded-host", forwarded_host.encode("ascii")))
     return Request(
         {
             "type": "http",
             "method": "GET",
             "scheme": "https",
             "path": "/auth/login",
-            "headers": [(b"host", host.encode("ascii"))],
+            "headers": headers,
             "server": (host, 443),
             "session": {},
         }
@@ -222,6 +225,12 @@ def test_admin_oidc_supports_separate_callback_origin_with_one_time_handoff() ->
     )
     assert not manager.login_must_start_on_redirect_host(
         _request_for_host("mcp.sales.example")
+    )
+    assert not manager.login_must_start_on_redirect_host(
+        _request_for_host("127.0.0.1:18000", forwarded_host="mcp.sales.example")
+    )
+    assert manager.login_must_start_on_redirect_host(
+        _request_for_host("127.0.0.1:18000", forwarded_host="api.sales.example")
     )
     assert manager.login_start_url() == "https://mcp.sales.example/auth/login"
     assert manager.dashboard_url("/admin") == "https://api.sales.example/admin"

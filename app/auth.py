@@ -261,7 +261,12 @@ class OIDCSessionManager:
 
     def login_must_start_on_redirect_host(self, request: Request) -> bool:
         """Keep Authlib's state cookie on the same host as the OAuth callback."""
-        return request.url.hostname != self._redirect_host
+        forwarded_host = request.headers.get("x-forwarded-host", "")
+        external_host = forwarded_host.split(",", 1)[0].strip()
+        if not external_host:
+            external_host = request.headers.get("host", "").strip()
+        parsed_external = urlsplit(f"//{external_host}")
+        return parsed_external.hostname != self._redirect_host
 
     def login_start_url(self) -> str:
         return f"{self.redirect_base_url.rstrip('/')}/auth/login"
