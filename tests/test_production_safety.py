@@ -123,6 +123,7 @@ def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> 
     assert "expected_prebuilt_archive_sha256=${8:-}" in deploy
     assert "api_domain=${9:-$domain}" in deploy
     assert "sha256sum --check --strict" in deploy
+    assert "--expand" in deploy
     assert "verified archive SHA-256 remains the trust anchor" in deploy
     assert 'rm -f -- "$incoming_env" "$incoming_google_credentials"' in deploy
     assert (
