@@ -10,7 +10,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_real_server_exposes_oauth_metadata_and_challenges_mcp(tmp_path) -> None:
-    code = r'''
+    code = r"""
 import json
 import sys
 import types
@@ -47,7 +47,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "send_annotations": send_tool.annotations.model_dump(by_alias=True),
         "send_meta": send_tool.meta,
     }))
-'''
+"""
     env = os.environ.copy()
     env.update(
         {

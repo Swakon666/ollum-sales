@@ -398,9 +398,9 @@ class SalesCRMTests(unittest.TestCase):
         )
         self.assertEqual(viewer["role"], "viewer")
         self.assertEqual(
-            self.crm.list_workspace_invitations(
-                "ollum-group", status="accepted"
-            )[0]["id"],
+            self.crm.list_workspace_invitations("ollum-group", status="accepted")[0][
+                "id"
+            ],
             invitation["id"],
         )
 

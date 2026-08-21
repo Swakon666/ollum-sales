@@ -126,7 +126,9 @@ def bridge_pairing_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
     return {
         "reachable": response.status_code < 500,
         "http_status": response.status_code,
-        "state": state if isinstance(state, str) and state in allowed_states else "unknown",
+        "state": state
+        if isinstance(state, str) and state in allowed_states
+        else "unknown",
         "needs_pairing": payload.get("needs_pairing") is True,
         "has_qr": payload.get("has_qr") is True,
         "updated_at": payload.get("updated_at")

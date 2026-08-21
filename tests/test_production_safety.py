@@ -57,9 +57,7 @@ def test_production_deployment_requires_manual_dispatch() -> None:
 
 def test_direct_whatsapp_tool_cannot_bypass_persistent_draft_flow() -> None:
     server = (REPOSITORY_ROOT / "app" / "server.py").read_text(encoding="utf-8")
-    direct_tool = server.split("def whatsapp_send_message(", 1)[1].split(
-        "\n@_", 1
-    )[0]
+    direct_tool = server.split("def whatsapp_send_message(", 1)[1].split("\n@_", 1)[0]
 
     assert "Direct WhatsApp sending is disabled" in direct_tool
     assert "return send_message(" not in direct_tool
@@ -131,9 +129,7 @@ def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> 
         'rm -f -- "$incoming_env" "$incoming_google_credentials" '
         '"$prebuilt_image_archive"'
     ) not in deploy
-    assert (
-        "'$PREBUILT_IMAGE_TAG' '$PREBUILT_IMAGE_ID' '$PREBUILT_SHA256'" in workflow
-    )
+    assert "'$PREBUILT_IMAGE_TAG' '$PREBUILT_IMAGE_ID' '$PREBUILT_SHA256'" in workflow
     assert "OLLUM_DASHBOARD_BASE_URL" in workflow
     assert "https://$api_domain/api/v1/session" in workflow
 

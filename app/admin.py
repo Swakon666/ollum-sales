@@ -186,12 +186,14 @@ class SecurityHeadersMiddleware:
                 forwarded_proto = request_headers.get(b"x-forwarded-proto", b"")
                 if scope.get("scheme") == "https" or forwarded_proto == b"https":
                     headers.append(
-                        (b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                        (
+                            b"strict-transport-security",
+                            b"max-age=31536000; includeSubDomains",
+                        )
                     )
                 path = str(scope.get("path") or "")
-                if (
-                    path == "/admin"
-                    or path.startswith(("/api/admin", "/api/v1", "/auth/"))
+                if path == "/admin" or path.startswith(
+                    ("/api/admin", "/api/v1", "/auth/")
                 ):
                     existing_cache_control = [
                         value
@@ -199,8 +201,7 @@ class SecurityHeadersMiddleware:
                         if name.lower() == b"cache-control"
                     ]
                     if not any(
-                        b"no-store" in value.lower()
-                        for value in existing_cache_control
+                        b"no-store" in value.lower() for value in existing_cache_control
                     ):
                         headers = [
                             (name, value)
@@ -357,7 +358,9 @@ def _plugin_status(settings: Settings) -> dict[str, Any]:
     if not resource_url and settings.public_base_url:
         resource_url = f"{settings.public_base_url.rstrip('/')}/mcp"
     checks = {
-        "https_resource_url": bool(resource_url and resource_url.startswith("https://")),
+        "https_resource_url": bool(
+            resource_url and resource_url.startswith("https://")
+        ),
         "oidc_mode": settings.auth_mode == "oidc",
         "issuer_configured": bool(settings.oidc_issuer_url),
         "audience_configured": bool(settings.oidc_audience),
@@ -469,8 +472,7 @@ async def api_bootstrap(
             "top_leads": context.crm.list_leads(limit=12, order_by_score=True),
             "campaigns": context.crm.list_campaigns(limit=12),
             "drafts": [
-                _draft_view(item)
-                for item in context.crm.list_outreach_drafts(limit=12)
+                _draft_view(item) for item in context.crm.list_outreach_drafts(limit=12)
             ],
             "verticals": context.crm.list_verticals(limit=100),
             "cycles": context.crm.list_autopilot_cycles(limit=12),
@@ -518,9 +520,7 @@ async def api_whatsapp_qr(
 ) -> Response:
     image = bridge_pairing_qr()
     if image is None:
-        return JSONResponse(
-            {"error": "No active WhatsApp pairing QR"}, status_code=404
-        )
+        return JSONResponse({"error": "No active WhatsApp pairing QR"}, status_code=404)
     return Response(
         image,
         media_type="image/png",
@@ -692,7 +692,9 @@ async def api_autopilot_start(
             maximum=10,
         ),
         leads_per_vertical=_bounded_int(
-            body.get("leads_per_vertical", context.settings.autopilot_leads_per_vertical),
+            body.get(
+                "leads_per_vertical", context.settings.autopilot_leads_per_vertical
+            ),
             name="leads_per_vertical",
             minimum=1,
             maximum=50,
@@ -813,11 +815,15 @@ async def api_approve_draft(
     if not hmac.compare_digest(expected_fingerprint, supplied_fingerprint):
         raise AdminRequestError(409, "The draft changed; review the exact text again")
     if body.get("confirmation") != "APPROVE":
-        raise AdminRequestError(409, "Type APPROVE to confirm the exact recipient and text")
-    if body.get("recipient") != draft.get("recipient") or body.get("message") != draft.get(
+        raise AdminRequestError(
+            409, "Type APPROVE to confirm the exact recipient and text"
+        )
+    if body.get("recipient") != draft.get("recipient") or body.get(
         "message"
-    ):
-        raise AdminRequestError(409, "Recipient and text must exactly match the saved draft")
+    ) != draft.get("message"):
+        raise AdminRequestError(
+            409, "Recipient and text must exactly match the saved draft"
+        )
     result = context.crm.approve_outreach_draft(draft_id)
     context.crm.record_admin_audit(
         actor=str(user["email"]),

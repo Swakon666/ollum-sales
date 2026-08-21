@@ -29,7 +29,9 @@ def _env_bool(name: str, default: bool = False) -> bool:
 
 def _env_csv(name: str, default: str = "") -> tuple[str, ...]:
     raw = os.getenv(name, default)
-    return tuple(item.strip() for item in raw.replace(" ", ",").split(",") if item.strip())
+    return tuple(
+        item.strip() for item in raw.replace(" ", ",").split(",") if item.strip()
+    )
 
 
 @dataclass(frozen=True)
@@ -61,12 +63,8 @@ class Settings:
     admin_allowed_emails: tuple[str, ...] = tuple(
         email.lower() for email in _env_csv("OLLUM_ADMIN_ALLOWED_EMAILS")
     )
-    admin_read_scope: str = os.getenv(
-        "OLLUM_ADMIN_READ_SCOPE", "sales:read"
-    ).strip()
-    admin_write_scope: str = os.getenv(
-        "OLLUM_ADMIN_WRITE_SCOPE", "sales:write"
-    ).strip()
+    admin_read_scope: str = os.getenv("OLLUM_ADMIN_READ_SCOPE", "sales:read").strip()
+    admin_write_scope: str = os.getenv("OLLUM_ADMIN_WRITE_SCOPE", "sales:write").strip()
     admin_session_secret: str | None = os.getenv("OLLUM_ADMIN_SESSION_SECRET")
     admin_session_max_age_seconds: int = int(
         os.getenv("OLLUM_ADMIN_SESSION_MAX_AGE_SECONDS", "28800")

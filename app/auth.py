@@ -39,7 +39,9 @@ def _split_scopes(value: Any) -> set[str]:
 
 def scopes_from_claims(claims: dict[str, Any]) -> list[str]:
     """Return a stable union of OAuth scope and Auth0-style permissions claims."""
-    return sorted(_split_scopes(claims.get("scope")) | _split_scopes(claims.get("permissions")))
+    return sorted(
+        _split_scopes(claims.get("scope")) | _split_scopes(claims.get("permissions"))
+    )
 
 
 class OIDCAccessTokenVerifier(TokenVerifier):
@@ -248,7 +250,9 @@ class OIDCSessionManager:
             else None
         )
         if verified is None:
-            raise AuthenticationError("The identity provider returned an invalid access token")
+            raise AuthenticationError(
+                "The identity provider returned an invalid access token"
+            )
 
         if (
             self.settings.admin_read_scope
@@ -285,7 +289,9 @@ class OIDCSessionManager:
             except ValueError as exc:
                 raise AuthenticationError(str(exc)) from exc
         elif not bootstrap_allowed:
-            raise AuthenticationError("This account is not in the closed-beta allowlist")
+            raise AuthenticationError(
+                "This account is not in the closed-beta allowlist"
+            )
 
         user = {
             "sub": userinfo_subject,
@@ -298,7 +304,9 @@ class OIDCSessionManager:
         if membership is not None:
             workspace = membership.get("workspace")
             if not isinstance(workspace, dict):
-                raise AuthenticationError("Workspace authorization returned invalid data")
+                raise AuthenticationError(
+                    "Workspace authorization returned invalid data"
+                )
             user.update(
                 {
                     "workspace_id": membership.get("workspace_id"),

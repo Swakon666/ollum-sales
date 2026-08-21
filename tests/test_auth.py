@@ -198,7 +198,9 @@ def test_admin_login_keeps_access_token_out_of_signed_session() -> None:
             }
         )
     )
-    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}})
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}}
+    )
 
     user = asyncio.run(manager.complete_login(request))
 
@@ -228,9 +230,7 @@ def test_admin_login_binds_same_workspace_identity_used_by_mcp() -> None:
             "workspace": {"id": "ollum-group", "name": "Ollum Group"},
         }
 
-    manager = OIDCSessionManager(
-        _admin_settings(), _FakeVerifier(access), authorize
-    )  # type: ignore[arg-type]
+    manager = OIDCSessionManager(_admin_settings(), _FakeVerifier(access), authorize)  # type: ignore[arg-type]
     manager.oauth = _FakeOAuth(  # type: ignore[assignment]
         _FakeOIDCClient(
             {
@@ -279,7 +279,9 @@ def test_admin_login_rejects_missing_read_scope() -> None:
             }
         )
     )
-    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}})
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}}
+    )
 
     with pytest.raises(AuthenticationError, match="missing scope"):
         asyncio.run(manager.complete_login(request))
@@ -306,7 +308,9 @@ def test_admin_login_rejects_mismatched_token_subjects() -> None:
             }
         )
     )
-    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}})
+    request = Request(
+        {"type": "http", "method": "GET", "path": "/", "headers": [], "session": {}}
+    )
 
     with pytest.raises(AuthenticationError, match="different subjects"):
         asyncio.run(manager.complete_login(request))

@@ -521,7 +521,9 @@ class SalesCRM:
             ).fetchone()
             if existing is not None:
                 if existing["email"].lower() != clean_email:
-                    raise ValueError("OIDC subject email changed; owner review is required")
+                    raise ValueError(
+                        "OIDC subject email changed; owner review is required"
+                    )
                 connection.execute(
                     """
                     UPDATE workspace_members
@@ -569,7 +571,8 @@ class SalesCRM:
                 )
                 role = (
                     "owner"
-                    if active_count == 0 or clean_email in {e.lower() for e in owner_emails}
+                    if active_count == 0
+                    or clean_email in {e.lower() for e in owner_emails}
                     else "operator"
                 )
             else:

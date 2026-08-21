@@ -392,7 +392,9 @@ def test_versioned_api_and_workspace_invitation(admin_client) -> None:
     assert invited.json()["email"] == "viewer@example.com"
     members = client.get("/api/v1/workspace/members").json()
     assert members["invitations"][0]["role"] == "viewer"
-    assert context.crm.list_workspace_invitations("ollum-group")[0]["status"] == "pending"
+    assert (
+        context.crm.list_workspace_invitations("ollum-group")[0]["status"] == "pending"
+    )
 
 
 def test_authenticated_whatsapp_qr_proxy_never_exposes_pairing_value(

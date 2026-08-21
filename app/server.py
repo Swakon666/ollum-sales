@@ -1002,9 +1002,7 @@ def create_app() -> ASGIApp:
     admin_context: AdminContext | None = None
     if settings.admin_enabled:
         if settings.auth_mode != "oidc" or _mcp_auth is None:
-            raise RuntimeError(
-                "The closed-beta admin requires OLLUM_AUTH_MODE=oidc"
-            )
+            raise RuntimeError("The closed-beta admin requires OLLUM_AUTH_MODE=oidc")
         sessions = OIDCSessionManager(
             settings,
             _mcp_auth.verifier,
@@ -1044,8 +1042,7 @@ def create_app() -> ASGIApp:
             max_age=settings.admin_session_max_age_seconds,
             same_site="lax",
             https_only=bool(
-                dashboard_base_url
-                and dashboard_base_url.lower().startswith("https://")
+                dashboard_base_url and dashboard_base_url.lower().startswith("https://")
             ),
         )
 

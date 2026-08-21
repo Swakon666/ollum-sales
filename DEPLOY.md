@@ -69,7 +69,7 @@ Configure the non-sensitive repository variables for the closed beta:
 OLLUM_API_DOMAIN=api.ollumgroup.ru
 OLLUM_AUTH_MODE=oidc
 OLLUM_PUBLIC_BASE_URL=https://mcp.ollumgroup.ru
-OLLUM_DASHBOARD_BASE_URL=https://api.ollumgroup.ru
+OLLUM_DASHBOARD_BASE_URL=https://mcp.ollumgroup.ru
 OLLUM_MCP_RESOURCE_URL=https://mcp.ollumgroup.ru/mcp
 OLLUM_MCP_REQUIRED_SCOPES=sales:read,sales:write
 OLLUM_OIDC_ISSUER_URL=https://<tenant>/
@@ -96,8 +96,12 @@ Authentication: OAuth
 ```
 
 Legacy bearer deployments remain supported, but the browser cabinet intentionally requires OIDC.
-The OIDC provider must allow callback `https://api.ollumgroup.ru/auth/callback` and
-logout/origin `https://api.ollumgroup.ru`.
+The OIDC provider must allow the callback derived from `OLLUM_DASHBOARD_BASE_URL`.
+The current closed-beta client uses `https://mcp.ollumgroup.ru/auth/callback`; the API
+hostname remains a valid cabinet/API entry point, while authentication completes on the
+canonical MCP hostname. After `https://api.ollumgroup.ru/auth/callback` is registered in
+the same OIDC client, the dashboard variable can be switched to the API hostname without
+a code change.
 
 ## Deployment
 
