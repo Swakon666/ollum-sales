@@ -7,6 +7,7 @@ require (
 	github.com/mdp/qrterminal v1.0.1
 	go.mau.fi/whatsmeow v0.0.0-20260810134348-a23afe317180
 	google.golang.org/protobuf v1.36.11
+	rsc.io/qr v0.2.0
 )
 
 require (
@@ -28,5 +29,4 @@ require (
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
-	rsc.io/qr v0.2.0 // indirect
 )

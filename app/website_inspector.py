@@ -29,7 +29,7 @@ TECH_MARKERS = {
 }
 
 
-def _download_html(url: str, *, timeout: int) -> tuple[str, str, str]:
+def _download_html(url: str, *, timeout: int) -> tuple[str, str, str, bool]:
     current = validate_public_http_url(url)
     session = requests.Session()
     headers = {
@@ -70,20 +70,25 @@ def _download_html(url: str, *, timeout: int) -> tuple[str, str, str]:
             )
         chunks: list[bytes] = []
         total = 0
+        truncated = False
         for chunk in response.iter_content(chunk_size=65536):
             if not chunk:
                 continue
-            total += len(chunk)
-            if total > MAX_HTML_BYTES:
-                response.close()
-                raise ValueError("website HTML exceeds the 2 MB inspection limit")
+            remaining = MAX_HTML_BYTES - total
+            if len(chunk) > remaining:
+                chunks.append(chunk[:remaining])
+                total += remaining
+                truncated = True
+                break
             chunks.append(chunk)
+            total += len(chunk)
         encoding = response.encoding or response.apparent_encoding or "utf-8"
         response.close()
         return (
             current,
             b"".join(chunks).decode(encoding, errors="replace"),
             content_type,
+            truncated,
         )
     raise ValueError("website redirected too many times")
 
@@ -92,7 +97,7 @@ def inspect_website(
     url: str, *, max_text_chars: int = 20_000, timeout: int = 20
 ) -> dict[str, Any]:
     """Fetch bounded public HTML and return factual evidence for Codex-side analysis."""
-    final_url, html, content_type = _download_html(url, timeout=timeout)
+    final_url, html, content_type, html_truncated = _download_html(url, timeout=timeout)
     soup = BeautifulSoup(html, "html.parser")
 
     for node in soup(["script", "style", "noscript", "svg", "template"]):
@@ -161,6 +166,7 @@ def inspect_website(
         "requested_url": url,
         "final_url": final_url,
         "content_type": content_type,
+        "html_truncated": html_truncated,
         "title": title,
         "meta_description": description,
         "language": language,

@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Ollum Control</title>
+    <link rel="stylesheet" href="/assets/admin.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Основная навигация">
+        <a class="brand" href="#overview" aria-label="Ollum Control">
+          <span class="brand-mark" aria-hidden="true">O</span>
+          <span><strong>Ollum</strong><small>Control</small></span>
+        </a>
+        <nav class="nav-list">
+          <button class="nav-item is-active" data-view="overview"><span>◫</span>Обзор</button>
+          <button class="nav-item" data-view="leads"><span>◎</span>Лиды</button>
+          <button class="nav-item" data-view="campaigns"><span>◇</span>Кампании</button>
+          <button class="nav-item" data-view="drafts"><span>✎</span>Черновики</button>
+          <button class="nav-item" data-view="autopilot"><span>◉</span>Autopilot</button>
+          <button class="nav-item" data-view="whatsapp"><span>WA</span>WhatsApp</button>
+          <button class="nav-item" data-view="plugin"><span>⌁</span>GPT-плагин</button>
+          <button class="nav-item" data-view="team"><span>◎</span>Команда</button>
+          <button class="nav-item" data-view="audit"><span>≡</span>Аудит</button>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="connection-state">
+            <span class="pulse-dot" id="connection-dot"></span>
+            <span><strong id="connection-label">Подключение…</strong><small id="connection-meta">Проверяем сервисы</small></span>
+          </div>
+          <form id="logout-form" action="/auth/logout" method="post">
+            <button class="ghost-button full-width" type="submit">Выйти</button>
+          </form>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Закрытая бета</p>
+            <h1 id="page-title">Обзор системы</h1>
+          </div>
+          <div class="topbar-actions">
+            <div class="safety-badge" id="safe-badge"><span></span>SAFE</div>
+            <button class="icon-button" id="refresh-button" title="Обновить данные" aria-label="Обновить данные">↻</button>
+            <div class="avatar" id="user-avatar" aria-hidden="true">OG</div>
+            <div class="user-summary"><strong id="user-name">—</strong><small id="user-email">—</small></div>
+          </div>
+        </header>
+
+        <div class="loading-line" id="loading-line"></div>
+
+        <section class="view is-visible" data-panel="overview">
+          <div class="hero-row">
+            <div>
+              <p class="eyebrow">Операционный центр</p>
+              <h2>Воронка под контролем</h2>
+              <p class="muted">Исследование, grounded scoring и черновики работают автономно. Внешние отправки заблокированы.</p>
+            </div>
+            <div class="hero-actions">
+              <button class="primary-button" data-action="run-cycle">Запустить SAFE-цикл</button>
+              <button class="secondary-button" data-action="sync-sheets">Синхронизировать Sheets</button>
+            </div>
+          </div>
+
+          <div class="metric-grid" id="metric-grid"></div>
+
+          <div class="dashboard-grid">
+            <article class="card span-2">
+              <div class="card-header"><div><p class="eyebrow">Pipeline</p><h3>Состояние лидов</h3></div><span class="timestamp" id="updated-at">—</span></div>
+              <div class="funnel" id="funnel"></div>
+            </article>
+            <article class="card safety-card">
+              <div class="card-header"><div><p class="eyebrow">Guardrails</p><h3>Контур безопасности</h3></div><span class="lock-icon">⌾</span></div>
+              <div class="safety-list" id="safety-list"></div>
+            </article>
+            <article class="card span-2">
+              <div class="card-header"><div><p class="eyebrow">Priority</p><h3>Топ лидов</h3></div><button class="text-button" data-view-link="leads">Все лиды →</button></div>
+              <div class="compact-list" id="top-leads"></div>
+            </article>
+            <article class="card">
+              <div class="card-header"><div><p class="eyebrow">Runtime</p><h3>Последние операции</h3></div></div>
+              <div class="compact-list" id="recent-jobs"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="leads">
+          <div class="section-heading">
+            <div><p class="eyebrow">CRM</p><h2>Лиды</h2><p class="muted">Grounded evidence, score и текущая стадия.</p></div>
+            <div class="filter-bar">
+              <input id="lead-search" type="search" placeholder="Компания, отрасль, регион…" aria-label="Поиск лидов">
+              <select id="lead-status-filter" aria-label="Статус лида"><option value="">Все статусы</option></select>
+              <select id="lead-score-filter" aria-label="Минимальный score"><option value="0">Любой score</option><option value="65">65+</option><option value="70">70+</option><option value="75">75+</option></select>
+            </div>
+          </div>
+          <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Компания</th><th>Статус</th><th>Score</th><th>Evidence</th><th>Обновлено</th></tr></thead><tbody id="leads-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view" data-panel="campaigns">
+          <div class="section-heading">
+            <div><p class="eyebrow">Discovery</p><h2>Кампании</h2><p class="muted">Сохранённые рынки и прогресс сбора компаний.</p></div>
+            <button class="primary-button" id="new-campaign-button">Новая кампания</button>
+          </div>
+          <div class="card-grid" id="campaign-grid"></div>
+        </section>
+
+        <section class="view" data-panel="drafts">
+          <div class="section-heading">
+            <div><p class="eyebrow">Outreach</p><h2>Черновики</h2><p class="muted">Проверка точного получателя и текста. Одобрение не отправляет сообщение.</p></div>
+            <select id="draft-status-filter" aria-label="Статус черновика"><option value="">Все статусы</option><option value="draft">Требует проверки</option><option value="approved">Одобрен</option><option value="sent">Отправлен</option><option value="failed">Ошибка</option></select>
+          </div>
+          <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Канал / получатель</th><th>Текст</th><th>Статус</th><th>Создан</th><th></th></tr></thead><tbody id="drafts-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view" data-panel="autopilot">
+          <div class="section-heading">
+            <div><p class="eyebrow">Automation</p><h2>Autopilot</h2><p class="muted">Управление расписанием и вертикалями в SAFE-контуре.</p></div>
+            <div class="hero-actions"><button class="secondary-button" data-action="stop-autopilot">Остановить</button><button class="primary-button" data-action="start-autopilot">Запустить SAFE</button></div>
+          </div>
+          <div class="dashboard-grid">
+            <article class="card"><div class="card-header"><div><p class="eyebrow">State</p><h3>Текущая конфигурация</h3></div></div><dl class="detail-list" id="autopilot-details"></dl></article>
+            <article class="card span-2"><div class="card-header"><div><p class="eyebrow">Schedule</p><h3>Вертикали</h3></div></div><div class="vertical-list" id="vertical-list"></div></article>
+            <article class="card span-3"><div class="card-header"><div><p class="eyebrow">History</p><h3>Последние циклы</h3></div></div><div class="table-wrap"><table><thead><tr><th>Старт</th><th>Режим</th><th>Статус</th><th>Вертикали</th><th>Ошибка</th></tr></thead><tbody id="cycles-table"></tbody></table></div></article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="whatsapp">
+          <div class="section-heading">
+            <div><p class="eyebrow">Channel</p><h2>Подключение WhatsApp</h2><p class="muted">Привязка устройства выполняется здесь. QR временный и доступен только после входа в кабинет.</p></div>
+            <div class="hero-actions"><span class="readiness-badge" id="whatsapp-state">Проверка…</span><button class="secondary-button" id="refresh-whatsapp-button">Обновить</button></div>
+          </div>
+          <div class="dashboard-grid">
+            <article class="card">
+              <div class="card-header"><div><p class="eyebrow">Bridge</p><h3>Состояние канала</h3></div></div>
+              <dl class="detail-list" id="whatsapp-details"></dl>
+            </article>
+            <article class="card span-2 qr-panel" id="whatsapp-qr-card">
+              <div class="card-header"><div><p class="eyebrow">Pairing</p><h3>QR для привязки устройства</h3></div></div>
+              <div class="qr-stage">
+                <img id="whatsapp-qr" alt="QR-код привязки WhatsApp" hidden>
+                <div class="qr-placeholder" id="whatsapp-qr-empty"><strong>QR сейчас не требуется</strong><span>Если устройство уже подключено, здесь отображается состояние готовности.</span></div>
+              </div>
+              <ol class="pairing-steps"><li>Откройте WhatsApp на телефоне.</li><li>Перейдите в «Связанные устройства».</li><li>Нажмите «Привязка устройства» и отсканируйте QR.</li></ol>
+            </article>
+            <article class="card span-3 notice-card"><strong>SAFE остаётся включён</strong><p>Подключение аккаунта даёт системе доступ к разрешённому контексту, но не включает отправку. WhatsApp send и Autopilot send остаются отключены.</p></article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="team">
+          <div class="section-heading">
+            <div><p class="eyebrow">Workspace</p><h2>Команда и доступ</h2><p class="muted">Единые роли действуют и в кабинете, и в GPT-плагине через OAuth.</p></div>
+            <span class="readiness-badge is-ready" id="workspace-role">—</span>
+          </div>
+          <div class="dashboard-grid">
+            <article class="card span-2">
+              <div class="card-header"><div><p class="eyebrow">Members</p><h3 id="workspace-name">Рабочее пространство</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>Участник</th><th>Роль</th><th>Статус</th><th>Последний вход</th></tr></thead><tbody id="members-table"></tbody></table></div>
+            </article>
+            <article class="card" id="invite-card">
+              <div class="card-header"><div><p class="eyebrow">Closed beta</p><h3>Пригласить участника</h3></div></div>
+              <form id="invite-form" class="stack-form">
+                <label>Email<input name="email" type="email" required maxlength="254" autocomplete="off" placeholder="name@company.com"></label>
+                <label>Роль<select name="role"><option value="viewer">Viewer — только чтение</option><option value="operator">Operator — управление</option><option value="owner">Owner — команда и доступ</option></select></label>
+                <button class="primary-button full-width" type="submit">Создать приглашение</button>
+                <small class="muted">Письмо не отправляется автоматически. Вход станет доступен этому email на 7 дней.</small>
+              </form>
+            </article>
+            <article class="card span-3">
+              <div class="card-header"><div><p class="eyebrow">Pending</p><h3>Ожидают входа</h3></div></div>
+              <div class="table-wrap"><table><thead><tr><th>Email</th><th>Роль</th><th>Создано</th><th>Истекает</th></tr></thead><tbody id="invitations-table"></tbody></table></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="plugin">
+          <div class="section-heading"><div><p class="eyebrow">ChatGPT</p><h2>GPT-плагин</h2><p class="muted">OAuth 2.1 + PKCE, HTTPS и MCP Streamable HTTP.</p></div><span class="readiness-badge" id="plugin-readiness">Проверка…</span></div>
+          <div class="dashboard-grid">
+            <article class="card span-2"><div class="card-header"><div><p class="eyebrow">Connection</p><h3>Параметры подключения</h3></div></div><div class="copy-fields" id="plugin-fields"></div></article>
+            <article class="card"><div class="card-header"><div><p class="eyebrow">Readiness</p><h3>Чек-лист</h3></div></div><div class="safety-list" id="plugin-checks"></div></article>
+            <article class="card span-3 notice-card"><strong>Закрытое тестирование</strong><p>Добавляйте плагин только в Developer mode. Доступ выдаётся через OIDC allowlist; каждый вызов MCP проверяет подпись, issuer, audience, срок действия и scopes.</p></article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="audit">
+          <div class="section-heading"><div><p class="eyebrow">Governance</p><h2>Журнал действий</h2><p class="muted">В журнал не попадают токены, секреты и полный текст переписки.</p></div></div>
+          <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Время</th><th>Оператор</th><th>Действие</th><th>Объект</th><th>Результат</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="draft-dialog" class="modal">
+      <form method="dialog" class="modal-shell" id="draft-review-form">
+        <div class="modal-header"><div><p class="eyebrow">Exact draft review</p><h2>Проверка черновика</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <label>Получатель<input id="draft-recipient" readonly></label>
+        <label>Точный текст<textarea id="draft-message" rows="8" readonly></textarea></label>
+        <div class="warning-box"><strong>Это только одобрение.</strong><span>Сообщение не будет отправлено. Для отправки требуется отдельное действие, которого нет в beta-панели.</span></div>
+        <label>Введите <code>APPROVE</code><input id="draft-confirmation" autocomplete="off" placeholder="APPROVE"></label>
+        <div class="modal-actions"><button class="secondary-button" value="cancel">Отмена</button><button class="primary-button" id="approve-draft-button" value="default">Одобрить точный текст</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="campaign-dialog" class="modal">
+      <form method="dialog" class="modal-shell" id="campaign-form">
+        <div class="modal-header"><div><p class="eyebrow">Discovery</p><h2>Новая кампания</h2></div><button class="icon-button" value="cancel" aria-label="Закрыть">×</button></div>
+        <label>Название<input name="name" required maxlength="120"></label>
+        <div class="two-columns"><label>Отрасль<input name="industry" maxlength="120"></label><label>Регион<input name="location" maxlength="120"></label></div>
+        <label>Поисковый контекст<input name="search_query" maxlength="300"></label>
+        <label>Целевое число лидов<input name="target_count" type="number" min="1" max="200" value="20"></label>
+        <div class="modal-actions"><button class="secondary-button" value="cancel">Отмена</button><button class="primary-button" id="create-campaign-button" value="default">Создать</button></div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/assets/admin.js" defer></script>
+  </body>
+</html>

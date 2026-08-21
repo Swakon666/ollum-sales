@@ -1,9 +1,11 @@
 # Ollum Sales MCP — Full Source Edition
 
-Version **0.4.0** adds a persistent SAFE-first Autopilot worker, vertical rotation,
-conversion reports, and a bidirectional Google Sheets control panel while keeping both upstream
-projects **complete and unmodified** under `upstream/`. All Ollum-specific integration code remains
-separate in `app/`.
+Version **0.6.0** adds an OAuth/OIDC-protected closed-beta service: a role-aware
+workspace cabinet on `api.ollumgroup.ru`, a ChatGPT MCP connection on
+`mcp.ollumgroup.ru`, and private browser-based WhatsApp pairing. It retains the
+persistent SAFE-first Autopilot, grounded scoring, reports, and Google Sheets panel.
+The full vendored upstream projects remain under `upstream/`; the WhatsApp bridge has
+a small audited pairing-status/PNG adapter while Ollum business logic stays in `app/`.
 
 ## Repository layout
 
@@ -22,11 +24,14 @@ ollum-sales-mcp/
 └── README.md
 ```
 
-**Rule:** do not patch files inside `upstream/` for Ollum-specific behavior. Put adapters, overrides and business logic in `app/`. This makes upstream upgrades and diffs much easier.
+**Rule:** keep business logic in `app/`. Changes under `upstream/` are limited to
+audited compatibility/security adapters that cannot live outside the vendored service.
 
 ## What the MCP exposes
 
-The server exposes 42 tools. The original 30 remain compatible, with 12 v0.4 tools added:
+The server exposes 43 tools. Existing tools remain compatible, plus
+`ollum_whoami` reports the current OAuth workspace identity and role without exposing
+tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
@@ -40,16 +45,26 @@ The server exposes 42 tools. The original 30 remain compatible, with 12 v0.4 too
 `ollum_status` reports runtime readiness and CRM counts without exposing secrets.
 
 The MCP endpoint uses Streamable HTTP at `/mcp`. Production serves it as
-`https://mcp.ollumgroup.ru/mcp` behind bearer authentication and the host Nginx proxy.
+`https://mcp.ollumgroup.ru/mcp` behind the host Nginx proxy. Legacy deployments may use a
+static bearer token; the closed beta uses OAuth/OIDC.
+
+Closed-beta OIDC setup and ChatGPT connection instructions are in
+[`docs/CLOSED_BETA.md`](docs/CLOSED_BETA.md).
+
+The cabinet is served at `https://api.ollumgroup.ru/`. It includes CRM, SAFE
+Autopilot, drafts, audit/jobs, workspace members and roles, plugin readiness, and a
+short-lived WhatsApp QR. The bridge itself remains private on the Docker network.
 
 ## Architecture
 
 ```text
-ChatGPT / MCP client
-        |
-        | HTTPS + Bearer token
-        v
-Host Nginx :443
+ChatGPT / MCP client                 Browser cabinet
+        |                                  |
+        | OAuth access token               | OIDC session + CSRF
+        v                                  v
+       mcp.ollumgroup.ru       api.ollumgroup.ru
+                  \             /
+                   Host Nginx :443
         |
         | 127.0.0.1:18000
         v
@@ -97,7 +112,7 @@ cp .env.example .env
 docker compose build
 ```
 
-4. Start the services and follow the WhatsApp QR/auth logs:
+4. Start the services and follow the WhatsApp QR/auth logs for local development:
 
 ```bash
 docker compose up -d
@@ -105,6 +120,8 @@ docker compose logs --follow whatsapp-bridge
 ```
 
 Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
+Production pairing is performed in the authenticated cabinet; the raw pairing value
+is never returned through its JSON API.
 Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys. The separate `ollum-sales-worker` service reads the same CRM volume and continues scheduled cycles while Codex is closed.
 
 5. MCP endpoint:

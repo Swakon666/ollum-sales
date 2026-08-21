@@ -96,6 +96,69 @@ def bridge_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
     }
 
 
+def bridge_pairing_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
+    """Return only the public state of the current QR pairing window."""
+    pairing_url = f"{settings.whatsapp_api_base_url.rstrip('/')}/pairing"
+    unavailable = {
+        "reachable": False,
+        "state": "unavailable",
+        "needs_pairing": False,
+        "has_qr": False,
+    }
+    try:
+        response = requests.get(pairing_url, timeout=timeout_seconds)
+        payload = response.json()
+    except (requests.RequestException, ValueError) as exc:
+        return {**unavailable, "error": type(exc).__name__}
+    if not isinstance(payload, dict):
+        return {**unavailable, "error": "InvalidPairingPayload"}
+    allowed_states = {
+        "starting",
+        "connected",
+        "waiting_for_scan",
+        "refreshing",
+        "paired",
+        "timed_out",
+        "failed",
+        "not_required",
+    }
+    state = payload.get("state")
+    return {
+        "reachable": response.status_code < 500,
+        "http_status": response.status_code,
+        "state": state
+        if isinstance(state, str) and state in allowed_states
+        else "unknown",
+        "needs_pairing": payload.get("needs_pairing") is True,
+        "has_qr": payload.get("has_qr") is True,
+        "updated_at": payload.get("updated_at")
+        if isinstance(payload.get("updated_at"), str)
+        else None,
+        "expires_at": payload.get("expires_at")
+        if isinstance(payload.get("expires_at"), str)
+        else None,
+        "generation": payload.get("generation")
+        if isinstance(payload.get("generation"), int)
+        and not isinstance(payload.get("generation"), bool)
+        else None,
+    }
+
+
+def bridge_pairing_qr(timeout_seconds: float = 3.0) -> bytes | None:
+    """Fetch an ephemeral QR PNG from the private bridge network."""
+    qr_url = f"{settings.whatsapp_api_base_url.rstrip('/')}/pairing/qr"
+    try:
+        response = requests.get(qr_url, timeout=timeout_seconds)
+    except requests.RequestException:
+        return None
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+    if response.status_code != 200 or content_type != "image/png":
+        return None
+    if not response.content or len(response.content) > 2_000_000:
+        return None
+    return bytes(response.content)
+
+
 def _serialize(value: Any) -> Any:
     if is_dataclass(value):
         return asdict(value)

@@ -9,9 +9,18 @@ from app import whatsapp_service
 
 
 class FakeResponse:
-    def __init__(self, status_code: int, payload: object) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        payload: object,
+        *,
+        content: bytes = b"",
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self._payload = payload
+        self.content = content
+        self.headers = headers or {}
 
     def json(self) -> object:
         return self._payload
@@ -65,6 +74,57 @@ class TestWhatsAppService(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["send_enabled"])
         self.assertEqual(result["error"], "ConnectionError")
+
+    def test_pairing_status_whitelists_metadata_and_never_returns_code(self) -> None:
+        with patch.object(
+            whatsapp_service.requests,
+            "get",
+            return_value=FakeResponse(
+                200,
+                {
+                    "state": "waiting_for_scan",
+                    "needs_pairing": True,
+                    "has_qr": True,
+                    "generation": 4,
+                    "updated_at": "2026-08-21T12:00:00Z",
+                    "expires_at": "2026-08-21T12:00:30Z",
+                    "qr_code": "must-not-leak",
+                },
+            ),
+        ):
+            result = whatsapp_service.bridge_pairing_status()
+
+        self.assertTrue(result["reachable"])
+        self.assertTrue(result["has_qr"])
+        self.assertEqual(result["generation"], 4)
+        self.assertNotIn("qr_code", result)
+        self.assertNotIn("must-not-leak", repr(result))
+
+    def test_pairing_qr_accepts_only_bounded_png_response(self) -> None:
+        png = b"\x89PNG\r\n\x1a\nimage"
+        with patch.object(
+            whatsapp_service.requests,
+            "get",
+            return_value=FakeResponse(
+                200,
+                {},
+                content=png,
+                headers={"content-type": "image/png"},
+            ),
+        ):
+            self.assertEqual(whatsapp_service.bridge_pairing_qr(), png)
+
+        with patch.object(
+            whatsapp_service.requests,
+            "get",
+            return_value=FakeResponse(
+                200,
+                {},
+                content=b"not-an-image",
+                headers={"content-type": "text/plain"},
+            ),
+        ):
+            self.assertIsNone(whatsapp_service.bridge_pairing_qr())
 
     def test_contacts_are_normalized_and_technical_jids_are_filtered(self) -> None:
         contacts = [

@@ -147,6 +147,105 @@ class SalesCRMTests(unittest.TestCase):
         )
         self.assertEqual(name_lead["id"], by_name["id"])
 
+    def test_lookup_keys_are_indexed_and_rebuilt_by_migration(self) -> None:
+        lead = self.crm.upsert_lead(
+            "Indexed Company",
+            "https://www.indexed-company.test/path",
+            location="Moscow",
+            phones=["+7 (999) 123-45-67"],
+        )
+        with self.crm.connect() as connection:
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
+            index_names = {
+                row["name"] for row in connection.execute("PRAGMA index_list(leads)")
+            }
+            self.assertIn("idx_leads_domain_key", index_names)
+            self.assertIn("idx_leads_name_location", index_names)
+            self.assertEqual(
+                connection.execute(
+                    "SELECT phone_key FROM lead_phone_keys WHERE lead_id = ?",
+                    (lead["id"],),
+                ).fetchone()["phone_key"],
+                "79991234567",
+            )
+            connection.execute("PRAGMA user_version = 5")
+            connection.execute(
+                "UPDATE leads SET domain_key = NULL, name_key = NULL, location_key = NULL"
+            )
+            connection.execute("DELETE FROM lead_phone_keys")
+
+        migrated = SalesCRM(Path(self.tempdir.name) / "sales.db")
+
+        self.assertEqual(
+            migrated.find_lead_by_website_url("http://indexed-company.test/other")[
+                "id"
+            ],
+            lead["id"],
+        )
+        self.assertEqual(
+            migrated.find_leads_by_phone("8 999 123-45-67")[0]["lead_id"],
+            lead["id"],
+        )
+
+    def test_analysis_contact_changes_refresh_phone_lookup(self) -> None:
+        lead = self.crm.upsert_lead("Analysis Contact", "https://analysis-contact.test")
+        self.crm.save_analysis(
+            lead["id"],
+            {
+                "company_name": "Analysis Contact",
+                "summary": "Grounded summary",
+                "contacts": {"phones": ["+7 999 555-44-33"]},
+            },
+        )
+
+        matches = self.crm.find_leads_by_phone("8 (999) 555-44-33")
+
+        self.assertEqual(matches[0]["lead_id"], lead["id"])
+
+    def test_rank_filter_excludes_missing_and_expired_evidence(self) -> None:
+        fresh = self.crm.upsert_lead("Fresh", "https://fresh-ranking.test")
+        stale = self.crm.upsert_lead("Stale", "https://stale-ranking.test")
+        missing = self.crm.upsert_lead("Missing", "https://missing-ranking.test")
+        for lead in (fresh, stale, missing):
+            self.crm.score_lead(lead["id"], fit=90, need=90, budget=90, timing=90)
+        self.crm.save_inspection(
+            fresh["id"], {"final_url": "https://fresh-ranking.test", "facts": ["x"]}
+        )
+        self.crm.save_inspection(
+            stale["id"], {"final_url": "https://stale-ranking.test", "facts": ["x"]}
+        )
+        expired = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+        with self.crm.connect() as connection:
+            connection.execute(
+                "UPDATE leads SET evidence_expires_at = ? WHERE id = ?",
+                (expired, stale["id"]),
+            )
+
+        ranked = self.crm.list_leads(fresh_evidence_only=True)
+
+        self.assertEqual([item["id"] for item in ranked], [fresh["id"]])
+
+    def test_cleanup_removes_only_legacy_production_check_artifacts(self) -> None:
+        synthetic = self.crm.upsert_lead(
+            "Synthetic",
+            "https://synthetic-production-check.test",
+            source="production-safe-check",
+        )
+        self.crm.save_outreach_draft(
+            synthetic["id"],
+            channel="whatsapp",
+            recipient="79990000009",
+            message="Synthetic draft",
+        )
+        real = self.crm.upsert_lead("Real", "https://real-company.test")
+
+        removed = self.crm.remove_production_safe_check_artifacts()
+
+        self.assertEqual(removed, 1)
+        with self.assertRaisesRegex(ValueError, "lead not found"):
+            self.crm.get_lead(synthetic["id"])
+        self.assertEqual(self.crm.get_lead(real["id"])["id"], real["id"])
+
     def test_evidence_freshness_requires_reinspection_after_expiry(self) -> None:
         lead = self.crm.upsert_lead("Evidence", "https://evidence.test")
         self.crm.save_inspection(
@@ -251,6 +350,75 @@ class SalesCRMTests(unittest.TestCase):
         self.assertEqual(report["stages"]["replied"], 1)
         self.assertEqual(report["rates"]["reply_per_contacted"], 100.0)
         self.crm.complete_autopilot_cycle(cycle["id"], metrics={})
+
+    def test_admin_audit_and_cycle_history_are_persistent_and_bounded(self) -> None:
+        event = self.crm.record_admin_audit(
+            actor="operator@example.com",
+            action="lead.status.update",
+            target_type="lead",
+            target_id="lead-1",
+            outcome="success",
+            details={"status": "qualified"},
+        )
+        cycle = self.crm.begin_autopilot_cycle(force=True)
+        self.crm.complete_autopilot_cycle(cycle["id"], metrics={"checked": 0})
+
+        audit = self.crm.list_admin_audit(limit=1)
+        cycles = self.crm.list_autopilot_cycles(limit=1)
+
+        self.assertEqual(audit[0]["id"], event["id"])
+        self.assertEqual(audit[0]["details"], {"status": "qualified"})
+        self.assertEqual(cycles[0]["id"], cycle["id"])
+        self.assertEqual(cycles[0]["status"], "completed")
+
+    def test_workspace_bootstrap_invitation_and_roles_are_persistent(self) -> None:
+        owner = self.crm.authorize_workspace_identity(
+            workspace_id="ollum-group",
+            workspace_name="Ollum Group",
+            subject="auth0|owner",
+            email="owner@example.com",
+            display_name="Owner",
+            bootstrap_allowed=True,
+        )
+        self.assertEqual(owner["role"], "owner")
+
+        invitation = self.crm.invite_workspace_member(
+            workspace_id="ollum-group",
+            email="viewer@example.com",
+            role="viewer",
+            invited_by="owner@example.com",
+        )
+        viewer = self.crm.authorize_workspace_identity(
+            workspace_id="ollum-group",
+            workspace_name="Ollum Group",
+            subject="auth0|viewer",
+            email="viewer@example.com",
+            display_name="Viewer",
+            bootstrap_allowed=False,
+        )
+        self.assertEqual(viewer["role"], "viewer")
+        self.assertEqual(
+            self.crm.list_workspace_invitations("ollum-group", status="accepted")[0][
+                "id"
+            ],
+            invitation["id"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "not invited"):
+            self.crm.authorize_workspace_identity(
+                workspace_id="ollum-group",
+                workspace_name="Ollum Group",
+                subject="auth0|outsider",
+                email="outsider@example.com",
+                display_name="Outsider",
+                bootstrap_allowed=False,
+            )
+        with self.assertRaisesRegex(ValueError, "last workspace owner"):
+            self.crm.update_workspace_member_role(
+                workspace_id="ollum-group",
+                member_id=owner["id"],
+                role="operator",
+            )
 
 
 if __name__ == "__main__":

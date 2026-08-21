@@ -107,6 +107,7 @@ def run_check() -> dict[str, Any]:
     if not sheets.configured:
         raise RuntimeError("Google Sheets is not fully configured")
 
+    removed_verification_artifacts = crm.remove_production_safe_check_artifacts()
     started = autopilot.start(mode="safe", interval_minutes=45)
     if not started["success"]:
         raise RuntimeError("could not start Autopilot in SAFE mode")
@@ -154,6 +155,7 @@ def run_check() -> dict[str, Any]:
         "sheet_rows_after_cycle": _sheet_row_counts(sheets),
         "sheet_rows_from_cycle": _cycle_sheet_rows(crm, cycle["id"]),
         "safe_send_guardrail_check": send_guardrail_check,
+        "removed_verification_artifacts": removed_verification_artifacts,
         "rotation": rotation,
         "autopilot": state,
     }
@@ -172,7 +174,10 @@ def status_check(expected_cycle_id: str) -> dict[str, Any]:
     if cycle["status"] != "completed":
         raise RuntimeError("verified cycle did not persist as completed")
     sheet_state = sheets.status()
-    if sheet_state["last_sync_status"] != "success":
+    last_sync_status = sheet_state.get("last_sync_status")
+    if last_sync_status is None:
+        last_sync_status = (sheet_state.get("last_sync") or {}).get("status")
+    if last_sync_status != "success":
         raise RuntimeError("Google Sheets success state did not persist")
     return {
         "success": True,

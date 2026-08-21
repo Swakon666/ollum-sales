@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck shell=bash
 set -Eeuo pipefail
 
 die() {
@@ -46,19 +47,16 @@ with crm.connect() as connection:
     ).fetchone()
     if latest is None:
         raise RuntimeError("no completed Autopilot cycle was found")
-    action_row = connection.execute(
+    artifact_count = connection.execute(
         """
-        SELECT l.id AS lead_id, l.company_name, d.id AS draft_id,
-            d.status AS draft_status, r.status AS send_request_status,
-            r.error AS send_request_error
-        FROM leads l
-        LEFT JOIN outreach_drafts d ON d.lead_id = l.id
-        LEFT JOIN outreach_send_requests r ON r.draft_id = d.id
-        WHERE l.source = 'production-safe-check'
-        ORDER BY l.updated_at DESC, d.created_at DESC, r.requested_at DESC
-        LIMIT 1
+        SELECT COUNT(*)
+        FROM leads
+        WHERE source = 'production-safe-check'
         """
-    ).fetchone()
+    ).fetchone()[0]
+
+if artifact_count:
+    raise RuntimeError("legacy production-safe-check artifacts remain in the CRM")
 
 cycle = crm.get_autopilot_cycle(latest["id"])
 state = autopilot.status()
@@ -97,12 +95,10 @@ emit("AUTOPILOT_METRICS", cycle["metrics"])
 emit("AUTOPILOT_CYCLE_SHEET_ROWS", _cycle_sheet_rows(crm, cycle["id"]))
 emit("AUTOPILOT_SHEET_TOTALS", _sheet_row_counts(sheets))
 emit(
-    "AUTOPILOT_APPROVE_SEND",
+    "AUTOPILOT_VERIFICATION_ARTIFACTS",
     {
-        **(dict(action_row) if action_row is not None else {}),
-        "approve_imported": bool(action_row and action_row["draft_status"] == "approved"),
-        "send_imported": bool(action_row and action_row["send_request_status"] == "failed"),
-        "actually_sent": False,
+        "remaining": artifact_count,
+        "clean": artifact_count == 0,
     },
 )
 emit(
