@@ -599,6 +599,7 @@ jobs:
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "sudo -S -p '' bash -s -- '$SSH_USER' '$OLLUM_DOMAIN' '$RELEASE_ID' '$INCOMING_PATH' '$MCP_BIND_PORT' '$PREBUILT_IMAGE_TAG' '$PREBUILT_IMAGE_ID' '$PREBUILT_SHA256' '${OLLUM_API_DOMAIN:-$OLLUM_DOMAIN}'"
+          echo "DEPLOY_COMPLETED=true" >> "$GITHUB_ENV"
 
       - name: Roll back to previous release
         if: ${{ env.DEPLOY_MODE == 'rollback' }}
@@ -733,6 +734,28 @@ jobs:
               }
             fi
           fi
+          echo "VERIFICATION_SUCCEEDED=true" >> "$GITHUB_ENV"
+
+      - name: Roll back deployment after failed endpoint verification
+        if: >-
+          ${{ failure() &&
+              env.DEPLOY_COMPLETED == 'true' &&
+              env.VERIFICATION_SUCCEEDED != 'true' &&
+              (env.DEPLOY_MODE == 'deploy' || env.DEPLOY_MODE == 'deploy-prebuilt') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/remote_rollback.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER' '$OLLUM_DOMAIN' '$MCP_BIND_PORT'"
 
       - name: Verify one SAFE Autopilot cycle and worker persistence
         if: ${{ env.DEPLOY_MODE == 'verify-autopilot' }}

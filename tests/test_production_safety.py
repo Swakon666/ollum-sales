@@ -119,6 +119,9 @@ def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> 
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"
     )
+    nginx = (REPOSITORY_ROOT / "deploy" / "nginx" / "ollum-sales.conf").read_text(
+        encoding="utf-8"
+    )
 
     assert "expected_prebuilt_archive_sha256=${8:-}" in deploy
     assert "api_domain=${9:-$domain}" in deploy
@@ -137,6 +140,10 @@ def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> 
         "oidc_redirect_base_url=${OIDC_REDIRECT_BASE_URL:-https://$OLLUM_DOMAIN}"
         in workflow
     )
+    assert "DEPLOY_COMPLETED=true" in workflow
+    assert "VERIFICATION_SUCCEEDED=true" in workflow
+    assert "Roll back deployment after failed endpoint verification" in workflow
+    assert "proxy_set_header X-Forwarded-Host $host;" in nginx
     assert "https://$api_domain/api/v1/session" in workflow
 
 
