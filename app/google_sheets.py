@@ -258,6 +258,7 @@ class GoogleSheetsSync:
         for action in by_id.values():
             try:
                 draft = self.crm.get_outreach_draft(action["draft_id"])
+                status_before_import = draft["status"]
                 if (
                     str(draft.get("recipient") or "") != action["recipient"]
                     or str(draft.get("message") or "") != action["message"]
@@ -269,9 +270,11 @@ class GoogleSheetsSync:
                     draft = self.crm.approve_outreach_draft(draft["id"])
                     approved.append(draft["id"])
                 if action["send"]:
-                    if draft["status"] != "approved":
+                    if status_before_import != "approved":
                         raise ValueError(
-                            "SEND requires the exact draft to be approved first"
+                            "SEND requires the exact draft to have been approved in a "
+                            "previous Google Sheets sync; APPROVE and SEND are two "
+                            "separate operator actions"
                         )
                     self.crm.queue_outreach_send_request(draft["id"])
                     send_requested.append(draft["id"])
@@ -621,13 +624,6 @@ class GoogleSheetsSync:
             sheet_ids, created_ids = self._ensure_tabs(service)
             actions = self._pull_actions(service)
             snapshot = self._snapshot()
-            ranges = [f"'{name}'!A:Z" for name in self.tab_names]
-            clear_request = (
-                service.spreadsheets()
-                .values()
-                .batchClear(spreadsheetId=self.spreadsheet_id, body={"ranges": ranges})
-            )
-            self._execute(clear_request)
             body = {
                 "valueInputOption": "RAW",
                 "data": [
@@ -641,6 +637,18 @@ class GoogleSheetsSync:
                 .batchUpdate(spreadsheetId=self.spreadsheet_id, body=body)
             )
             result = self._execute(update_request)
+            tail_ranges = [
+                f"'{name}'!A{len(values) + 1}:Z" for name, values in snapshot.items()
+            ]
+            clear_request = (
+                service.spreadsheets()
+                .values()
+                .batchClear(
+                    spreadsheetId=self.spreadsheet_id,
+                    body={"ranges": tail_ranges},
+                )
+            )
+            self._execute(clear_request)
             self._format_new_tabs(service, sheet_ids, created_ids)
             details = {
                 "tabs": {
@@ -649,6 +657,7 @@ class GoogleSheetsSync:
                 "updated_cells": result.get("totalUpdatedCells", 0),
                 "actions": actions,
                 "retry_count": self._retry_count,
+                "write_strategy": "update_then_clear_tail",
             }
             self.crm.record_google_sheets_sync(status="success", details=details)
             return {"success": True, **details}

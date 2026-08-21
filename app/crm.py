@@ -48,6 +48,8 @@ LEAD_STATUSES = {
 DRAFT_STATUSES = {"draft", "approved", "sending", "sent", "cancelled", "failed"}
 FOLLOWUP_STATUSES = {"pending", "completed", "cancelled"}
 AUTOPILOT_MODES = {"safe", "semi_auto", "autopilot"}
+WORKSPACE_ROLES = {"viewer", "operator", "owner"}
+WORKSPACE_MEMBER_STATUSES = {"active", "revoked"}
 WEEKDAYS = {
     "monday",
     "tuesday",
@@ -129,6 +131,9 @@ class SalesCRM:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.execute("PRAGMA journal_mode = WAL")
+            schema_version = int(
+                connection.execute("PRAGMA user_version").fetchone()[0]
+            )
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS campaigns (
@@ -162,7 +167,16 @@ class SalesCRM:
                     last_analyzed_at TEXT,
                     inspection_json TEXT,
                     last_inspected_at TEXT,
-                    evidence_expires_at TEXT
+                    evidence_expires_at TEXT,
+                    domain_key TEXT,
+                    name_key TEXT,
+                    location_key TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS lead_phone_keys (
+                    lead_id TEXT NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+                    phone_key TEXT NOT NULL,
+                    PRIMARY KEY (lead_id, phone_key)
                 );
 
                 CREATE TABLE IF NOT EXISTS campaign_leads (
@@ -278,6 +292,51 @@ class SalesCRM:
                     error TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS admin_audit_log (
+                    id TEXT PRIMARY KEY,
+                    actor TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    target_type TEXT,
+                    target_id TEXT,
+                    outcome TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workspaces (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS workspace_members (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    subject TEXT NOT NULL,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    display_name TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT,
+                    UNIQUE (workspace_id, subject)
+                );
+
+                CREATE TABLE IF NOT EXISTS workspace_invitations (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    email TEXT NOT NULL COLLATE NOCASE,
+                    role TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    invited_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    accepted_at TEXT
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_campaign_leads_campaign ON campaign_leads(campaign_id);
                 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score DESC);
                 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
@@ -288,7 +347,14 @@ class SalesCRM:
                 CREATE INDEX IF NOT EXISTS idx_autopilot_campaigns_vertical ON autopilot_campaigns(vertical_id, created_at DESC);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_send_requests_pending_draft
                     ON outreach_send_requests(draft_id) WHERE status = 'pending';
-                PRAGMA user_version = 5;
+                CREATE INDEX IF NOT EXISTS idx_admin_audit_created
+                    ON admin_audit_log(created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_members_active_email
+                    ON workspace_members(workspace_id, email) WHERE status = 'active';
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_invitations_pending_email
+                    ON workspace_invitations(workspace_id, email) WHERE status = 'pending';
+                CREATE INDEX IF NOT EXISTS idx_workspace_members_subject
+                    ON workspace_members(subject, status);
                 """
             )
             lead_columns = {
@@ -299,11 +365,37 @@ class SalesCRM:
                 ("inspection_json", "TEXT"),
                 ("last_inspected_at", "TEXT"),
                 ("evidence_expires_at", "TEXT"),
+                ("domain_key", "TEXT"),
+                ("name_key", "TEXT"),
+                ("location_key", "TEXT"),
             ):
                 if name not in lead_columns:
                     connection.execute(
                         f"ALTER TABLE leads ADD COLUMN {name} {column_type}"
                     )
+            connection.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_leads_domain_key
+                    ON leads(domain_key, created_at);
+                CREATE INDEX IF NOT EXISTS idx_leads_name_location
+                    ON leads(name_key, location_key, created_at);
+                CREATE INDEX IF NOT EXISTS idx_lead_phone_keys_phone
+                    ON lead_phone_keys(phone_key, lead_id);
+                """
+            )
+            if schema_version < 6:
+                connection.execute("DELETE FROM lead_phone_keys")
+                lookup_rows = connection.execute("SELECT id FROM leads").fetchall()
+            else:
+                lookup_rows = connection.execute(
+                    """
+                    SELECT id FROM leads
+                    WHERE domain_key IS NULL OR name_key IS NULL OR location_key IS NULL
+                    """
+                ).fetchall()
+            for row in lookup_rows:
+                self._sync_lead_lookup_keys(connection, row["id"])
+            connection.execute("PRAGMA user_version = 8")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -324,6 +416,350 @@ class SalesCRM:
             )
 
     @staticmethod
+    def _workspace_role(value: str) -> str:
+        role = value.strip().lower()
+        if role not in WORKSPACE_ROLES:
+            raise ValueError(
+                f"role must be one of: {', '.join(sorted(WORKSPACE_ROLES))}"
+            )
+        return role
+
+    @staticmethod
+    def _workspace_id(value: str) -> str:
+        workspace_id = value.strip().lower()
+        if not workspace_id or len(workspace_id) > 64:
+            raise ValueError("workspace_id must contain between 1 and 64 characters")
+        if any(
+            character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
+            for character in workspace_id
+        ):
+            raise ValueError("workspace_id may only contain a-z, 0-9, '-' and '_'")
+        return workspace_id
+
+    def ensure_workspace(self, workspace_id: str, name: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_name = name.strip()
+        if not clean_name or len(clean_name) > 120:
+            raise ValueError("workspace name must contain between 1 and 120 characters")
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO workspaces (id, name, status, created_at, updated_at)
+                VALUES (?, ?, 'active', ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = excluded.name,
+                    updated_at = excluded.updated_at
+                """,
+                (workspace_id, clean_name, timestamp, timestamp),
+            )
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM workspaces WHERE id = ?", (workspace_id,)
+            ).fetchone()
+        if row is None:
+            raise ValueError("workspace not found")
+        return dict(row)
+
+    @staticmethod
+    def _workspace_member_view(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            key: row[key]
+            for key in (
+                "id",
+                "workspace_id",
+                "subject",
+                "email",
+                "display_name",
+                "role",
+                "status",
+                "created_at",
+                "updated_at",
+                "last_login_at",
+            )
+        }
+
+    def authorize_workspace_identity(
+        self,
+        *,
+        workspace_id: str,
+        workspace_name: str,
+        subject: str,
+        email: str,
+        display_name: str,
+        bootstrap_allowed: bool,
+        owner_emails: tuple[str, ...] = (),
+    ) -> dict[str, Any]:
+        """Bind a verified OIDC identity to a closed-beta workspace.
+
+        Existing memberships are matched by immutable OIDC subject. A new identity
+        must have either a pending invitation or be present in the deployment
+        bootstrap allowlist. Email alone never rebinds an existing subject.
+        """
+        workspace = self.ensure_workspace(workspace_id, workspace_name)
+        clean_subject = subject.strip()
+        clean_email = email.strip().lower()
+        clean_name = display_name.strip() or clean_email
+        if not clean_subject or not clean_email:
+            raise ValueError("verified subject and email are required")
+        timestamp = utc_now()
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM workspace_members
+                WHERE workspace_id = ? AND subject = ? AND status = 'active'
+                """,
+                (workspace["id"], clean_subject),
+            ).fetchone()
+            if existing is not None:
+                if existing["email"].lower() != clean_email:
+                    raise ValueError("OIDC subject email changed; owner review is required")
+                connection.execute(
+                    """
+                    UPDATE workspace_members
+                    SET display_name = ?, updated_at = ?, last_login_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_name, timestamp, timestamp, existing["id"]),
+                )
+                row = connection.execute(
+                    "SELECT * FROM workspace_members WHERE id = ?", (existing["id"],)
+                ).fetchone()
+                assert row is not None
+                return {**self._workspace_member_view(row), "workspace": workspace}
+
+            email_member = connection.execute(
+                """
+                SELECT id FROM workspace_members
+                WHERE workspace_id = ? AND email = ? AND status = 'active'
+                """,
+                (workspace["id"], clean_email),
+            ).fetchone()
+            if email_member is not None:
+                raise ValueError("email is already bound to another OIDC subject")
+
+            invitation = connection.execute(
+                """
+                SELECT * FROM workspace_invitations
+                WHERE workspace_id = ? AND email = ? AND status = 'pending'
+                    AND expires_at > ?
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                (workspace["id"], clean_email, timestamp),
+            ).fetchone()
+            if invitation is not None:
+                role = self._workspace_role(invitation["role"])
+            elif bootstrap_allowed:
+                active_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM workspace_members
+                        WHERE workspace_id = ? AND status = 'active'
+                        """,
+                        (workspace["id"],),
+                    ).fetchone()[0]
+                )
+                role = (
+                    "owner"
+                    if active_count == 0 or clean_email in {e.lower() for e in owner_emails}
+                    else "operator"
+                )
+            else:
+                raise ValueError("account is not invited to this closed beta")
+
+            member_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO workspace_members (
+                    id, workspace_id, subject, email, display_name, role, status,
+                    created_at, updated_at, last_login_at
+                ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+                """,
+                (
+                    member_id,
+                    workspace["id"],
+                    clean_subject,
+                    clean_email,
+                    clean_name,
+                    role,
+                    timestamp,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            if invitation is not None:
+                connection.execute(
+                    """
+                    UPDATE workspace_invitations
+                    SET status = 'accepted', accepted_at = ? WHERE id = ?
+                    """,
+                    (timestamp, invitation["id"]),
+                )
+            row = connection.execute(
+                "SELECT * FROM workspace_members WHERE id = ?", (member_id,)
+            ).fetchone()
+        assert row is not None
+        return {**self._workspace_member_view(row), "workspace": workspace}
+
+    def get_workspace_member(
+        self, *, workspace_id: str, subject: str
+    ) -> dict[str, Any] | None:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM workspace_members
+                WHERE workspace_id = ? AND subject = ? AND status = 'active'
+                """,
+                (workspace_id, subject.strip()),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._workspace_member_view(row)
+
+    def list_workspace_members(self, workspace_id: str) -> list[dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workspace_members
+                WHERE workspace_id = ?
+                ORDER BY status ASC,
+                    CASE role WHEN 'owner' THEN 0 WHEN 'operator' THEN 1 ELSE 2 END,
+                    email ASC
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return [self._workspace_member_view(row) for row in rows]
+
+    def invite_workspace_member(
+        self,
+        *,
+        workspace_id: str,
+        email: str,
+        role: str,
+        invited_by: str,
+        expires_in_days: int = 7,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_email = email.strip().lower()
+        clean_role = self._workspace_role(role)
+        if not clean_email or "@" not in clean_email or len(clean_email) > 254:
+            raise ValueError("a valid email is required")
+        if not 1 <= int(expires_in_days) <= 30:
+            raise ValueError("expires_in_days must be between 1 and 30")
+        timestamp = utc_now()
+        expires_at = (
+            datetime.now(UTC) + timedelta(days=int(expires_in_days))
+        ).isoformat(timespec="seconds")
+        invitation_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id FROM workspace_members
+                WHERE workspace_id = ? AND email = ? AND status = 'active'
+                """,
+                (workspace_id, clean_email),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("email is already an active workspace member")
+            connection.execute(
+                """
+                UPDATE workspace_invitations SET status = 'cancelled'
+                WHERE workspace_id = ? AND email = ? AND status = 'pending'
+                """,
+                (workspace_id, clean_email),
+            )
+            connection.execute(
+                """
+                INSERT INTO workspace_invitations (
+                    id, workspace_id, email, role, status, invited_by,
+                    created_at, expires_at
+                ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+                """,
+                (
+                    invitation_id,
+                    workspace_id,
+                    clean_email,
+                    clean_role,
+                    invited_by.strip(),
+                    timestamp,
+                    expires_at,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM workspace_invitations WHERE id = ?", (invitation_id,)
+            ).fetchone()
+        assert row is not None
+        return dict(row)
+
+    def list_workspace_invitations(
+        self, workspace_id: str, *, status: str = "pending"
+    ) -> list[dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_status = status.strip().lower()
+        if clean_status not in {"pending", "accepted", "cancelled"}:
+            raise ValueError("unsupported invitation status")
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM workspace_invitations
+                WHERE workspace_id = ? AND status = ?
+                ORDER BY created_at DESC
+                """,
+                (workspace_id, clean_status),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_workspace_member_role(
+        self, *, workspace_id: str, member_id: str, role: str
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_role = self._workspace_role(role)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            current = connection.execute(
+                """
+                SELECT * FROM workspace_members
+                WHERE id = ? AND workspace_id = ? AND status = 'active'
+                """,
+                (member_id, workspace_id),
+            ).fetchone()
+            if current is None:
+                raise ValueError("active workspace member not found")
+            if current["role"] == "owner" and clean_role != "owner":
+                owner_count = int(
+                    connection.execute(
+                        """
+                        SELECT COUNT(*) FROM workspace_members
+                        WHERE workspace_id = ? AND role = 'owner' AND status = 'active'
+                        """,
+                        (workspace_id,),
+                    ).fetchone()[0]
+                )
+                if owner_count <= 1:
+                    raise ValueError("the last workspace owner cannot be demoted")
+            connection.execute(
+                """
+                UPDATE workspace_members SET role = ?, updated_at = ? WHERE id = ?
+                """,
+                (clean_role, timestamp, member_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM workspace_members WHERE id = ?", (member_id,)
+            ).fetchone()
+        assert row is not None
+        return self._workspace_member_view(row)
+
+    @staticmethod
     def _validate_status(value: str, allowed: set[str], field: str) -> str:
         normalized = value.strip().lower()
         if normalized not in allowed:
@@ -337,7 +773,43 @@ class SalesCRM:
         result["analysis"] = _load_json(result.pop("analysis_json", None), {})
         result["score_details"] = _load_json(result.pop("score_details_json", None), {})
         result["inspection"] = _load_json(result.pop("inspection_json", None), {})
+        result.pop("domain_key", None)
+        result.pop("name_key", None)
+        result.pop("location_key", None)
         return result
+
+    @staticmethod
+    def _sync_lead_lookup_keys(connection: sqlite3.Connection, lead_id: str) -> None:
+        row = connection.execute(
+            """
+            SELECT company_name, website_url, location, contacts_json
+            FROM leads WHERE id = ?
+            """,
+            (lead_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("lead not found")
+        connection.execute(
+            """
+            UPDATE leads SET domain_key = ?, name_key = ?, location_key = ?
+            WHERE id = ?
+            """,
+            (
+                company_domain_key(row["website_url"]),
+                company_name_key(row["company_name"]),
+                location_key(row["location"]),
+                lead_id,
+            ),
+        )
+        contacts = _load_json(row["contacts_json"], {})
+        phones = phone_keys(
+            (contacts.get("phones") or []) if isinstance(contacts, dict) else []
+        )
+        connection.execute("DELETE FROM lead_phone_keys WHERE lead_id = ?", (lead_id,))
+        connection.executemany(
+            "INSERT INTO lead_phone_keys (lead_id, phone_key) VALUES (?, ?)",
+            [(lead_id, phone) for phone in sorted(phones)],
+        )
 
     @staticmethod
     def _draft_from_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -370,6 +842,14 @@ class SalesCRM:
                     "SELECT COUNT(*) FROM followups WHERE status = 'pending'"
                 ).fetchone()[0],
             }
+
+    def remove_production_safe_check_artifacts(self) -> int:
+        """Delete legacy synthetic verification leads and their cascaded records."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM leads WHERE source = ?", ("production-safe-check",)
+            )
+            return int(cursor.rowcount)
 
     def create_campaign(
         self,
@@ -522,44 +1002,47 @@ class SalesCRM:
         name = company_name_key(company_name)
         region = location_key(location)
         candidate_phone_keys = phone_keys(phones or [])
+        excluded_sql = " AND id != ?" if exclude_lead_id else ""
+        excluded_values: list[Any] = [exclude_lead_id] if exclude_lead_id else []
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM leads ORDER BY created_at ASC"
-            ).fetchall()
+            domain_row = connection.execute(
+                f"""
+                SELECT id FROM leads
+                WHERE domain_key = ?{excluded_sql}
+                ORDER BY created_at ASC LIMIT 1
+                """,
+                [domain, *excluded_values],
+            ).fetchone()
+            matched_id = domain_row["id"] if domain_row else None
 
-        domain_match: str | None = None
-        phone_match: str | None = None
-        name_match: str | None = None
-        for row in rows:
-            if row["id"] == exclude_lead_id:
-                continue
-            if company_domain_key(row["website_url"]) == domain:
-                domain_match = row["id"]
-                break
-            contacts = _load_json(row["contacts_json"], {})
-            existing_phones = phone_keys(
-                (contacts.get("phones") or []) if isinstance(contacts, dict) else []
+            if matched_id is None and candidate_phone_keys:
+                placeholders = ",".join("?" for _ in candidate_phone_keys)
+                phone_exclusion = " AND l.id != ?" if exclude_lead_id else ""
+                phone_row = connection.execute(
+                    f"""
+                    SELECT l.id
+                    FROM lead_phone_keys p
+                    JOIN leads l ON l.id = p.lead_id
+                    WHERE p.phone_key IN ({placeholders}){phone_exclusion}
+                    ORDER BY l.created_at ASC LIMIT 1
+                    """,
+                    [*sorted(candidate_phone_keys), *excluded_values],
+                ).fetchone()
+                matched_id = phone_row["id"] if phone_row else None
+
+            cautious_name = bool(
+                name and (region or (len(name) >= 10 and len(name.split()) >= 2))
             )
-            if candidate_phone_keys and candidate_phone_keys & existing_phones:
-                phone_match = phone_match or row["id"]
-            existing_name = company_name_key(row["company_name"])
-            existing_region = location_key(row["location"])
-            cautious_name_match = (
-                name
-                and name == existing_name
-                and (
-                    (region and region == existing_region)
-                    or (
-                        not region
-                        and not existing_region
-                        and len(name) >= 10
-                        and len(name.split()) >= 2
-                    )
-                )
-            )
-            if cautious_name_match:
-                name_match = name_match or row["id"]
-        matched_id = domain_match or phone_match or name_match
+            if matched_id is None and cautious_name:
+                name_row = connection.execute(
+                    f"""
+                    SELECT id FROM leads
+                    WHERE name_key = ? AND location_key = ?{excluded_sql}
+                    ORDER BY created_at ASC LIMIT 1
+                    """,
+                    [name, region, *excluded_values],
+                ).fetchone()
+                matched_id = name_row["id"] if name_row else None
         return self.get_lead(matched_id) if matched_id else None
 
     def find_leads_by_phone(
@@ -568,29 +1051,28 @@ class SalesCRM:
         phone = normalize_phone(value)
         if not phone:
             return []
-        matches: list[dict[str, Any]] = []
+        result_limit = max(1, min(int(limit), 20))
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM leads ORDER BY updated_at DESC"
+                """
+                SELECT l.id, l.company_name, l.website_url, l.status
+                FROM lead_phone_keys p
+                JOIN leads l ON l.id = p.lead_id
+                WHERE p.phone_key = ?
+                ORDER BY l.updated_at DESC
+                LIMIT ?
+                """,
+                (phone, result_limit),
             ).fetchall()
-        for row in rows:
-            contacts = _load_json(row["contacts_json"], {})
-            existing = phone_keys(
-                (contacts.get("phones") or []) if isinstance(contacts, dict) else []
-            )
-            if phone in existing:
-                lead = self._lead_from_row(row)
-                matches.append(
-                    {
-                        "lead_id": lead["id"],
-                        "company_name": lead["company_name"],
-                        "website_url": lead["website_url"],
-                        "status": lead["status"],
-                    }
-                )
-                if len(matches) >= max(1, min(int(limit), 20)):
-                    break
-        return matches
+        return [
+            {
+                "lead_id": row["id"],
+                "company_name": row["company_name"],
+                "website_url": row["website_url"],
+                "status": row["status"],
+            }
+            for row in rows
+        ]
 
     def upsert_lead(
         self,
@@ -663,6 +1145,7 @@ class SalesCRM:
                     "UPDATE leads SET contacts_json = ?, updated_at = ? WHERE id = ?",
                     (_json(contacts), timestamp, lead_id),
                 )
+            self._sync_lead_lookup_keys(connection, lead_id)
             if campaign_id:
                 if (
                     connection.execute(
@@ -707,6 +1190,7 @@ class SalesCRM:
         min_score: int | None = None,
         limit: int = 50,
         order_by_score: bool = True,
+        fresh_evidence_only: bool = False,
     ) -> list[dict[str, Any]]:
         joins = ""
         conditions: list[str] = []
@@ -721,6 +1205,15 @@ class SalesCRM:
         if min_score is not None:
             conditions.append("COALESCE(l.score, 0) >= ?")
             values.append(max(0, min(int(min_score), 100)))
+        if fresh_evidence_only:
+            conditions.extend(
+                [
+                    "COALESCE(l.inspection_json, '{}') != '{}'",
+                    "l.evidence_expires_at IS NOT NULL",
+                    "l.evidence_expires_at > ?",
+                ]
+            )
+            values.append(utc_now())
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         order = (
             "COALESCE(l.score, -1) DESC, l.updated_at DESC"
@@ -869,6 +1362,7 @@ class SalesCRM:
             )
             if cursor.rowcount != 1:
                 raise ValueError("lead not found")
+            self._sync_lead_lookup_keys(connection, lead_id)
         return self.get_lead(lead_id)
 
     def score_lead(
@@ -1561,6 +2055,78 @@ class SalesCRM:
             result.pop("selected_verticals_json", None), []
         )
         result["metrics"] = _load_json(result.pop("metrics_json", None), {})
+        return result
+
+    def list_autopilot_cycles(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM autopilot_cycles ORDER BY started_at DESC LIMIT ?",
+                (max(1, min(int(limit), 100)),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["selected_verticals"] = _load_json(
+                item.pop("selected_verticals_json", None), []
+            )
+            item["metrics"] = _load_json(item.pop("metrics_json", None), {})
+            result.append(item)
+        return result
+
+    def record_admin_audit(
+        self,
+        *,
+        actor: str,
+        action: str,
+        outcome: str,
+        target_type: str | None = None,
+        target_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        event = {
+            "id": str(uuid.uuid4()),
+            "actor": actor.strip()[:320],
+            "action": action.strip()[:120],
+            "target_type": target_type.strip()[:80] if target_type else None,
+            "target_id": target_id.strip()[:160] if target_id else None,
+            "outcome": outcome.strip()[:40],
+            "details": details or {},
+            "created_at": utc_now(),
+        }
+        if not event["actor"] or not event["action"] or not event["outcome"]:
+            raise ValueError("audit actor, action and outcome are required")
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO admin_audit_log (
+                    id, actor, action, target_type, target_id,
+                    outcome, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event["id"],
+                    event["actor"],
+                    event["action"],
+                    event["target_type"],
+                    event["target_id"],
+                    event["outcome"],
+                    _json(event["details"]),
+                    event["created_at"],
+                ),
+            )
+        return event
+
+    def list_admin_audit(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM admin_audit_log ORDER BY created_at DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = _load_json(item.pop("details_json", None), {})
+            result.append(item)
         return result
 
     def complete_autopilot_cycle(

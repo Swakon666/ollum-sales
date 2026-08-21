@@ -3,12 +3,34 @@ set -Eeuo pipefail
 umask 077
 
 die() {
+  if [[ ${deployment_started:-false} == true \
+    && ${deployment_committed:-false} != true ]] \
+    && declare -F restore_previous >/dev/null; then
+    restore_previous || true
+  fi
   printf 'deployment error: %s\n' "$1" >&2
   exit 1
 }
 
+deployment_started=false
+deployment_committed=false
+shared_env_backup=''
+shared_google_credentials_backup=''
+nginx_backup=''
+nginx_changed=false
+
+rollback_unexpected_error() {
+  local status=$?
+  if [[ $deployment_started == true && $deployment_committed != true ]] \
+    && declare -F restore_previous >/dev/null; then
+    restore_previous || true
+  fi
+  exit "$status"
+}
+trap rollback_unexpected_error ERR
+
 [[ $EUID -eq 0 ]] || die 'remote_deploy.sh must run through sudo'
-[[ $# -eq 5 || $# -eq 7 ]] \
+[[ $# -eq 5 || $# -eq 7 || $# -eq 8 || $# -eq 9 ]] \
   || die 'expected deploy user, domain, release id, incoming path, bind port, and optional prebuilt image metadata'
 
 deploy_user=$1
@@ -18,16 +40,24 @@ incoming_relative=$4
 bind_port=$5
 prebuilt_image_tag=${6:-}
 expected_prebuilt_image_id=${7:-}
+expected_prebuilt_archive_sha256=${8:-}
+api_domain=${9:-$domain}
 
 [[ $deploy_user =~ ^[a-z_][a-z0-9_-]*$ ]] || die 'invalid deploy user'
 [[ $domain =~ ^[A-Za-z0-9.-]+$ ]] || die 'invalid domain'
+[[ $api_domain =~ ^[A-Za-z0-9.-]+$ ]] || die 'invalid API domain'
 [[ $release_id =~ ^[A-Fa-f0-9-]+$ ]] || die 'invalid release id'
 [[ $incoming_relative =~ ^\.ollum-sales-incoming/[A-Za-z0-9._-]+$ ]] || die 'invalid incoming path'
 [[ $bind_port =~ ^[0-9]{2,5}$ ]] || die 'invalid bind port'
-if [[ -n $prebuilt_image_tag || -n $expected_prebuilt_image_id ]]; then
+if [[ -n $prebuilt_image_tag || -n $expected_prebuilt_image_id \
+  || -n $expected_prebuilt_archive_sha256 ]]; then
   [[ $prebuilt_image_tag =~ ^[A-Za-z0-9._-]+$ ]] || die 'invalid prebuilt image tag'
   [[ $expected_prebuilt_image_id =~ ^sha256:[A-Fa-f0-9]{64}$ ]] \
     || die 'invalid expected prebuilt image ID'
+  if [[ -n $expected_prebuilt_archive_sha256 ]]; then
+    [[ $expected_prebuilt_archive_sha256 =~ ^[A-Fa-f0-9]{64}$ ]] \
+      || die 'invalid expected prebuilt archive SHA-256'
+  fi
 fi
 
 deploy_home=$(getent passwd "$deploy_user" | cut -d: -f6)
@@ -52,10 +82,14 @@ if [[ -n $prebuilt_image_tag ]]; then
   [[ -f $prebuilt_image_archive ]] || die 'prebuilt MCP image archive is missing'
 fi
 
-cleanup_incoming_secret() {
-  rm -f -- "$incoming_env" "$incoming_google_credentials" "$prebuilt_image_archive"
+cleanup_incoming_credentials() {
+  rm -f -- "$incoming_env" "$incoming_google_credentials"
+  rm -f -- \
+    "$shared_env_backup" \
+    "$shared_google_credentials_backup" \
+    "$nginx_backup"
 }
-trap cleanup_incoming_secret EXIT
+trap cleanup_incoming_credentials EXIT
 
 command -v nginx >/dev/null || die 'existing Nginx installation is required on this server'
 command -v certbot >/dev/null || die 'Certbot is required on this server'
@@ -99,6 +133,34 @@ install -d -m 0750 -o "$deploy_user" -g "$deploy_group" \
 install -d -m 0700 -o "$deploy_user" -g "$deploy_group" \
   "$deploy_root/shared/secrets"
 
+shared_env="$deploy_root/shared/.env"
+shared_google_credentials="$deploy_root/shared/secrets/ollum-google-service-account.json"
+if [[ -f $shared_env ]]; then
+  shared_env_backup=$(mktemp)
+  cp --preserve=mode,ownership,timestamps "$shared_env" "$shared_env_backup"
+fi
+if [[ -f $shared_google_credentials ]]; then
+  shared_google_credentials_backup=$(mktemp)
+  cp --preserve=mode,ownership,timestamps \
+    "$shared_google_credentials" "$shared_google_credentials_backup"
+fi
+
+restore_shared_configuration() {
+  if [[ -n $shared_env_backup && -f $shared_env_backup ]]; then
+    install -m 0600 -o "$deploy_user" -g "$deploy_group" \
+      "$shared_env_backup" "$shared_env"
+  else
+    rm -f -- "$shared_env"
+  fi
+  if [[ -n $shared_google_credentials_backup \
+    && -f $shared_google_credentials_backup ]]; then
+    install -m 0600 -o "$deploy_user" -g "$deploy_group" \
+      "$shared_google_credentials_backup" "$shared_google_credentials"
+  else
+    rm -f -- "$shared_google_credentials"
+  fi
+}
+
 release_dir="$deploy_root/releases/$release_id"
 [[ ! -e $release_dir ]] || die "release already exists: $release_id"
 
@@ -111,10 +173,10 @@ tar -xzf "$archive" -C "$release_dir"
 chown -R "$deploy_user:$deploy_group" "$release_dir"
 
 install -m 0600 -o "$deploy_user" -g "$deploy_group" \
-  "$incoming_env" "$deploy_root/shared/.env"
+  "$incoming_env" "$shared_env"
 install -m 0600 -o "$deploy_user" -g "$deploy_group" \
   "$incoming_google_credentials" \
-  "$deploy_root/shared/secrets/ollum-google-service-account.json"
+  "$shared_google_credentials"
 ln -sfn ../../shared/.env "$release_dir/.env"
 chown -h "$deploy_user:$deploy_group" "$release_dir/.env"
 
@@ -162,12 +224,23 @@ done < <(docker compose config --images)
 prebuilt_images=false
 if [[ -n $prebuilt_image_tag ]]; then
   gzip -t "$prebuilt_image_archive" || die 'prebuilt MCP image archive is invalid'
+  if [[ -n $expected_prebuilt_archive_sha256 ]]; then
+    printf '%s  %s\n' \
+      "$expected_prebuilt_archive_sha256" "$prebuilt_image_archive" \
+      | sha256sum --check --strict \
+      || die 'prebuilt MCP image archive SHA-256 does not match the verified artifact'
+  fi
   gzip -dc "$prebuilt_image_archive" | docker load
   loaded_image="ollum-sales-ollum-sales-mcp:$prebuilt_image_tag"
   loaded_image_id=$(docker image inspect --format '{{.Id}}' "$loaded_image" 2>/dev/null) \
     || die 'expected prebuilt MCP image tag was not loaded'
-  [[ $loaded_image_id == "$expected_prebuilt_image_id" ]] \
-    || die 'loaded MCP image ID does not match the verified artifact'
+  if [[ $loaded_image_id != "$expected_prebuilt_image_id" ]]; then
+    if [[ -z $expected_prebuilt_archive_sha256 ]]; then
+      die 'loaded MCP image ID does not match the verified artifact'
+    fi
+    printf '%s\n' \
+      'Docker normalized the loaded image ID; the verified archive SHA-256 remains the trust anchor.'
+  fi
   mapfile -t runtime_images < <(
     docker compose config --images | grep -E 'ollum-sales-(mcp|worker)$'
   )
@@ -176,7 +249,6 @@ if [[ -n $prebuilt_image_tag ]]; then
   for runtime_image in "${runtime_images[@]}"; do
     docker tag "$loaded_image" "$runtime_image"
   done
-  rm -f -- "$prebuilt_image_archive"
   while IFS= read -r image; do
     docker image inspect "$image" >/dev/null 2>&1 \
       || die "required prebuilt deployment image is unavailable: $image"
@@ -235,6 +307,20 @@ else
 fi
 
 restore_previous() {
+  deployment_started=false
+  restore_shared_configuration
+  if [[ $nginx_changed == true ]]; then
+    if [[ -n $nginx_backup && -f $nginx_backup ]]; then
+      install -m 0644 "$nginx_backup" "$nginx_available"
+      ln -sfn "$nginx_available" "$nginx_enabled"
+    else
+      rm -f -- "$nginx_enabled" "$nginx_available"
+    fi
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx || true
+    fi
+    nginx_changed=false
+  fi
   if [[ -n $previous_release && -f $previous_release/docker-compose.yml ]]; then
     printf 'Restoring previous release %s\n' "$(basename "$previous_release")" >&2
     if [[ -n $previous_mcp_image_id ]]; then
@@ -243,6 +329,9 @@ restore_previous() {
     cd "$previous_release"
     docker compose up -d --remove-orphans
     ln -sfn "$previous_release" "$deploy_root/current"
+  elif [[ -f $release_dir/docker-compose.yml ]]; then
+    cd "$release_dir"
+    docker compose down --remove-orphans || true
   fi
 }
 
@@ -250,6 +339,7 @@ if ! docker compose up -d --remove-orphans; then
   restore_previous
   die 'docker compose up failed'
 fi
+deployment_started=true
 
 healthy=false
 for _attempt in $(seq 1 60); do
@@ -287,7 +377,6 @@ if [[ -L $nginx_enabled && $(readlink -f "$nginx_enabled") != "$nginx_available"
   die 'refusing to replace an unrelated enabled Nginx site'
 fi
 
-nginx_backup=''
 if [[ -f $nginx_available ]]; then
   nginx_backup=$(mktemp)
   cp --preserve=mode,ownership,timestamps "$nginx_available" "$nginx_backup"
@@ -295,32 +384,34 @@ fi
 nginx_candidate=$(mktemp)
 sed \
   -e "s/__OLLUM_DOMAIN__/$domain/g" \
+  -e "s/__OLLUM_API_DOMAIN__/$api_domain/g" \
   -e "s/__OLLUM_MCP_BIND_PORT__/$bind_port/g" \
   "$nginx_template" > "$nginx_candidate"
 install -m 0644 "$nginx_candidate" "$nginx_available"
+nginx_changed=true
 rm -f "$nginx_candidate"
 ln -sfn "$nginx_available" "$nginx_enabled"
 
 if ! nginx -t; then
-  if [[ -n $nginx_backup ]]; then
-    install -m 0644 "$nginx_backup" "$nginx_available"
-  else
-    rm -f "$nginx_enabled" "$nginx_available"
-  fi
-  rm -f "$nginx_backup"
   restore_previous
   die 'Nginx configuration validation failed'
 fi
-rm -f "$nginx_backup"
 systemctl reload nginx
 
-certbot --nginx \
+certbot_domains=(-d "$domain")
+if [[ $api_domain != "$domain" ]]; then
+  certbot_domains+=(-d "$api_domain")
+fi
+if ! certbot --nginx \
   --non-interactive \
   --agree-tos \
   --register-unsafely-without-email \
   --redirect \
   --keep-until-expiring \
-  -d "$domain"
+  "${certbot_domains[@]}"; then
+  restore_previous
+  die 'TLS certificate provisioning failed'
+fi
 
 curl -fsS --max-time 20 \
   --resolve "$domain:443:127.0.0.1" \
@@ -332,21 +423,106 @@ unauthorized_status=$(curl -sS --max-time 20 \
   -o /dev/null -w '%{http_code}' "https://$domain/mcp")
 [[ $unauthorized_status == 401 ]] || die "unauthenticated MCP check returned HTTP $unauthorized_status"
 
-mcp_token=$(sed -n 's/^OLLUM_MCP_BEARER_TOKEN=//p' "$deploy_root/shared/.env" | head -1)
-[[ -n $mcp_token ]] || die 'MCP bearer token is missing from production environment'
-mcp_response=$(mktemp)
-authenticated_status=$(curl -sS --max-time 30 \
-  --resolve "$domain:443:127.0.0.1" \
-  -o "$mcp_response" \
-  -w '%{http_code}' \
-  -H "Authorization: Bearer $mcp_token" \
-  -H 'Content-Type: application/json' \
-  -H 'Accept: application/json, text/event-stream' \
-  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-check","version":"1"}}}' \
-  "https://$domain/mcp")
-rm -f "$mcp_response"
-unset mcp_token
-[[ $authenticated_status == 200 ]] || die "authenticated MCP check returned HTTP $authenticated_status"
+api_health_status=$(curl -sS --max-time 20 \
+  --resolve "$api_domain:443:127.0.0.1" \
+  -o /dev/null -w '%{http_code}' "https://$api_domain/health")
+[[ $api_health_status == 200 ]] \
+  || die "API-domain health check returned HTTP $api_health_status"
+
+admin_enabled=$(sed -n 's/^OLLUM_ADMIN_ENABLED=//p' \
+  "$deploy_root/shared/.env" | tail -1)
+if [[ $admin_enabled == true ]]; then
+  admin_status=$(curl -sS --max-time 20 \
+    --resolve "$api_domain:443:127.0.0.1" \
+    -o /dev/null -w '%{http_code}' "https://$api_domain/admin")
+  [[ $admin_status == 303 || $admin_status == 307 ]] \
+    || die "unauthenticated dashboard check returned HTTP $admin_status"
+
+  session_status=$(curl -sS --max-time 20 \
+    --resolve "$api_domain:443:127.0.0.1" \
+    -o /dev/null -w '%{http_code}' "https://$api_domain/api/v1/session")
+  [[ $session_status == 401 ]] \
+    || die "unauthenticated versioned API check returned HTTP $session_status"
+fi
+
+auth_mode=$(sed -n 's/^OLLUM_AUTH_MODE=//p' "$deploy_root/shared/.env" | tail -1)
+case "$auth_mode" in
+  oidc)
+    expected_resource=$(sed -n 's/^OLLUM_MCP_RESOURCE_URL=//p' \
+      "$deploy_root/shared/.env" | tail -1)
+    expected_issuer=$(sed -n 's/^OLLUM_OIDC_ISSUER_URL=//p' \
+      "$deploy_root/shared/.env" | tail -1)
+    [[ -n $expected_resource && -n $expected_issuer ]] \
+      || die 'OIDC resource or issuer is missing from production environment'
+
+    metadata_response=$(mktemp)
+    metadata_status=$(curl -sS --max-time 20 \
+      --resolve "$domain:443:127.0.0.1" \
+      -o "$metadata_response" \
+      -w '%{http_code}' \
+      "https://$domain/.well-known/oauth-protected-resource/mcp")
+    [[ $metadata_status == 200 ]] \
+      || die "OAuth protected-resource metadata returned HTTP $metadata_status"
+    if ! python3 - "$metadata_response" "$expected_resource" "$expected_issuer" <<'PY'
+import json
+import sys
+
+path, expected_resource, expected_issuer = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    metadata = json.load(handle)
+if metadata.get("resource") != expected_resource:
+    raise SystemExit(1)
+if expected_issuer not in metadata.get("authorization_servers", []):
+    raise SystemExit(1)
+if not {"sales:read", "sales:write"}.issubset(
+    set(metadata.get("scopes_supported", []))
+):
+    raise SystemExit(1)
+PY
+    then
+      rm -f "$metadata_response"
+      die 'OAuth protected-resource metadata is inconsistent with production settings'
+    fi
+    rm -f "$metadata_response"
+
+    challenge_headers=$(mktemp)
+    challenge_status=$(curl -sS --max-time 20 \
+      --resolve "$domain:443:127.0.0.1" \
+      -D "$challenge_headers" \
+      -o /dev/null \
+      -w '%{http_code}' \
+      "https://$domain/mcp")
+    if [[ $challenge_status != 401 ]] \
+      || ! grep -Eqi '^www-authenticate:.*resource_metadata=' "$challenge_headers"; then
+      rm -f "$challenge_headers"
+      die 'OIDC MCP challenge is missing resource_metadata'
+    fi
+    rm -f "$challenge_headers"
+    ;;
+  bearer)
+    mcp_token=$(sed -n 's/^OLLUM_MCP_BEARER_TOKEN=//p' \
+      "$deploy_root/shared/.env" | head -1)
+    [[ -n $mcp_token ]] \
+      || die 'MCP bearer token is missing from production environment'
+    mcp_response=$(mktemp)
+    authenticated_status=$(curl -sS --max-time 30 \
+      --resolve "$domain:443:127.0.0.1" \
+      -o "$mcp_response" \
+      -w '%{http_code}' \
+      -H "Authorization: Bearer $mcp_token" \
+      -H 'Content-Type: application/json' \
+      -H 'Accept: application/json, text/event-stream' \
+      --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-check","version":"1"}}}' \
+      "https://$domain/mcp")
+    rm -f "$mcp_response"
+    unset mcp_token
+    [[ $authenticated_status == 200 ]] \
+      || die "authenticated MCP check returned HTTP $authenticated_status"
+    ;;
+  *)
+    die "unsupported production authentication mode: $auth_mode"
+    ;;
+esac
 
 mapfile -t active_ollum_image_ids < <(
   while IFS= read -r image; do
@@ -363,6 +539,9 @@ for prior_image_id in "${prior_ollum_image_ids[@]}"; do
 done
 
 docker compose ps
-rm -f -- "$archive"
+deployment_committed=true
+nginx_changed=false
+rm -f -- "$archive" "$prebuilt_image_archive"
 rmdir "$incoming_dir" 2>/dev/null || true
-printf 'Deployment completed: release=%s domain=%s\n' "$release_id" "$domain"
+printf 'Deployment completed: release=%s domain=%s api_domain=%s\n' \
+  "$release_id" "$domain" "$api_domain"

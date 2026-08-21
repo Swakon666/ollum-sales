@@ -319,7 +319,7 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(len(result["rejected_actions"]), 1)
         self.assertEqual(self.crm.get_outreach_draft(second["id"])["status"], "draft")
 
-    def test_sheet_actions_merge_approve_and_send_across_tabs(self) -> None:
+    def test_sheet_actions_require_approve_and_send_in_separate_syncs(self) -> None:
         lead = self.crm.upsert_lead("Example", "https://example.org")
         draft = self.crm.save_outreach_draft(
             lead["id"],
@@ -352,8 +352,72 @@ class AutopilotTests(unittest.TestCase):
         sync._get_values = values  # type: ignore[method-assign]
         result = sync._pull_actions(object())
         self.assertEqual(result["approved_draft_ids"], [draft["id"]])
+        self.assertEqual(result["send_requested_draft_ids"], [])
+        self.assertIn(
+            "previous Google Sheets sync", result["rejected_actions"][0]["reason"]
+        )
+        self.assertEqual(len(self.crm.list_pending_send_requests()), 0)
+
+        lead_row[LEADS_HEADERS.index("APPROVE")] = ""
+        result = sync._pull_actions(object())
+        self.assertEqual(result["approved_draft_ids"], [])
         self.assertEqual(result["send_requested_draft_ids"], [draft["id"]])
         self.assertEqual(len(self.crm.list_pending_send_requests()), 1)
+
+    def test_sheet_sync_updates_snapshot_before_clearing_stale_tails(self) -> None:
+        events: list[tuple[str, object]] = []
+
+        class Request:
+            def __init__(self, name: str, body: object, result: object) -> None:
+                self.name = name
+                self.body = body
+                self.result = result
+
+            def execute(self) -> object:
+                events.append((self.name, self.body))
+                return self.result
+
+        class Values:
+            def batchUpdate(self, **kwargs: object) -> Request:
+                return Request("update", kwargs["body"], {"totalUpdatedCells": 10})
+
+            def batchClear(self, **kwargs: object) -> Request:
+                return Request("clear", kwargs["body"], {})
+
+        class Service:
+            def __init__(self) -> None:
+                self.values_api = Values()
+
+            def spreadsheets(self) -> Service:
+                return self
+
+            def values(self) -> Values:
+                return self.values_api
+
+        credentials = Path(self.tempdir.name) / "credentials.json"
+        credentials.write_text("{}", encoding="utf-8")
+        sync = GoogleSheetsSync(
+            self.crm,
+            enabled=True,
+            spreadsheet_id="sheet-id",
+            service_account_file=str(credentials),
+        )
+        snapshot = {name: [["HEADER"], [f"{name}-row"]] for name in sync.tab_names}
+        sync._build_service = lambda: Service()  # type: ignore[method-assign]
+        sync._ensure_tabs = lambda _service: ({}, [])  # type: ignore[method-assign]
+        sync._pull_actions = lambda _service: {}  # type: ignore[method-assign]
+        sync._snapshot = lambda: snapshot  # type: ignore[method-assign]
+        sync._format_new_tabs = lambda *_args: None  # type: ignore[method-assign]
+
+        result = sync.sync()
+
+        self.assertEqual([event[0] for event in events], ["update", "clear"])
+        self.assertEqual(result["write_strategy"], "update_then_clear_tail")
+        clear_body = events[1][1]
+        self.assertEqual(
+            clear_body["ranges"],
+            [f"'{name}'!A3:Z" for name in sync.tab_names],
+        )
 
 
 if __name__ == "__main__":

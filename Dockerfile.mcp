@@ -9,7 +9,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 # Keep the complete upstream trees in the image. Install ScrapeGraphAI from its local source.
 COPY upstream /app/upstream
-RUN pip install /app/upstream/Scrapegraph-ai
+RUN python -m pip install --upgrade pip==26.1.2 \
+    && pip install /app/upstream/Scrapegraph-ai
 
 COPY pyproject.toml /app/pyproject.toml
 COPY app /app/app

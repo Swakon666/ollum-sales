@@ -15,11 +15,13 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
+	"rsc.io/qr"
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
@@ -205,6 +207,115 @@ type BridgeStatusResponse struct {
 	UptimeSeconds int64  `json:"uptime_seconds"`
 }
 
+// PairingStatusResponse exposes pairing progress without leaking the QR payload.
+type PairingStatusResponse struct {
+	State        string `json:"state"`
+	NeedsPairing bool   `json:"needs_pairing"`
+	HasQR        bool   `json:"has_qr"`
+	Generation   int    `json:"generation"`
+	UpdatedAt    string `json:"updated_at,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+}
+
+// PairingState keeps the short-lived QR value only in bridge memory.
+type PairingState struct {
+	mu           sync.RWMutex
+	state        string
+	needsPairing bool
+	qrCode       string
+	generation   int
+	updatedAt    time.Time
+	expiresAt    time.Time
+}
+
+func newPairingState(needsPairing bool) *PairingState {
+	state := "not_required"
+	if needsPairing {
+		state = "starting"
+	}
+	return &PairingState{
+		state:        state,
+		needsPairing: needsPairing,
+		updatedAt:    time.Now().UTC(),
+	}
+}
+
+func (state *PairingState) update(name string, needsPairing bool, code string, expiresAt time.Time) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	state.state = name
+	state.needsPairing = needsPairing
+	state.qrCode = code
+	state.updatedAt = time.Now().UTC()
+	state.expiresAt = expiresAt.UTC()
+	if code != "" {
+		state.generation++
+	}
+}
+
+func (state *PairingState) snapshot() PairingStatusResponse {
+	state.mu.RLock()
+	defer state.mu.RUnlock()
+	hasQR := state.qrCode != "" && (state.expiresAt.IsZero() || time.Now().Before(state.expiresAt))
+	response := PairingStatusResponse{
+		State:        state.state,
+		NeedsPairing: state.needsPairing,
+		HasQR:        hasQR,
+		Generation:   state.generation,
+		UpdatedAt:    state.updatedAt.Format(time.RFC3339),
+	}
+	if !state.expiresAt.IsZero() {
+		response.ExpiresAt = state.expiresAt.Format(time.RFC3339)
+	}
+	return response
+}
+
+func (state *PairingState) qrPNG() ([]byte, error) {
+	state.mu.RLock()
+	codeValue := state.qrCode
+	expiresAt := state.expiresAt
+	state.mu.RUnlock()
+	if codeValue == "" || (!expiresAt.IsZero() && time.Now().After(expiresAt)) {
+		return nil, fmt.Errorf("no active pairing QR")
+	}
+	code, err := qr.Encode(codeValue, qr.L)
+	if err != nil {
+		return nil, fmt.Errorf("encode pairing QR: %w", err)
+	}
+	code.Scale = 8
+	return code.PNG(), nil
+}
+
+func pairingStatusHandler(state *PairingState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(state.snapshot())
+	}
+}
+
+func pairingQRHandler(state *PairingState) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		png, err := state.qrPNG()
+		if err != nil {
+			http.Error(w, "No active pairing QR", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Cache-Control", "no-store, max-age=0")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		_, _ = w.Write(png)
+	}
+}
+
 // SendMessageRequest represents the request body for the send message API
 type SendMessageRequest struct {
 	Recipient string `json:"recipient"`
@@ -213,6 +324,99 @@ type SendMessageRequest struct {
 }
 
 // Function to send a WhatsApp message
+func mediaStoreRoot() string {
+	if configured := strings.TrimSpace(os.Getenv("WHATSAPP_MEDIA_ROOT")); configured != "" {
+		return configured
+	}
+	return "store"
+}
+
+func sanitizePathComponent(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || value == "." || value == ".." || strings.ContainsAny(value, "/\\\x00") {
+		return "", fmt.Errorf("invalid path component")
+	}
+
+	var sanitized strings.Builder
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			strings.ContainsRune("@._-", character) {
+			sanitized.WriteRune(character)
+		} else {
+			sanitized.WriteByte('_')
+		}
+	}
+
+	result := strings.Trim(sanitized.String(), ".")
+	if result == "" || result == "." || result == ".." {
+		return "", fmt.Errorf("invalid path component")
+	}
+	return result, nil
+}
+
+func resolvePathWithinRoot(root, candidate string, mustExist bool) (string, error) {
+	rootPath, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve media root: %w", err)
+	}
+	if err := os.MkdirAll(rootPath, 0755); err != nil {
+		return "", fmt.Errorf("create media root: %w", err)
+	}
+	rootPath, err = filepath.EvalSymlinks(rootPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve media root links: %w", err)
+	}
+
+	resolved := candidate
+	if !filepath.IsAbs(resolved) {
+		resolved = filepath.Join(rootPath, resolved)
+	}
+	resolved, err = filepath.Abs(resolved)
+	if err != nil {
+		return "", fmt.Errorf("resolve media path: %w", err)
+	}
+	if mustExist {
+		resolved, err = filepath.EvalSymlinks(resolved)
+		if err != nil {
+			return "", fmt.Errorf("resolve media path links: %w", err)
+		}
+	} else {
+		// Resolve the nearest existing ancestor before appending a new filename.
+		// This prevents a pre-existing directory symlink from redirecting writes
+		// outside the configured media root.
+		existing := resolved
+		unresolvedTail := []string{}
+		for {
+			_, statErr := os.Lstat(existing)
+			if statErr == nil {
+				break
+			}
+			if !os.IsNotExist(statErr) {
+				return "", fmt.Errorf("inspect media path: %w", statErr)
+			}
+			parent := filepath.Dir(existing)
+			if parent == existing {
+				return "", fmt.Errorf("media path has no existing ancestor")
+			}
+			unresolvedTail = append([]string{filepath.Base(existing)}, unresolvedTail...)
+			existing = parent
+		}
+		existing, err = filepath.EvalSymlinks(existing)
+		if err != nil {
+			return "", fmt.Errorf("resolve media path ancestor links: %w", err)
+		}
+		resolved = filepath.Join(append([]string{existing}, unresolvedTail...)...)
+	}
+
+	relative, err := filepath.Rel(rootPath, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("media path is outside the configured root")
+	}
+	return resolved, nil
+}
+
 func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message string, mediaPath string) (bool, string) {
 	if !client.IsConnected() {
 		return false, "Not connected to WhatsApp"
@@ -243,14 +447,19 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 
 	// Check if we have media to send
 	if mediaPath != "" {
+		resolvedMediaPath, err := resolvePathWithinRoot(mediaStoreRoot(), mediaPath, true)
+		if err != nil {
+			return false, fmt.Sprintf("Invalid media path: %v", err)
+		}
+
 		// Read media file
-		mediaData, err := os.ReadFile(mediaPath)
+		mediaData, err := os.ReadFile(resolvedMediaPath)
 		if err != nil {
 			return false, fmt.Sprintf("Error reading media file: %v", err)
 		}
 
 		// Determine media type and mime type based on file extension
-		fileExt := strings.ToLower(mediaPath[strings.LastIndex(mediaPath, ".")+1:])
+		fileExt := strings.TrimPrefix(strings.ToLower(filepath.Ext(resolvedMediaPath)), ".")
 		var mediaType whatsmeow.MediaType
 		var mimeType string
 
@@ -356,7 +565,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			}
 		case whatsmeow.MediaDocument:
 			msg.DocumentMessage = &waProto.DocumentMessage{
-				Title:         proto.String(mediaPath[strings.LastIndex(mediaPath, "/")+1:]),
+				Title:         proto.String(filepath.Base(resolvedMediaPath)),
 				Caption:       proto.String(message),
 				Mimetype:      proto.String(mimeType),
 				URL:           &resp.URL,
@@ -670,10 +879,6 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	var fileLength uint64
 	var err error
 
-	// First, check if we already have this file
-	chatDir := fmt.Sprintf("store/%s", strings.ReplaceAll(chatJID, ":", "_"))
-	localPath := ""
-
 	// Get media info from the database
 	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength, err = messageStore.GetMediaInfo(messageID, chatJID)
 
@@ -693,25 +898,37 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 	if mediaType == "" {
 		return false, "", "", "", fmt.Errorf("not a media message")
 	}
+	if strings.TrimSpace(filename) == "" {
+		filename = messageID
+	}
+
+	chatComponent, err := sanitizePathComponent(chatJID)
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("invalid chat JID: %w", err)
+	}
+	fileComponent, err := sanitizePathComponent(filename)
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("invalid media filename: %w", err)
+	}
+	localPath, err := resolvePathWithinRoot(
+		mediaStoreRoot(),
+		filepath.Join(chatComponent, fileComponent),
+		false,
+	)
+	if err != nil {
+		return false, "", "", "", fmt.Errorf("invalid local media path: %w", err)
+	}
+	chatDir := filepath.Dir(localPath)
 
 	// Create directory for the chat if it doesn't exist
 	if err := os.MkdirAll(chatDir, 0755); err != nil {
 		return false, "", "", "", fmt.Errorf("failed to create chat directory: %v", err)
 	}
 
-	// Generate a local path for the file
-	localPath = fmt.Sprintf("%s/%s", chatDir, filename)
-
-	// Get absolute path
-	absPath, err := filepath.Abs(localPath)
-	if err != nil {
-		return false, "", "", "", fmt.Errorf("failed to get absolute path: %v", err)
-	}
-
 	// Check if file already exists
 	if _, err := os.Stat(localPath); err == nil {
 		// File exists, return it
-		return true, mediaType, filename, absPath, nil
+		return true, mediaType, fileComponent, localPath, nil
 	}
 
 	// If we don't have all the media info we need, we can't download
@@ -760,8 +977,8 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
 	}
 
-	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, absPath, len(mediaData))
-	return true, mediaType, filename, absPath, nil
+	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, localPath, len(mediaData))
+	return true, mediaType, fileComponent, localPath, nil
 }
 
 // Extract direct path from a WhatsApp media URL
@@ -785,7 +1002,7 @@ func extractDirectPathFromURL(url string) string {
 }
 
 // Start a REST API server to expose the WhatsApp client functionality
-func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port int) {
+func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, pairingState *PairingState, port int) {
 	serverStartedAt := time.Now()
 	statusProvider := func() BridgeStatusResponse {
 		return currentBridgeStatus(client, serverStartedAt)
@@ -793,6 +1010,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, port 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", bridgeStatusHandler(statusProvider, false))
 	mux.HandleFunc("/api/status", bridgeStatusHandler(statusProvider, true))
+	mux.HandleFunc("/api/pairing", pairingStatusHandler(pairingState))
+	mux.HandleFunc("/api/pairing/qr", pairingQRHandler(pairingState))
 	mux.HandleFunc("/api/send", sendMessageHandler(client, whatsappSendEnabled()))
 
 	// Handler for downloading media
@@ -912,6 +1131,13 @@ func main() {
 		return
 	}
 	defer messageStore.Close()
+	pairingState := newPairingState(client.Store.ID == nil)
+
+	// The private REST API starts before authentication so the dashboard can
+	// display and refresh the QR code without restarting the bridge.
+	startRESTServer(client, messageStore, pairingState, 8080)
+	exitChan := make(chan os.Signal, 1)
+	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
 
 	// Setup event handling for messages and history sync
 	client.AddEventHandler(func(evt interface{}) {
@@ -925,10 +1151,16 @@ func main() {
 			handleHistorySync(client, messageStore, v, logger)
 
 		case *events.Connected:
+			pairingState.update("connected", false, "", time.Time{})
 			logger.Infof("Connected to WhatsApp")
 
 		case *events.LoggedOut:
-			logger.Warnf("Device logged out, please scan QR code to log in again")
+			pairingState.update("restarting", true, "", time.Time{})
+			logger.Warnf("Device logged out; restarting bridge to request a fresh QR code")
+			select {
+			case exitChan <- syscall.SIGTERM:
+			default:
+			}
 		}
 	})
 
@@ -954,12 +1186,14 @@ func main() {
 			// closes. This keeps pairing interactive without restarting other services.
 			qrChan, qrErr := client.GetQRChannel(pairingContext)
 			if qrErr != nil {
+				pairingState.update("failed", true, "", time.Time{})
 				logger.Errorf("Failed to initialize QR pairing: %v", qrErr)
 				return
 			}
 
 			err = client.Connect()
 			if err != nil {
+				pairingState.update("failed", true, "", time.Time{})
 				logger.Errorf("Failed to connect: %v", err)
 				return
 			}
@@ -968,14 +1202,18 @@ func main() {
 			for evt := range qrChan {
 				switch evt.Event {
 				case "code":
+					pairingState.update("waiting_for_scan", true, evt.Code, time.Now().Add(30*time.Second))
 					fmt.Println("\nScan this QR code with your WhatsApp app:")
 					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
 				case "success":
+					pairingState.update("paired", false, "", time.Time{})
 					paired = true
 				case "timeout":
+					pairingState.update("refreshing", true, "", time.Time{})
 					retryWithFreshBatch = true
 					logger.Infof("QR batch expired; requesting a fresh batch")
 				case "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
+					pairingState.update("failed", true, "", time.Time{})
 					logger.Errorf("QR pairing failed: %s", evt.Event)
 					return
 				default:
@@ -987,10 +1225,12 @@ func main() {
 				break
 			}
 			if pairingContext.Err() != nil {
+				pairingState.update("timed_out", true, "", time.Time{})
 				logger.Errorf("Timeout waiting for QR code scan")
 				return
 			}
 			if !retryWithFreshBatch {
+				pairingState.update("failed", true, "", time.Time{})
 				logger.Errorf("QR pairing channel closed without a terminal result")
 				return
 			}
@@ -999,6 +1239,7 @@ func main() {
 			select {
 			case <-time.After(2 * time.Second):
 			case <-pairingContext.Done():
+				pairingState.update("timed_out", true, "", time.Time{})
 				logger.Errorf("Timeout waiting for QR code scan")
 				return
 			}
@@ -1006,6 +1247,7 @@ func main() {
 
 		fmt.Println("\nSuccessfully connected and authenticated!")
 	} else {
+		pairingState.update("not_required", false, "", time.Time{})
 		// Already logged in, just connect
 		err = client.Connect()
 		if err != nil {
@@ -1023,13 +1265,6 @@ func main() {
 	}
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
-
-	// Start REST API server
-	startRESTServer(client, messageStore, 8080)
-
-	// Create a channel to keep the main goroutine alive
-	exitChan := make(chan os.Signal, 1)
-	signal.Notify(exitChan, syscall.SIGINT, syscall.SIGTERM)
 
 	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
 

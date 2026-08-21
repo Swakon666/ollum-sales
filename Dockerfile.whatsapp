@@ -1,4 +1,4 @@
-FROM golang:1.25.0-bookworm AS builder
+FROM golang:1.27.0-bookworm AS builder
 WORKDIR /src
 COPY upstream/whatsapp-mcp/whatsapp-bridge/go.mod upstream/whatsapp-mcp/whatsapp-bridge/go.sum ./
 RUN go mod download

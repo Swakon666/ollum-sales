@@ -14,6 +14,7 @@ from scrapegraphai.docloaders.plasmate import PlasmateLoader
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_loader(urls=None, **kwargs):
     if urls is None:
         urls = ["https://example.com"]
@@ -32,6 +33,7 @@ def _mock_run(stdout: str, returncode: int = 0):
 # ---------------------------------------------------------------------------
 # Initialisation
 # ---------------------------------------------------------------------------
+
 
 def test_init_defaults():
     loader = _make_loader()
@@ -66,12 +68,13 @@ def test_init_invalid_format():
 # Command building
 # ---------------------------------------------------------------------------
 
+
 def test_build_cmd_defaults():
     loader = _make_loader(urls=["https://example.com"])
     cmd = loader._build_cmd("https://example.com")
     assert "plasmate" in cmd[0]
     assert "fetch" in cmd
-    assert "https://example.com" in cmd
+    assert any(argument == "https://example.com" for argument in cmd)
     assert "--format" in cmd
     assert "text" in cmd
     assert "--timeout" in cmd
@@ -97,6 +100,7 @@ def test_build_cmd_with_headers():
 # ---------------------------------------------------------------------------
 # lazy_load — success paths
 # ---------------------------------------------------------------------------
+
 
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
 @patch("subprocess.run")
@@ -140,6 +144,7 @@ def test_lazy_load_markdown_format(mock_run, mock_which):
 # lazy_load — failure / fallback paths
 # ---------------------------------------------------------------------------
 
+
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
 @patch("subprocess.run")
 def test_lazy_load_skips_empty_content(mock_run, mock_which, caplog):
@@ -180,6 +185,7 @@ def test_lazy_load_no_binary_raises(mock_which):
 # fallback_to_chrome
 # ---------------------------------------------------------------------------
 
+
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
 @patch("subprocess.run")
 def test_fallback_to_chrome_on_empty(mock_run, mock_which):
@@ -193,7 +199,7 @@ def test_fallback_to_chrome_on_empty(mock_run, mock_which):
     mock_chrome_loader.load.return_value = [fallback_doc]
 
     with patch(
-        "scrapegraphai.docloaders.plasmate.ChromiumLoader",
+        "scrapegraphai.docloaders.chromium.ChromiumLoader",
         return_value=mock_chrome_loader,
     ):
         loader = _make_loader(fallback_to_chrome=True)
@@ -209,7 +215,7 @@ def test_no_fallback_when_content_present(mock_run, mock_which):
     """When Plasmate returns content, Chrome fallback should not be called."""
     mock_run.return_value = _mock_run("Real Plasmate content")
 
-    with patch("scrapegraphai.docloaders.plasmate.ChromiumLoader") as mock_chrome:
+    with patch("scrapegraphai.docloaders.chromium.ChromiumLoader") as mock_chrome:
         loader = _make_loader(fallback_to_chrome=True)
         docs = list(loader.lazy_load())
 
@@ -221,6 +227,7 @@ def test_no_fallback_when_content_present(mock_run, mock_which):
 # ---------------------------------------------------------------------------
 # alazy_load
 # ---------------------------------------------------------------------------
+
 
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
 @patch("subprocess.run")
@@ -237,8 +244,7 @@ def test_alazy_load_yields_documents(mock_run, mock_which):
     docs = asyncio.run(run())
     assert len(docs) == 2
     sources = {d.metadata["source"] for d in docs}
-    assert "https://a.com" in sources
-    assert "https://b.com" in sources
+    assert sources == {"https://a.com", "https://b.com"}
 
 
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
@@ -257,6 +263,7 @@ def test_alazy_load_skips_empty(mock_run, mock_which):
 # ---------------------------------------------------------------------------
 # Empty URL list
 # ---------------------------------------------------------------------------
+
 
 @patch("shutil.which", return_value="/usr/local/bin/plasmate")
 def test_lazy_load_empty_urls(mock_which):

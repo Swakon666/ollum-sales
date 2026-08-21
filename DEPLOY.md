@@ -14,11 +14,12 @@ domain to localhost. A separate GitHub-hosted job verifies the real public HTTPS
 ## Architecture
 
 ```text
-MCP client
-  |
-  | HTTPS + Authorization: Bearer <token>
-  v
-existing host Nginx :443
+ChatGPT MCP client                 Browser cabinet
+  | OAuth access token              | OIDC session + CSRF
+  v                                 v
+mcp.ollumgroup.ru              api.ollumgroup.ru
+             \                  /
+              existing host Nginx :443
   |
   | 127.0.0.1:18000
   v
@@ -50,29 +51,53 @@ Configure these repository secrets under **Settings → Secrets and variables �
 | `OLLUM_SSH_USER` | yes | Deployment user with sudo permission |
 | `OLLUM_SSH_PASSWORD` | yes | SSH and sudo password |
 | `OLLUM_SSH_HOST_KEY` | yes | Verified SSH fingerprint such as `SHA256:…` |
-| `OLLUM_DOMAIN` | yes | Public MCP domain |
-| `OLLUM_MCP_BEARER_TOKEN` | yes | Long random token protecting `/mcp` |
+| `OLLUM_DOMAIN` | yes | Public MCP domain (`mcp.ollumgroup.ru`) |
+| `OLLUM_MCP_BEARER_TOKEN` | bearer mode only | Long random token protecting `/mcp` |
+| `OLLUM_ADMIN_OIDC_CLIENT_SECRET` | OIDC cabinet | Server-side web client secret |
+| `OLLUM_ADMIN_ALLOWED_EMAILS` | OIDC cabinet | Comma-separated bootstrap allowlist |
+| `OLLUM_WORKSPACE_OWNER_EMAILS` | OIDC cabinet | Comma-separated owner emails |
+| `OLLUM_ADMIN_SESSION_SECRET` | OIDC cabinet | At least 32 random bytes |
 | `OPENAI_API_KEY` | for OpenAI | ScrapeGraphAI provider credential |
 | `LLM_API_KEY` | optional | Generic provider credential override |
 | `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
 | `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
 | `OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON` | yes for v0.4 | Complete Google service-account JSON; transferred as a mode-`0600` file and never written to `.env` |
 
-Configure the non-sensitive repository variable `OLLUM_GOOGLE_SHEETS_ID` with the target
-spreadsheet ID. Production deployment forces both `OLLUM_ALLOW_WHATSAPP_SEND=false` and
+Configure the non-sensitive repository variables for the closed beta:
+
+```text
+OLLUM_API_DOMAIN=api.ollumgroup.ru
+OLLUM_AUTH_MODE=oidc
+OLLUM_PUBLIC_BASE_URL=https://mcp.ollumgroup.ru
+OLLUM_DASHBOARD_BASE_URL=https://api.ollumgroup.ru
+OLLUM_MCP_RESOURCE_URL=https://mcp.ollumgroup.ru/mcp
+OLLUM_MCP_REQUIRED_SCOPES=sales:read,sales:write
+OLLUM_OIDC_ISSUER_URL=https://<tenant>/
+OLLUM_OIDC_AUDIENCE=<exact API audience>
+OLLUM_ADMIN_ENABLED=true
+OLLUM_ADMIN_OIDC_CLIENT_ID=<regular web application client id>
+OLLUM_DEFAULT_WORKSPACE_ID=ollum-group
+OLLUM_DEFAULT_WORKSPACE_NAME=Ollum Group
+```
+
+Also configure `OLLUM_GOOGLE_SHEETS_ID` with the target spreadsheet ID. Production
+deployment forces both `OLLUM_ALLOW_WHATSAPP_SEND=false` and
 `OLLUM_AUTOPILOT_ALLOW_SEND=false`; changing a repository secret cannot enable sends.
 
 Never commit or print any of these values. The workflow passes the SSH password through `sshpass`
 environment input and streams the sudo password over SSH. The generated production `.env` is copied
 over encrypted SSH with mode `0600`; its contents are never printed.
 
-If `OLLUM_MCP_BEARER_TOKEN` is rotated, update the secret and run a deployment. To use the deployed
-MCP, configure the client with:
+In the closed beta, configure the ChatGPT connection with:
 
 ```text
 URL: https://mcp.ollumgroup.ru/mcp
-Header: Authorization: Bearer <OLLUM_MCP_BEARER_TOKEN>
+Authentication: OAuth
 ```
+
+Legacy bearer deployments remain supported, but the browser cabinet intentionally requires OIDC.
+The OIDC provider must allow callback `https://api.ollumgroup.ru/auth/callback` and
+logout/origin `https://api.ollumgroup.ru`.
 
 ## Deployment
 
@@ -95,8 +120,9 @@ The deployment performs these operations:
 5. builds and starts the three Ollum Sales Compose services without touching unrelated services;
 6. waits for the local MCP health endpoint;
 7. installs a dedicated Nginx vhost and validates the entire Nginx configuration before reload;
-8. obtains or reuses a Let's Encrypt certificate through the existing Certbot Nginx plugin;
-9. checks public `/health`, unauthenticated `/mcp` rejection, and an authenticated MCP initialize call.
+8. obtains or reuses one Let's Encrypt certificate for MCP and API hostnames;
+9. checks both `/health` endpoints, OAuth metadata/challenge, the cabinet redirect, and
+   unauthenticated `/api/v1/session` rejection.
 
 Releases are stored below:
 
@@ -121,7 +147,8 @@ Expected response:
 {"status":"ok","service":"ollum-sales-mcp"}
 ```
 
-An unauthenticated MCP request must return HTTP `401`. MCP clients must supply the bearer token.
+An unauthenticated MCP request must return HTTP `401` with OAuth resource metadata. MCP
+clients must supply a valid OIDC access token and scopes.
 The local backend check, run on the server, is:
 
 ```bash
@@ -130,7 +157,12 @@ curl --fail http://127.0.0.1:18000/health
 
 ## WhatsApp QR login
 
-The bridge prints a QR code on first startup. Connect over SSH and follow its logs:
+The primary closed-beta flow is the authenticated page
+`https://api.ollumgroup.ru/` → **WhatsApp**. The private bridge keeps the raw pairing
+value only in memory; the backend returns a no-store PNG to an authorized session.
+The bridge has no public port.
+
+For recovery, an operator can still inspect the private service over SSH:
 
 ```bash
 cd /home/<ssh-user>/ollum-sales/current
