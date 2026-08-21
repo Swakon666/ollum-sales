@@ -408,6 +408,7 @@ if ! certbot --nginx \
   --agree-tos \
   --register-unsafely-without-email \
   --redirect \
+  --expand \
   --keep-until-expiring \
   "${certbot_domains[@]}"; then
   restore_previous
