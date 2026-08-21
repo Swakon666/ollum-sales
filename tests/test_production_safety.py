@@ -143,3 +143,23 @@ def test_failed_deploy_restores_shared_configuration_and_nginx() -> None:
     assert "rollback_unexpected_error" in deploy
     assert "nginx_changed=true" in deploy
     assert "deployment_committed=true" in deploy
+
+
+def test_whatsapp_bridge_logs_no_private_message_data() -> None:
+    bridge = (
+        REPOSITORY_ROOT / "upstream" / "whatsapp-mcp" / "whatsapp-bridge" / "main.go"
+    ).read_text(encoding="utf-8")
+
+    forbidden_log_fragments = (
+        'fmt.Printf("[%s] %s %s:',
+        "Attempting to download media for message",
+        "Successfully downloaded %s media to %s",
+        'logger.Infof("Message content:',
+        'logger.Infof("Stored message:',
+        'logger.Infof("Using existing chat name for %s:',
+    )
+    for fragment in forbidden_log_fragments:
+        assert fragment not in bridge
+
+    assert "Never place private message content" in bridge
+    assert "Successfully downloaded media (%d bytes)" in bridge

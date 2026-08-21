@@ -507,7 +507,7 @@ func sendWhatsAppMessage(client *whatsmeow.Client, recipient string, message str
 			return false, fmt.Sprintf("Error uploading media: %v", err)
 		}
 
-		fmt.Println("Media uploaded", resp)
+		fmt.Println("Media upload completed")
 
 		// Create the appropriate message type based on media type
 		switch mediaType {
@@ -779,12 +779,8 @@ func handleMessage(client *whatsmeow.Client, messageStore *MessageStore, msg *ev
 			direction = "→"
 		}
 
-		// Log based on message type
-		if mediaType != "" {
-			fmt.Printf("[%s] %s %s: [%s: %s] %s\n", timestamp, direction, sender, mediaType, filename, content)
-		} else if content != "" {
-			fmt.Printf("[%s] %s %s: %s\n", timestamp, direction, sender, content)
-		}
+		// Never place private message content, contact identifiers, or filenames in logs.
+		fmt.Printf("[%s] %s message stored (media=%t)\n", timestamp, direction, mediaType != "")
 	}
 }
 
@@ -936,7 +932,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("incomplete media information for download")
 	}
 
-	fmt.Printf("Attempting to download media for message %s in chat %s...\n", messageID, chatJID)
+	fmt.Println("Attempting to download stored media")
 
 	// Extract direct path from URL
 	directPath := extractDirectPathFromURL(url)
@@ -977,7 +973,7 @@ func downloadMedia(client *whatsmeow.Client, messageStore *MessageStore, message
 		return false, "", "", "", fmt.Errorf("failed to save media file: %v", err)
 	}
 
-	fmt.Printf("Successfully downloaded %s media to %s (%d bytes)\n", mediaType, localPath, len(mediaData))
+	fmt.Printf("Successfully downloaded media (%d bytes)\n", len(mediaData))
 	return true, mediaType, fileComponent, localPath, nil
 }
 
@@ -1283,7 +1279,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 	err := messageStore.db.QueryRow("SELECT name FROM chats WHERE jid = ?", chatJID).Scan(&existingName)
 	if err == nil && existingName != "" {
 		// Chat exists with a name, use that
-		logger.Infof("Using existing chat name for %s: %s", chatJID, existingName)
+		logger.Infof("Using an existing stored chat name")
 		return existingName
 	}
 
@@ -1292,7 +1288,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 
 	if jid.Server == "g.us" {
 		// This is a group chat
-		logger.Infof("Getting name for group: %s", chatJID)
+		logger.Infof("Resolving a group chat name")
 
 		// Use conversation data if provided (from history sync)
 		if conversation != nil {
@@ -1336,10 +1332,10 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			}
 		}
 
-		logger.Infof("Using group name: %s", name)
+		logger.Infof("Resolved a group chat name")
 	} else {
 		// This is an individual contact
-		logger.Infof("Getting name for contact: %s", chatJID)
+		logger.Infof("Resolving a contact name")
 
 		// Just use contact info (full name)
 		contact, err := client.Store.Contacts.GetContact(context.Background(), jid)
@@ -1353,7 +1349,7 @@ func GetChatName(client *whatsmeow.Client, messageStore *MessageStore, jid types
 			name = jid.User
 		}
 
-		logger.Infof("Using contact name: %s", name)
+		logger.Infof("Resolved a contact name")
 	}
 
 	return name
@@ -1375,7 +1371,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 		// Try to parse the JID
 		jid, err := types.ParseJID(chatJID)
 		if err != nil {
-			logger.Warnf("Failed to parse JID %s: %v", chatJID, err)
+			logger.Warnf("Failed to parse a history-sync JID")
 			continue
 		}
 
@@ -1425,9 +1421,6 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 				if msg.Message.Message != nil {
 					mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = extractMediaInfo(msg.Message.Message)
 				}
-
-				// Log the message content for debugging
-				logger.Infof("Message content: %v, Media Type: %v", content, mediaType)
 
 				// Skip messages with no content and no media
 				if content == "" && mediaType == "" {
@@ -1485,14 +1478,7 @@ func handleHistorySync(client *whatsmeow.Client, messageStore *MessageStore, his
 					logger.Warnf("Failed to store history message: %v", err)
 				} else {
 					syncedCount++
-					// Log successful message storage
-					if mediaType != "" {
-						logger.Infof("Stored message: [%s] %s -> %s: [%s: %s] %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, mediaType, filename, content)
-					} else {
-						logger.Infof("Stored message: [%s] %s -> %s: %s",
-							timestamp.Format("2006-01-02 15:04:05"), sender, chatJID, content)
-					}
+					logger.Infof("Stored a history message (media=%t)", mediaType != "")
 				}
 			}
 		}
