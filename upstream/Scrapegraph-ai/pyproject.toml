@@ -74,7 +74,7 @@ burr = ["burr[start]==0.22.1"]
 nvidia = ["langchain-nvidia-ai-endpoints>=0.1.0"]
 
 [build-system]
-requires = ["hatchling==1.26.3"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
