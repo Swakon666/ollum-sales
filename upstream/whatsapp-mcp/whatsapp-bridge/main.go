@@ -676,9 +676,8 @@ func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.Handler
 			return
 		}
 
-		fmt.Println("Received request to send message", req.Message, req.MediaPath)
 		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
-		fmt.Println("Message sent", success, message)
+		fmt.Println(sendAuditLine(success))
 		if !success {
 			w.WriteHeader(http.StatusInternalServerError)
 		}
@@ -687,6 +686,10 @@ func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.Handler
 			Message: message,
 		})
 	}
+}
+
+func sendAuditLine(success bool) string {
+	return fmt.Sprintf("WhatsApp send request completed: success=%t", success)
 }
 
 // Extract media info from a message

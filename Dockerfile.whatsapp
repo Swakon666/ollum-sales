@@ -8,9 +8,15 @@ RUN CGO_ENABLED=1 go build -o /out/whatsapp-bridge ./main.go
 FROM debian:bookworm-slim
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 ollum \
+    && useradd --uid 10001 --gid 10001 --home-dir /home/ollum --create-home \
+        --shell /usr/sbin/nologin ollum
 WORKDIR /app
 COPY --from=builder /out/whatsapp-bridge /usr/local/bin/whatsapp-bridge
+RUN mkdir -p /app/store \
+    && chown -R 10001:10001 /app/store /home/ollum
 VOLUME ["/app/store"]
 EXPOSE 8080
+USER 10001:10001
 CMD ["whatsapp-bridge"]

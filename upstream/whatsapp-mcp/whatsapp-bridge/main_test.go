@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -128,6 +129,96 @@ func TestSendMessageHandlerBlocksWhenDisabled(t *testing.T) {
 	}
 	if response.Success {
 		t.Fatal("disabled bridge unexpectedly allowed sending")
+	}
+}
+
+func TestSendAuditLineContainsOnlyOutcome(t *testing.T) {
+	line := sendAuditLine(true)
+	if line != "WhatsApp send request completed: success=true" {
+		t.Fatalf("unexpected audit line: %q", line)
+	}
+	for _, secret := range []string{"recipient@s.whatsapp.net", "private message", "/private/media.jpg"} {
+		if strings.Contains(line, secret) {
+			t.Fatalf("audit line leaked sensitive value %q", secret)
+		}
+	}
+}
+
+func TestSendMessageHandlerValidatesRequestsBeforeUsingClient(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		body   string
+		status int
+	}{
+		{name: "method", method: http.MethodGet, status: http.StatusMethodNotAllowed},
+		{name: "invalid json", method: http.MethodPost, body: "{", status: http.StatusBadRequest},
+		{name: "recipient", method: http.MethodPost, body: `{"message":"hello"}`, status: http.StatusBadRequest},
+		{name: "content", method: http.MethodPost, body: `{"recipient":"123@s.whatsapp.net"}`, status: http.StatusBadRequest},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			r := httptest.NewRequest(test.method, "/api/send", strings.NewReader(test.body))
+
+			sendMessageHandler(nil, true).ServeHTTP(w, r)
+
+			if w.Code != test.status {
+				t.Fatalf("expected status %d, got %d", test.status, w.Code)
+			}
+		})
+	}
+}
+
+func TestMessageStoreRoundTrip(t *testing.T) {
+	t.Chdir(t.TempDir())
+	store, err := NewMessageStore()
+	if err != nil {
+		t.Fatalf("create message store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Errorf("close message store: %v", err)
+		}
+	})
+
+	chatJID := "123@s.whatsapp.net"
+	timestamp := time.Date(2026, time.August, 22, 10, 0, 0, 0, time.UTC)
+	if err := store.StoreChat(chatJID, "Test chat", timestamp); err != nil {
+		t.Fatalf("store chat: %v", err)
+	}
+	if err := store.StoreMessage(
+		"message-1", chatJID, "456@s.whatsapp.net", "hello", timestamp, false,
+		"", "", "", nil, nil, nil, 0,
+	); err != nil {
+		t.Fatalf("store message: %v", err)
+	}
+	if err := store.StoreMessage(
+		"empty-message", chatJID, "456@s.whatsapp.net", "", timestamp, false,
+		"", "", "", nil, nil, nil, 0,
+	); err != nil {
+		t.Fatalf("skip empty message: %v", err)
+	}
+
+	messages, err := store.GetMessages(chatJID, 10)
+	if err != nil {
+		t.Fatalf("get messages: %v", err)
+	}
+	if len(messages) != 1 {
+		t.Fatalf("expected one stored message, got %d", len(messages))
+	}
+	if messages[0].Sender != "456@s.whatsapp.net" || messages[0].Content != "hello" || !messages[0].Time.Equal(timestamp) {
+		t.Fatalf("unexpected message: %+v", messages[0])
+	}
+
+	chats, err := store.GetChats()
+	if err != nil {
+		t.Fatalf("get chats: %v", err)
+	}
+	storedTime, ok := chats[chatJID]
+	if !ok || !storedTime.Equal(timestamp) {
+		t.Fatalf("unexpected chats: %+v", chats)
 	}
 }
 

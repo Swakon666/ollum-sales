@@ -80,11 +80,52 @@ def test_nginx_template_hides_version_and_sets_security_headers() -> None:
     assert "Strict-Transport-Security" in nginx
     assert "X-Content-Type-Options" in nginx
     assert "Referrer-Policy" in nginx
+    assert "X-Frame-Options" in nginx
+    assert "Permissions-Policy" in nginx
+    assert "Content-Security-Policy" in nginx
+    assert "proxy_hide_header Strict-Transport-Security;" in nginx
     assert "location ^~ /.well-known/" in nginx
     assert "location ^~ /api/admin/" in nginx
     assert "location ^~ /api/v1/" in nginx
     assert "server_name __OLLUM_DOMAIN__ __OLLUM_API_DOMAIN__;" in nginx
     assert "location = /" in nginx
+
+
+def test_runtime_containers_are_unprivileged_and_read_only() -> None:
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    mcp_dockerfile = (REPOSITORY_ROOT / "Dockerfile.mcp").read_text(encoding="utf-8")
+    whatsapp_dockerfile = (REPOSITORY_ROOT / "Dockerfile.whatsapp").read_text(
+        encoding="utf-8"
+    )
+    deploy = (REPOSITORY_ROOT / "deploy" / "remote_deploy.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert compose.count('user: "10001:10001"') == 3
+    assert compose.count("read_only: true") == 3
+    assert compose.count("- ALL") >= 3
+    assert compose.count("no-new-privileges:true") == 3
+    assert "USER 10001:10001" in mcp_dockerfile
+    assert "USER 10001:10001" in whatsapp_dockerfile
+    assert "ensure_runtime_volume_ownership" in deploy
+    assert "chown -R 10001:10001 /data/crm /data/whatsapp" in deploy
+
+
+def test_backup_and_restore_require_encryption_integrity_and_confirmation() -> None:
+    backup = (REPOSITORY_ROOT / "deploy" / "backup_data.sh").read_text(encoding="utf-8")
+    restore = (REPOSITORY_ROOT / "deploy" / "restore_data.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "aes-256-cbc" in backup
+    assert "-pbkdf2" in backup
+    assert "sha256sum" in backup
+    assert "docker compose stop" in backup
+    assert "OLLUM_RESTORE_CONFIRM" in restore
+    assert "api/v1" not in restore
+    assert "PRAGMA integrity_check" in restore
+    assert "backup_data.sh" in restore
+    assert "production_mutated" in restore
 
 
 def test_closed_beta_admin_exposes_no_send_endpoint_or_flag_toggle() -> None:
@@ -110,6 +151,25 @@ def test_repository_dependency_automation_covers_all_manifests() -> None:
 
     for ecosystem in ("pip", "gomod", "docker", "github-actions"):
         assert f"package-ecosystem: {ecosystem}" in dependabot
+
+
+def test_ci_enforces_dependency_container_and_code_scanning() -> None:
+    ci = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    codeql = (REPOSITORY_ROOT / ".github" / "workflows" / "codeql.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "python -m pip_audit --local --skip-editable" in ci
+    assert "koalaman/shellcheck-alpine:v0.11.0" in ci
+    assert "aquasec/trivy:0.74.0" in ci
+    assert "--ignore-unfixed --exit-code 1" in ci
+    assert "security-events: write" in codeql
+    assert "github/codeql-action/init@v4" in codeql
+    assert "github/codeql-action/analyze@v4" in codeql
+    for language in ("actions", "javascript-typescript", "python", "go"):
+        assert f"language: {language}" in codeql
 
 
 def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> None:

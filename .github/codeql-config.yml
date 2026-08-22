@@ -1,0 +1,5 @@
+name: Ollum Sales CodeQL configuration
+
+paths-ignore:
+  - ".venv/**"
+  - "upstream/Scrapegraph-ai/**"

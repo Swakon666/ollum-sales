@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/assets/admin.css">
   </head>
   <body>
+    <a class="skip-link" href="#main-content">Перейти к содержимому</a>
     <div class="app-shell">
       <aside class="sidebar" aria-label="Основная навигация">
         <a class="brand" href="#overview" aria-label="Ollum Control">
@@ -36,7 +37,7 @@
         </div>
       </aside>
 
-      <main class="workspace">
+      <main class="workspace" id="main-content" tabindex="-1">
         <header class="topbar">
           <div>
             <p class="eyebrow">Закрытая бета</p>
@@ -97,6 +98,7 @@
             </div>
           </div>
           <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Компания</th><th>Статус</th><th>Score</th><th>Evidence</th><th>Обновлено</th></tr></thead><tbody id="leads-table"></tbody></table></div></article>
+          <div class="pagination" id="leads-pagination" aria-live="polite"></div>
         </section>
 
         <section class="view" data-panel="campaigns">
@@ -105,6 +107,7 @@
             <button class="primary-button" id="new-campaign-button">Новая кампания</button>
           </div>
           <div class="card-grid" id="campaign-grid"></div>
+          <div class="pagination" id="campaigns-pagination" aria-live="polite"></div>
         </section>
 
         <section class="view" data-panel="drafts">
@@ -113,6 +116,7 @@
             <select id="draft-status-filter" aria-label="Статус черновика"><option value="">Все статусы</option><option value="draft">Требует проверки</option><option value="approved">Одобрен</option><option value="sent">Отправлен</option><option value="failed">Ошибка</option></select>
           </div>
           <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Канал / получатель</th><th>Текст</th><th>Статус</th><th>Создан</th><th></th></tr></thead><tbody id="drafts-table"></tbody></table></div></article>
+          <div class="pagination" id="drafts-pagination" aria-live="polite"></div>
         </section>
 
         <section class="view" data-panel="autopilot">
@@ -187,6 +191,7 @@
         <section class="view" data-panel="audit">
           <div class="section-heading"><div><p class="eyebrow">Governance</p><h2>Журнал действий</h2><p class="muted">В журнал не попадают токены, секреты и полный текст переписки.</p></div></div>
           <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Время</th><th>Оператор</th><th>Действие</th><th>Объект</th><th>Результат</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
+          <div class="pagination" id="audit-pagination" aria-live="polite"></div>
         </section>
       </main>
     </div>

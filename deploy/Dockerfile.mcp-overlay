@@ -1,6 +1,22 @@
 ARG OLLUM_BASE_IMAGE
 FROM ${OLLUM_BASE_IMAGE}
 
+USER root
+
+ENV HOME=/home/ollum \
+    XDG_CACHE_HOME=/tmp/.cache \
+    XDG_CONFIG_HOME=/tmp/.config
+
+COPY pyproject.toml /app/pyproject.toml
 COPY app /app/app
 
-RUN python -c "import bs4, mcp, pydantic, requests, scrapegraphai, uvicorn"
+RUN python -m pip install --no-cache-dir --upgrade pip==26.2.1 "setuptools>=78.1.1" . \
+    && (getent group 10001 >/dev/null || groupadd --gid 10001 ollum)
+RUN getent passwd 10001 >/dev/null \
+    || useradd --uid 10001 --gid 10001 --home-dir /home/ollum --create-home \
+        --shell /usr/sbin/nologin ollum
+RUN mkdir -p /home/ollum /data/crm /data/whatsapp \
+    && chown -R 10001:10001 /home/ollum /data/crm /data/whatsapp \
+    && python -c "from importlib.metadata import version; import bs4, mcp, msgpack, pydantic, requests, scrapegraphai, uvicorn; assert tuple(map(int, version('msgpack').split('.'))) >= (1, 2, 1)"
+
+USER 10001:10001
