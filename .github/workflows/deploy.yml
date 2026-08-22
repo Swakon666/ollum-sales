@@ -23,12 +23,8 @@ on:
           - connect-whatsapp
           - deploy-whatsapp-prebuilt
           - rollback-whatsapp
-      cache_record_id:
-        description: Exact reclaimable BuildKit cache record ID from diagnose-space
-        type: string
-        required: false
-      failed_release_id:
-        description: Exact failed Ollum release ID to remove after verification
+      recovery_target_ids:
+        description: Comma-separated BuildKit cache record ID and failed Ollum release ID
         type: string
         required: false
       prebuilt_release_tag:
@@ -324,12 +320,13 @@ jobs:
         if: ${{ env.DEPLOY_MODE == 'recover-space' }}
         shell: bash
         env:
-          CACHE_RECORD_ID: ${{ inputs.cache_record_id }}
-          FAILED_RELEASE_ID: ${{ inputs.failed_release_id }}
+          RECOVERY_TARGET_IDS: ${{ inputs.recovery_target_ids }}
         run: |
           set -euo pipefail
-          [ -n "$CACHE_RECORD_ID" ] || { echo 'cache_record_id is required' >&2; exit 1; }
-          [ -n "$FAILED_RELEASE_ID" ] || { echo 'failed_release_id is required' >&2; exit 1; }
+          IFS=, read -r CACHE_RECORD_ID FAILED_RELEASE_ID EXTRA_TARGET <<< "$RECOVERY_TARGET_IDS"
+          [ -n "$CACHE_RECORD_ID" ] || { echo 'recovery_target_ids must include a cache record ID' >&2; exit 1; }
+          [ -n "$FAILED_RELEASE_ID" ] || { echo 'recovery_target_ids must include a failed release ID' >&2; exit 1; }
+          [ -z "$EXTRA_TARGET" ] || { echo 'recovery_target_ids must contain exactly two values' >&2; exit 1; }
           {
             printf '%s\n' "$SSH_PASSWORD"
             cat deploy/space_recovery.sh

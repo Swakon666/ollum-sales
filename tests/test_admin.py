@@ -267,6 +267,34 @@ def test_admin_requires_session_and_sets_security_headers(admin_client) -> None:
     assert page.headers["cache-control"] == "no-store"
 
 
+def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
+    admin_client,
+) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+    _login(client)
+
+    page = client.get("/admin")
+    script = client.get("/assets/admin.js")
+    stylesheet = client.get("/assets/admin.css")
+
+    assert page.status_code == script.status_code == stylesheet.status_code == 200
+    assert 'class="skip-link"' in page.text
+    assert 'id="main-content" tabindex="-1"' in page.text
+    for pagination_id in (
+        "leads-pagination",
+        "campaigns-pagination",
+        "drafts-pagination",
+        "audit-pagination",
+    ):
+        assert f'id="{pagination_id}"' in page.text
+    assert "const PAGE_SIZE = 50;" in script.text
+    assert "function pageItems(" in script.text
+    assert "function renderView(" in script.text
+    assert "aria-current" in script.text
+    assert ":focus-visible" in stylesheet.text
+    assert "outline: none" not in stylesheet.text
+
+
 def test_cross_origin_oauth_handoff_finishes_on_api_and_is_single_use(
     admin_client,
 ) -> None:

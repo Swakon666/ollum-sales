@@ -183,6 +183,44 @@ Authentication and message databases live in `ollum-sales-whatsapp-data`. Campai
 analysis, scores, drafts, interactions, and follow-ups live in `ollum-sales-crm-data`. Do not delete
 either named volume. They survive container recreation, release changes, and server restarts.
 
+## Encrypted backup and restore
+
+Create a root-readable passphrase file once, outside the release directories. Do not print or commit
+its contents:
+
+```bash
+sudo install -d -m 0700 /etc/ollum-sales
+sudo sh -c 'umask 077; openssl rand -base64 48 > /etc/ollum-sales/backup.passphrase'
+```
+
+Run a consistent encrypted backup from the active release:
+
+```bash
+cd /home/<ssh-user>/ollum-sales/current
+sudo env OLLUM_BACKUP_PASSPHRASE_FILE=/etc/ollum-sales/backup.passphrase \
+  ./deploy/backup_data.sh /var/backups/ollum-sales
+```
+
+The script briefly stops only the running Ollum Sales containers, snapshots both named volumes,
+restores their previous running state, records checksums and metadata, then encrypts the archive with
+AES-256 and PBKDF2. Store both the `.tar.gz.enc` file and its `.sha256` sidecar in independent
+off-server storage. A backup without the passphrase file cannot be restored.
+
+Restore is deliberately gated and always creates a new encrypted pre-restore backup first. It
+decrypts and verifies the archive, restores into temporary volumes, runs SQLite integrity checks,
+and only then replaces the two production volumes:
+
+```bash
+cd /home/<ssh-user>/ollum-sales/current
+sudo env OLLUM_BACKUP_PASSPHRASE_FILE=/etc/ollum-sales/backup.passphrase \
+  OLLUM_RESTORE_CONFIRM=RESTORE \
+  ./deploy/restore_data.sh /var/backups/ollum-sales/ollum-sales-YYYYMMDDTHHMMSSZ.tar.gz.enc
+```
+
+If a copy fails after production data has begun changing, the script intentionally leaves the Ollum
+Sales services stopped and reports that the encrypted pre-restore backup must be used. It never
+deletes or modifies unrelated Docker volumes.
+
 The bridge health status remains `starting` until WhatsApp authentication succeeds. This does not
 prevent the MCP health endpoint from running; WhatsApp operations become available after pairing.
 

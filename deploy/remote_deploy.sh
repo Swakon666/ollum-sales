@@ -336,6 +336,22 @@ restore_previous() {
   fi
 }
 
+ensure_runtime_volume_ownership() {
+  local runtime_image
+  runtime_image=$(docker compose config --images | grep 'ollum-sales-mcp' | head -1)
+  [[ -n $runtime_image ]] || die 'could not identify the MCP image for volume migration'
+  docker run --rm \
+    --user 0:0 \
+    --entrypoint /bin/sh \
+    --volume ollum-sales-crm-data:/data/crm \
+    --volume ollum-sales-whatsapp-data:/data/whatsapp \
+    "$runtime_image" \
+    -ec 'chown -R 10001:10001 /data/crm /data/whatsapp' \
+    || die 'could not migrate persistent volume ownership to the runtime user'
+}
+
+ensure_runtime_volume_ownership
+
 if ! docker compose up -d --remove-orphans; then
   restore_previous
   die 'docker compose up failed'

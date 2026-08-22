@@ -1,31 +1,46 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Moscow
     open-pull-requests-limit: 5
 
   - package-ecosystem: pip
-    directory: /upstream/Scrapegraph-ai
+    directory: "/upstream/Scrapegraph-ai"
     schedule:
       interval: weekly
+      day: monday
+      time: "06:15"
+      timezone: Europe/Moscow
     open-pull-requests-limit: 5
 
   - package-ecosystem: gomod
-    directory: /upstream/whatsapp-mcp/whatsapp-bridge
+    directory: "/upstream/whatsapp-mcp/whatsapp-bridge"
     schedule:
       interval: weekly
+      day: monday
+      time: "06:30"
+      timezone: Europe/Moscow
     open-pull-requests-limit: 5
 
   - package-ecosystem: docker
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+      day: monday
+      time: "06:45"
+      timezone: Europe/Moscow
     open-pull-requests-limit: 5
 
   - package-ecosystem: github-actions
-    directory: /
+    directory: "/"
     schedule:
       interval: weekly
+      day: monday
+      time: "07:00"
+      timezone: Europe/Moscow
     open-pull-requests-limit: 5

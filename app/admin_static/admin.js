@@ -28,6 +28,14 @@ const VIEW_TITLES = {
   whatsapp: "Подключение WhatsApp", team: "Команда и доступ", audit: "Журнал действий",
 };
 
+const VIEW_HASHES = Object.freeze({
+  overview: "#overview", leads: "#leads", campaigns: "#campaigns",
+  drafts: "#drafts", autopilot: "#autopilot", plugin: "#plugin",
+  whatsapp: "#whatsapp", team: "#team", audit: "#audit",
+});
+
+const PAGE_SIZE = 50;
+
 const state = {
   data: null,
   leads: [],
@@ -38,6 +46,7 @@ const state = {
   currentDraft: null,
   csrf: "",
   loading: false,
+  pages: { leads: 1, campaigns: 1, drafts: 1, audit: 1 },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -141,9 +150,37 @@ async function refreshAll({ quiet = false, force = false } = {}) {
 function navigate(view) {
   const next = VIEW_TITLES[view] ? view : "overview";
   $$(".view").forEach((panel) => panel.classList.toggle("is-visible", panel.dataset.panel === next));
-  $$(".nav-item").forEach((item) => item.classList.toggle("is-active", item.dataset.view === next));
+  $$(".nav-item").forEach((item) => {
+    const active = item.dataset.view === next;
+    item.classList.toggle("is-active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
   $("#page-title").textContent = VIEW_TITLES[next];
-  if (window.location.hash !== `#${next}`) history.replaceState(null, "", `#${next}`);
+  if (window.location.hash !== VIEW_HASHES[next]) history.replaceState(null, "", VIEW_HASHES[next]);
+  if (state.data) renderView(next);
+}
+
+function pageItems(items, key) {
+  const pageCount = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const page = Math.min(Math.max(1, state.pages[key] || 1), pageCount);
+  state.pages[key] = page;
+  const start = (page - 1) * PAGE_SIZE;
+  return { items: items.slice(start, start + PAGE_SIZE), page, pageCount, start };
+}
+
+function renderPagination(key, total, page, pageCount, start) {
+  const container = $(`#${key}-pagination`);
+  if (!container) return;
+  if (total <= PAGE_SIZE) {
+    container.replaceChildren();
+    return;
+  }
+  const end = Math.min(total, start + PAGE_SIZE);
+  container.innerHTML = `
+    <span class="pagination-status">${start + 1}–${end} из ${total}</span>
+    <button class="secondary-button page-button" type="button" data-page-key="${key}" data-page="${page - 1}" aria-label="Предыдущая страница" ${page === 1 ? "disabled" : ""}>←</button>
+    <button class="secondary-button page-button" type="button" data-page-key="${key}" data-page="${page + 1}" aria-label="Следующая страница" ${page === pageCount ? "disabled" : ""}>→</button>`;
 }
 
 function renderIdentity() {
@@ -239,25 +276,31 @@ function renderLeads() {
     const haystack = [lead.company_name, lead.industry, lead.location, lead.website_url].join(" ").toLowerCase();
     return (!query || haystack.includes(query)) && (!status || lead.status === status) && Number(lead.score || 0) >= minScore;
   });
-  $("#leads-table").innerHTML = filtered.length ? filtered.map((lead) => {
+  const page = pageItems(filtered, "leads");
+  $("#leads-table").innerHTML = filtered.length ? page.items.map((lead) => {
     const [evidence, evidenceClass] = evidenceStatus(lead);
     const options = LEAD_STATUSES.map((item) => `<option value="${item}" ${item === lead.status ? "selected" : ""}>${escapeHtml(label(item))}</option>`).join("");
-    return `<tr><td><strong>${escapeHtml(lead.company_name)}</strong><small>${escapeHtml([lead.industry, lead.location].filter(Boolean).join(" · ") || lead.website_url)}</small></td><td><select class="lead-status-select" data-lead-id="${escapeHtml(lead.id)}" data-current-status="${escapeHtml(lead.status)}">${options}</select></td><td><span class="score">${escapeHtml(lead.score ?? "—")}</span></td><td><span class="status-pill ${evidenceClass}">${evidence}</span></td><td>${formatDate(lead.updated_at)}</td></tr>`;
+    return `<tr><td><strong>${escapeHtml(lead.company_name)}</strong><small>${escapeHtml([lead.industry, lead.location].filter(Boolean).join(" · ") || lead.website_url)}</small></td><td><select class="lead-status-select" aria-label="Статус лида ${escapeHtml(lead.company_name)}" data-lead-id="${escapeHtml(lead.id)}" data-current-status="${escapeHtml(lead.status)}">${options}</select></td><td><span class="score">${escapeHtml(lead.score ?? "—")}</span></td><td><span class="status-pill ${evidenceClass}">${evidence}</span></td><td>${formatDate(lead.updated_at)}</td></tr>`;
   }).join("") : `<tr><td class="empty-row" colspan="5">По выбранным фильтрам лидов нет</td></tr>`;
+  renderPagination("leads", filtered.length, page.page, page.pageCount, page.start);
 }
 
 function renderCampaigns() {
-  $("#campaign-grid").innerHTML = state.campaigns.length ? state.campaigns.map((campaign) => `
+  const page = pageItems(state.campaigns, "campaigns");
+  $("#campaign-grid").innerHTML = state.campaigns.length ? page.items.map((campaign) => `
     <article class="card campaign-card"><div>${statusPill(campaign.status)}<h3>${escapeHtml(campaign.name)}</h3><div class="campaign-meta">${escapeHtml([campaign.industry, campaign.location].filter(Boolean).join(" · ") || "Без сегмента")}</div></div><div class="campaign-stats"><div><strong>${escapeHtml(campaign.lead_count || 0)}</strong><small>лидов</small></div><small>${formatDate(campaign.created_at)}</small></div></article>
   `).join("") : `<article class="card"><p class="muted">Кампаний пока нет.</p></article>`;
+  renderPagination("campaigns", state.campaigns.length, page.page, page.pageCount, page.start);
 }
 
 function renderDrafts() {
   const status = $("#draft-status-filter").value;
   const drafts = state.drafts.filter((draft) => !status || draft.status === status);
-  $("#drafts-table").innerHTML = drafts.length ? drafts.map((draft) => `
+  const page = pageItems(drafts, "drafts");
+  $("#drafts-table").innerHTML = drafts.length ? page.items.map((draft) => `
     <tr><td><strong>${escapeHtml(draft.channel)}</strong><small>${escapeHtml(draft.recipient || "Получатель не задан")}</small></td><td><strong>${escapeHtml(String(draft.message || "").slice(0, 92))}${String(draft.message || "").length > 92 ? "…" : ""}</strong><small>Fingerprint ${escapeHtml(String(draft.fingerprint || "").slice(0, 12))}</small></td><td>${statusPill(draft.status)}</td><td>${formatDate(draft.created_at)}</td><td>${draft.status === "draft" ? `<button class="secondary-button review-draft" data-draft-id="${escapeHtml(draft.id)}">Проверить</button>` : ""}</td></tr>
   `).join("") : `<tr><td class="empty-row" colspan="5">Черновиков с таким статусом нет</td></tr>`;
+  renderPagination("drafts", drafts.length, page.page, page.pageCount, page.start);
 }
 
 function renderAutopilot() {
@@ -335,7 +378,7 @@ function renderTeam() {
 
   $("#members-table").innerHTML = state.workspaceMembers.length ? state.workspaceMembers.map((member) => {
     const roleControl = canManage && member.id !== user.member_id
-      ? `<select class="role-select member-role-select" data-member-id="${escapeHtml(member.id)}" data-current-role="${escapeHtml(member.role)}"><option value="viewer" ${member.role === "viewer" ? "selected" : ""}>Viewer</option><option value="operator" ${member.role === "operator" ? "selected" : ""}>Operator</option><option value="owner" ${member.role === "owner" ? "selected" : ""}>Owner</option></select>`
+      ? `<select class="role-select member-role-select" aria-label="Роль участника ${escapeHtml(member.display_name || member.email)}" data-member-id="${escapeHtml(member.id)}" data-current-role="${escapeHtml(member.role)}"><option value="viewer" ${member.role === "viewer" ? "selected" : ""}>Viewer</option><option value="operator" ${member.role === "operator" ? "selected" : ""}>Operator</option><option value="owner" ${member.role === "owner" ? "selected" : ""}>Owner</option></select>`
       : statusPill(member.role);
     return `<tr><td><strong>${escapeHtml(member.display_name || member.email)}</strong><small>${escapeHtml(member.email)}</small></td><td>${roleControl}</td><td>${statusPill(member.status)}</td><td>${formatDate(member.last_login_at)}</td></tr>`;
   }).join("") : `<tr><td class="empty-row" colspan="4">Участники ещё не зарегистрированы</td></tr>`;
@@ -393,28 +436,31 @@ function renderPlugin() {
 
 function renderAudit() {
   const events = state.data.audit || [];
-  $("#audit-table").innerHTML = events.length ? events.map((event) => `<tr><td>${formatDate(event.created_at)}</td><td><strong>${escapeHtml(event.actor)}</strong></td><td>${escapeHtml(event.action)}</td><td><small>${escapeHtml([event.target_type, event.target_id].filter(Boolean).join(" · ") || "—")}</small></td><td>${statusPill(event.outcome)}</td></tr>`).join("") : `<tr><td class="empty-row" colspan="5">Журнал пока пуст</td></tr>`;
+  const page = pageItems(events, "audit");
+  $("#audit-table").innerHTML = events.length ? page.items.map((event) => `<tr><td>${formatDate(event.created_at)}</td><td><strong>${escapeHtml(event.actor)}</strong></td><td>${escapeHtml(event.action)}</td><td><small>${escapeHtml([event.target_type, event.target_id].filter(Boolean).join(" · ") || "—")}</small></td><td>${statusPill(event.outcome)}</td></tr>`).join("") : `<tr><td class="empty-row" colspan="5">Журнал пока пуст</td></tr>`;
+  renderPagination("audit", events.length, page.page, page.pageCount, page.start);
 }
 
-function renderAll() {
-  renderIdentity();
-  renderMetrics();
-  renderFunnel();
-  renderSafety();
-  renderTopLeads();
-  renderJobs();
-  renderLeads();
-  renderCampaigns();
-  renderDrafts();
-  renderAutopilot();
-  renderWhatsApp();
-  renderTeam();
-  renderPlugin();
-  renderAudit();
+function renderView(view) {
+  if (view === "overview") {
+    renderMetrics(); renderFunnel(); renderSafety(); renderTopLeads(); renderJobs();
+  } else if (view === "leads") renderLeads();
+  else if (view === "campaigns") renderCampaigns();
+  else if (view === "drafts") renderDrafts();
+  else if (view === "autopilot") renderAutopilot();
+  else if (view === "whatsapp") renderWhatsApp();
+  else if (view === "team") renderTeam();
+  else if (view === "plugin") renderPlugin();
+  else if (view === "audit") renderAudit();
   const canWrite = Boolean(state.data.user.capabilities?.write);
   $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft').forEach((control) => {
     control.disabled = !canWrite;
   });
+}
+
+function renderAll() {
+  renderIdentity();
+  renderView($(".view.is-visible")?.dataset.panel || "overview");
 }
 
 async function performAction(action) {
@@ -509,8 +555,14 @@ function bindEvents() {
   $("#refresh-button").addEventListener("click", () => refreshAll());
   $("#refresh-whatsapp-button").addEventListener("click", () => refreshWhatsApp());
   $$('[data-action]').forEach((button) => button.addEventListener("click", () => performAction(button.dataset.action)));
-  ["#lead-search", "#lead-status-filter", "#lead-score-filter"].forEach((selector) => $(selector).addEventListener("input", renderLeads));
-  $("#draft-status-filter").addEventListener("change", renderDrafts);
+  ["#lead-search", "#lead-status-filter", "#lead-score-filter"].forEach((selector) => $(selector).addEventListener("input", () => {
+    state.pages.leads = 1;
+    renderLeads();
+  }));
+  $("#draft-status-filter").addEventListener("change", () => {
+    state.pages.drafts = 1;
+    renderDrafts();
+  });
   $("#new-campaign-button").addEventListener("click", () => $("#campaign-dialog").showModal());
   $("#approve-draft-button").addEventListener("click", approveCurrentDraft);
   $("#create-campaign-button").addEventListener("click", createCampaign);
@@ -521,6 +573,16 @@ function bindEvents() {
   });
 
   document.addEventListener("click", async (event) => {
+    const pageButton = event.target.closest(".page-button[data-page-key][data-page]");
+    if (pageButton && !pageButton.disabled) {
+      const key = pageButton.dataset.pageKey;
+      state.pages[key] = Number(pageButton.dataset.page);
+      const renderers = { leads: renderLeads, campaigns: renderCampaigns, drafts: renderDrafts, audit: renderAudit };
+      renderers[key]?.();
+      $(`#${key}-pagination`)?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+
     const review = event.target.closest(".review-draft");
     if (review) openDraft(review.dataset.draftId);
 
@@ -579,7 +641,8 @@ function bindEvents() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
-  navigate(window.location.hash.slice(1) || "overview");
+  const initialView = Object.entries(VIEW_HASHES).find(([, hash]) => hash === window.location.hash)?.[0] || "overview";
+  navigate(initialView);
   await refreshAll();
   window.setInterval(() => {
     if (!document.hidden && !state.loading) refreshAll({ quiet: true });

@@ -33,6 +33,22 @@ body {
     var(--bg);
 }
 
+.skip-link {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  z-index: 100;
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: var(--green-ink);
+  background: var(--green);
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+  transform: translateY(-160%);
+}
+.skip-link:focus { transform: translateY(0); }
+
 button, input, select, textarea { font: inherit; }
 button { color: inherit; }
 
@@ -114,6 +130,10 @@ button { color: inherit; }
 .hero-actions, .filter-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 button { border: 0; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 3px;
+}
 .primary-button, .secondary-button, .ghost-button, .icon-button, .text-button {
   cursor: pointer;
   transition: transform 130ms ease, border-color 130ms ease, background 130ms ease, opacity 130ms ease;
@@ -178,7 +198,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; transform: none !important
 .score { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid #36503e; border-radius: 12px; color: var(--green); background: rgba(98, 220, 130, 0.06); font-size: 12px; font-weight: 850; font-variant-numeric: tabular-nums; }
 
 .filter-bar input { min-width: 270px; }
-input, select, textarea { border: 1px solid #2d3933; border-radius: 10px; color: var(--text); background: #101512; outline: none; }
+input, select, textarea { border: 1px solid #2d3933; border-radius: 10px; color: var(--text); background: #101512; }
 input, select { min-height: 40px; padding: 0 12px; }
 textarea { width: 100%; padding: 12px; line-height: 1.5; resize: vertical; }
 input:focus, select:focus, textarea:focus { border-color: #5b8567; box-shadow: 0 0 0 3px rgba(98, 220, 130, 0.07); }
@@ -200,8 +220,13 @@ td small { margin-top: 4px; max-width: 360px; overflow: hidden; color: var(--mut
 .status-pill.is-bad { color: var(--red); background: rgba(255, 138, 130, 0.08); }
 .empty-row { padding: 36px !important; color: var(--muted); text-align: center; }
 
+.pagination { min-height: 40px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 12px; }
+.pagination-status { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pagination .secondary-button { min-width: 42px; }
+
 .card-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .campaign-card { min-height: 180px; display: flex; flex-direction: column; }
+.card, .table-card { content-visibility: auto; contain-intrinsic-size: auto 240px; }
 .campaign-card h3 { margin: 10px 0 6px; font-size: 17px; letter-spacing: -0.035em; }
 .campaign-card .campaign-meta { color: var(--muted); font-size: 11px; }
 .campaign-stats { margin-top: auto; display: flex; align-items: flex-end; justify-content: space-between; padding-top: 24px; }
