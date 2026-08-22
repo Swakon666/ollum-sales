@@ -359,7 +359,7 @@ ensure_runtime_volume_ownership() {
 
 ensure_runtime_volume_ownership
 
-if ! docker compose up -d --remove-orphans; then
+if ! docker compose up -d --remove-orphans --force-recreate; then
   restore_previous
   die 'docker compose up failed'
 fi

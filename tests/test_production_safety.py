@@ -126,6 +126,7 @@ def test_google_credentials_are_private_and_readable_by_runtime_user() -> None:
         'install_runtime_google_credentials "$shared_google_credentials_backup"'
         in deploy
     )
+    assert "docker compose up -d --remove-orphans --force-recreate" in deploy
 
 
 def test_backup_and_restore_require_encryption_integrity_and_confirmation() -> None:
