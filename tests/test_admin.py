@@ -310,9 +310,12 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     assert "workspace.inert = expanded" in script.text
     assert 'event.key === "Escape"' in script.text
     assert "aria-current" in script.text
+    assert 'window.scrollTo({ top: 0, left: 0, behavior: "auto" })' in script.text
     assert ":focus-visible" in stylesheet.text
-    assert "--paper: #efede6" in stylesheet.text
-    assert "--accent: #11d873" in stylesheet.text
+    assert "--paper: #f4f6f5" in stylesheet.text
+    assert "--accent: #16845f" in stylesheet.text
+    assert "--accent-soft: #e5f3ed" in stylesheet.text
+    assert "background-image: none" in stylesheet.text
     assert "env(safe-area-inset-top)" in stylesheet.text
     assert "overscroll-behavior: contain" in stylesheet.text
     assert "outline: none" not in stylesheet.text

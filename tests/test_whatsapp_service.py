@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import requests
@@ -27,6 +30,62 @@ class FakeResponse:
 
 
 class TestWhatsAppService(unittest.TestCase):
+    @staticmethod
+    def _create_message_database(path: Path) -> None:
+        connection = sqlite3.connect(path)
+        connection.executescript(
+            """
+            CREATE TABLE chats (
+                jid TEXT PRIMARY KEY,
+                name TEXT,
+                last_message_time TIMESTAMP
+            );
+            CREATE TABLE messages (
+                id TEXT,
+                chat_jid TEXT,
+                sender TEXT,
+                content TEXT,
+                timestamp TIMESTAMP,
+                is_from_me BOOLEAN,
+                media_type TEXT,
+                PRIMARY KEY (id, chat_jid)
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO chats VALUES (?, ?, ?)",
+            (
+                "79990000000:17@s.whatsapp.net",
+                "Test contact",
+                "2026-08-22T10:01:00+00:00",
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "in-1",
+                    "79990000000:17@s.whatsapp.net",
+                    "79990000000@s.whatsapp.net",
+                    "Сколько стоит такой проект?",
+                    "2026-08-22T10:00:00+00:00",
+                    0,
+                    None,
+                ),
+                (
+                    "out-1",
+                    "79990000000:17@s.whatsapp.net",
+                    "79991111111@s.whatsapp.net",
+                    "Уточню объём и подготовлю оценку.",
+                    "2026-08-22T10:01:00+00:00",
+                    1,
+                    None,
+                ),
+            ],
+        )
+        connection.commit()
+        connection.close()
+
     def test_bridge_status_whitelists_ready_payload(self) -> None:
         def fake_get(url: str, timeout: float) -> FakeResponse:
             assert url.endswith("/api/status")
@@ -155,3 +214,74 @@ class TestWhatsAppService(unittest.TestCase):
     def test_technical_recipient_is_rejected(self) -> None:
         with self.assertRaisesRegex(ValueError, "Technical WhatsApp JIDs"):
             whatsapp_service.normalize_recipient("0@s.whatsapp.net")
+
+    def test_list_messages_returns_structured_records_in_latest_first_order(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "messages.db"
+            self._create_message_database(database_path)
+            with patch.object(
+                whatsapp_service.wa,
+                "MESSAGES_DB_PATH",
+                str(database_path),
+            ):
+                records = whatsapp_service.list_messages(
+                    chat_jid="79990000000@s.whatsapp.net",
+                    limit=1_000,
+                )
+
+        self.assertEqual([record["id"] for record in records], ["out-1", "in-1"])
+        self.assertTrue(records[0]["is_from_me"])
+        self.assertFalse(records[1]["is_from_me"])
+        self.assertEqual(
+            records[0]["chat_jid"],
+            "79990000000@s.whatsapp.net",
+        )
+        self.assertIsInstance(records[0]["content"], str)
+
+    def test_latest_unanswered_inbound_does_not_reuse_an_already_replied_message(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "messages.db"
+            self._create_message_database(database_path)
+            with patch.object(
+                whatsapp_service.wa,
+                "MESSAGES_DB_PATH",
+                str(database_path),
+            ):
+                self.assertIsNone(
+                    whatsapp_service.get_latest_unanswered_inbound_message(
+                        "79990000000@s.whatsapp.net"
+                    )
+                )
+
+                connection = sqlite3.connect(database_path)
+                connection.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        "in-2",
+                        "79990000000:17@s.whatsapp.net",
+                        "79990000000@s.whatsapp.net",
+                        "Можно увидеть пример?",
+                        "2026-08-22T10:02:00+00:00",
+                        0,
+                        None,
+                    ),
+                )
+                connection.commit()
+                connection.close()
+
+                inbound = whatsapp_service.get_latest_unanswered_inbound_message(
+                    "79990000000@s.whatsapp.net"
+                )
+
+        self.assertIsNotNone(inbound)
+        assert inbound is not None
+        self.assertEqual(inbound["id"], "in-2")
+        self.assertEqual(inbound["content"], "Можно увидеть пример?")
+        self.assertEqual(
+            set(inbound),
+            {"id", "timestamp", "chat_jid", "content", "media_type"},
+        )

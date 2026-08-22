@@ -9,6 +9,7 @@ from .company_search import search_company_websites
 from .crm import SalesCRM
 from .data_quality import candidate_phones, retry_call
 from .google_sheets import GoogleSheetsSync
+from .outreach_quality import compose_grounded_first_touch, evaluate_whatsapp_message
 from .website_inspector import inspect_website
 from .whatsapp_service import normalize_recipient, send_message
 
@@ -182,18 +183,9 @@ def grounded_analysis(lead: dict[str, Any], snapshot: dict[str, Any]) -> dict[st
     }
 
 
-def draft_message(lead: dict[str, Any]) -> str:
-    analysis = lead.get("analysis") or {}
-    problem = next(iter(analysis.get("website_problems") or []), "").rstrip(".")
-    service = next(
-        iter(analysis.get("recommended_ollum_services") or []),
-        "структурированный цифровой сценарий заявки",
-    )
-    return (
-        f"Здравствуйте! Проверили сайт «{lead['company_name']}»: {problem}. "
-        f"Ollum Group может сделать {service}. Это поможет получать более полные "
-        "обращения и упростить первый шаг клиента. Показать короткую схему решения?"
-    )
+def draft_message(lead: dict[str, Any]) -> str | None:
+    """Build a first-touch message only when concrete evidence and a service exist."""
+    return compose_grounded_first_touch(lead)
 
 
 class AutopilotService:
@@ -354,11 +346,23 @@ class AutopilotService:
         if not recipient:
             return None
         channel = "email" if "@" in recipient else "whatsapp"
+        message = draft_message(lead)
+        if not message:
+            return None
+        if channel == "whatsapp":
+            quality = evaluate_whatsapp_message(lead, message, mode="first_touch")
+            if quality["verdict"] != "pass":
+                logger.warning(
+                    "Skipped unsafe WhatsApp draft for lead %s: %s",
+                    lead["id"],
+                    quality["issues"],
+                )
+                return None
         return self.crm.save_outreach_draft(
             lead["id"],
             channel=channel,
             recipient=recipient,
-            message=draft_message(lead),
+            message=message,
         )
 
     def _process_send_requests(self, *, mode: str) -> dict[str, Any]:
