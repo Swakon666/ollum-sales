@@ -39,6 +39,11 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     evaluate_reply_tool = server.mcp._tool_manager._tools["sales_evaluate_whatsapp_reply"]
     compare_replies_tool = server.mcp._tool_manager._tools["sales_compare_whatsapp_replies"]
     save_reply_tool = server.mcp._tool_manager._tools["sales_save_whatsapp_reply_draft"]
+    onboarding_tool = server.mcp._tool_manager._tools["sales_get_company_onboarding"]
+    update_profile_tool = server.mcp._tool_manager._tools["sales_update_company_profile"]
+    archive_knowledge_tool = server.mcp._tool_manager._tools["sales_archive_company_knowledge"]
+    link_inbox_tool = server.mcp._tool_manager._tools["sales_link_agent_inbox_lead"]
+    next_action_tool = server.mcp._tool_manager._tools["sales_agent_next_action"]
     print(json.dumps({
         "metadata_status": metadata.status_code,
         "metadata": metadata.json(),
@@ -55,6 +60,11 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "compare_replies_meta": compare_replies_tool.meta,
         "save_reply_annotations": save_reply_tool.annotations.model_dump(by_alias=True),
         "save_reply_meta": save_reply_tool.meta,
+        "onboarding_annotations": onboarding_tool.annotations.model_dump(by_alias=True),
+        "update_profile_annotations": update_profile_tool.annotations.model_dump(by_alias=True),
+        "archive_knowledge_annotations": archive_knowledge_tool.annotations.model_dump(by_alias=True),
+        "link_inbox_annotations": link_inbox_tool.annotations.model_dump(by_alias=True),
+        "next_action_annotations": next_action_tool.annotations.model_dump(by_alias=True),
     }))
 """
     env = os.environ.copy()
@@ -90,7 +100,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 47
+    assert payload["tool_count"] == 58
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
@@ -111,3 +121,10 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["save_reply_annotations"]["destructiveHint"] is False
     assert payload["save_reply_annotations"]["openWorldHint"] is True
     assert payload["save_reply_meta"]["securitySchemes"][0]["scopes"] == ["sales:write"]
+    assert payload["onboarding_annotations"]["readOnlyHint"] is True
+    assert payload["update_profile_annotations"]["readOnlyHint"] is False
+    assert payload["update_profile_annotations"]["destructiveHint"] is False
+    assert payload["archive_knowledge_annotations"]["destructiveHint"] is True
+    assert payload["link_inbox_annotations"]["readOnlyHint"] is False
+    assert payload["link_inbox_annotations"]["destructiveHint"] is False
+    assert payload["next_action_annotations"]["readOnlyHint"] is True

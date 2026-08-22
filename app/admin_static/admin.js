@@ -20,16 +20,21 @@ const STATUS_LABELS = {
   waiting_for_scan: "Ожидает сканирования", refreshing: "Обновляет QR",
   paired: "Привязано", connected: "Подключено", not_required: "Не требуется",
   timed_out: "Время истекло", restarting: "Перезапускается",
+  not_started: "Не настроено", in_progress: "Настройка",
+  acknowledged: "В работе", drafted: "Черновик готов", resolved: "Закрыто",
+  ignored: "Игнор",
 };
 
 const VIEW_TITLES = {
-  overview: "Обзор системы", leads: "Лиды", campaigns: "Кампании",
+  overview: "Обзор системы", company: "Профиль компании", inbox: "Входящие обращения",
+  leads: "Лиды", campaigns: "Кампании",
   drafts: "Черновики", autopilot: "Autopilot", plugin: "GPT-плагин",
   whatsapp: "Подключение WhatsApp", team: "Команда и доступ", audit: "Журнал действий",
 };
 
 const VIEW_HASHES = Object.freeze({
-  overview: "#overview", leads: "#leads", campaigns: "#campaigns",
+  overview: "#overview", company: "#company", inbox: "#inbox",
+  leads: "#leads", campaigns: "#campaigns",
   drafts: "#drafts", autopilot: "#autopilot", plugin: "#plugin",
   whatsapp: "#whatsapp", team: "#team", audit: "#audit",
 });
@@ -43,6 +48,9 @@ const state = {
   drafts: [],
   workspaceMembers: [],
   workspaceInvitations: [],
+  companyKnowledge: [],
+  inbox: [],
+  profileDirty: false,
   currentDraft: null,
   csrf: "",
   loading: false,
@@ -75,9 +83,9 @@ function label(value) {
 }
 
 function statusClass(value) {
-  if (["completed", "ready", "active", "qualified", "approved", "won", "sent"].includes(value)) return "is-good";
+  if (["completed", "ready", "active", "qualified", "approved", "won", "sent", "resolved"].includes(value)) return "is-good";
   if (["failed", "lost", "cancelled"].includes(value)) return "is-bad";
-  if (["queued", "running", "paused", "blocked", "draft", "researching"].includes(value)) return "is-warn";
+  if (["queued", "running", "paused", "blocked", "draft", "drafted", "acknowledged", "researching"].includes(value)) return "is-warn";
   return "";
 }
 
@@ -128,17 +136,21 @@ async function refreshAll({ quiet = false, force = false } = {}) {
     const bootstrap = await api("/api/v1/bootstrap");
     state.data = bootstrap;
     state.csrf = bootstrap.user.csrf || "";
-    const [leads, campaigns, drafts, workspace] = await Promise.all([
+    const [leads, campaigns, drafts, workspace, knowledge, inbox] = await Promise.all([
       api("/api/v1/leads?limit=200"),
       api("/api/v1/campaigns"),
       api("/api/v1/drafts"),
       api("/api/v1/workspace/members"),
+      api("/api/v1/company/knowledge?limit=500"),
+      api("/api/v1/agent/inbox?limit=200"),
     ]);
     state.leads = leads;
     state.campaigns = campaigns;
     state.drafts = drafts;
     state.workspaceMembers = workspace.members || [];
     state.workspaceInvitations = workspace.invitations || [];
+    state.companyKnowledge = knowledge || [];
+    state.inbox = inbox || [];
     renderAll();
   } catch (error) {
     showToast(error.message || "Не удалось обновить данные", true);
@@ -383,6 +395,72 @@ function renderWhatsApp() {
   }
 }
 
+function knowledgeText(content) {
+  if (typeof content === "string") return content;
+  if (!content || typeof content !== "object") return "—";
+  if (typeof content.details === "string") return content.details;
+  return JSON.stringify(content, null, 2);
+}
+
+function renderCompany() {
+  const onboarding = state.data.company_onboarding || {};
+  const profile = onboarding.profile || {};
+  const readiness = $("#onboarding-readiness");
+  const percent = Number(onboarding.completion_percent || 0);
+  readiness.textContent = onboarding.onboarding_status === "ready" ? "Готово к работе" : `Заполнено ${percent}%`;
+  readiness.classList.toggle("is-ready", onboarding.onboarding_status === "ready");
+  $("#onboarding-progress-bar").style.width = `${Math.max(0, Math.min(percent, 100))}%`;
+  $("#company-profile-updated").textContent = formatDate(profile.updated_at, "Ещё не сохранено");
+
+  const form = $("#company-profile-form");
+  if (!state.profileDirty && !form.contains(document.activeElement)) {
+    ["company_name", "website_url", "industry", "geography", "target_customer", "positioning", "sales_process", "primary_goal", "tone_of_voice", "constraints"].forEach((name) => {
+      const field = form.elements.namedItem(name);
+      if (field) field.value = profile[name] || "";
+    });
+  }
+
+  const questions = onboarding.next_questions || [];
+  $("#onboarding-questions").innerHTML = questions.length
+    ? questions.map((item, index) => `<div class="question-item"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(item.prompt)}</p></div>`).join("")
+    : `<div class="empty-state"><strong>Интервью завершено</strong><span>ChatGPT продолжит уточнять данные, только если для задачи не хватает фактов.</span></div>`;
+
+  $("#knowledge-count").textContent = `${state.companyKnowledge.length} записей`;
+  $("#knowledge-grid").innerHTML = state.companyKnowledge.length
+    ? state.companyKnowledge.map((item) => {
+      const details = knowledgeText(item.content);
+      return `<article class="knowledge-item"><div><span class="eyebrow">${escapeHtml(label(item.category))}</span><h4>${escapeHtml(item.title)}</h4><p>${escapeHtml(details.slice(0, 420))}${details.length > 420 ? "…" : ""}</p></div><button class="text-button archive-knowledge" data-item-id="${escapeHtml(item.id)}">В архив</button></article>`;
+    }).join("")
+    : `<div class="empty-state"><strong>База знаний пока пуста</strong><span>Добавьте услуги и цены здесь или пройдите интервью в ChatGPT.</span></div>`;
+}
+
+function renderInbox() {
+  const summary = state.data.agent_inbox || {};
+  const metrics = [
+    ["Новые", summary.new || 0],
+    ["В работе", summary.acknowledged || 0],
+    ["Черновики", summary.drafted || 0],
+    ["Закрытые", summary.resolved || 0],
+  ];
+  $("#inbox-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
+  const filter = $("#inbox-status-filter").value;
+  const events = state.inbox.filter((item) => !filter || item.status === filter);
+  $("#inbox-table").innerHTML = events.length
+    ? events.map((item) => {
+      const message = String(item.message_text || "");
+      const leadControl = item.lead_id
+        ? `<code>${escapeHtml(String(item.lead_id).slice(0, 8))}</code>`
+        : `<select class="inbox-lead-select" data-event-id="${escapeHtml(item.id)}" aria-label="Сопоставить входящее с лидом"><option value="">Выбрать лид…</option>${state.leads.map((lead) => `<option value="${escapeHtml(lead.id)}">${escapeHtml(lead.company_name)}</option>`).join("")}</select>`;
+      const actions = item.status === "new"
+        ? `<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="acknowledged">В работу</button>`
+        : item.status !== "resolved" && item.status !== "ignored"
+          ? `<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="resolved">Закрыть</button>`
+          : "";
+      return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие">${actions}</td></tr>`;
+    }).join("")
+    : `<tr class="empty-inbox-row"><td colspan="6"><div class="empty-state"><strong>Нет входящих с таким статусом</strong><span>Фоновый worker проверяет личные чаты каждые 30 секунд.</span></div></td></tr>`;
+}
+
 function renderTeam() {
   const user = state.data.user;
   const workspace = state.data.workspace || {};
@@ -459,7 +537,9 @@ function renderAudit() {
 function renderView(view) {
   if (view === "overview") {
     renderMetrics(); renderFunnel(); renderSafety(); renderTopLeads(); renderJobs();
-  } else if (view === "leads") renderLeads();
+  } else if (view === "company") renderCompany();
+  else if (view === "inbox") renderInbox();
+  else if (view === "leads") renderLeads();
   else if (view === "campaigns") renderCampaigns();
   else if (view === "drafts") renderDrafts();
   else if (view === "autopilot") renderAutopilot();
@@ -468,13 +548,15 @@ function renderView(view) {
   else if (view === "plugin") renderPlugin();
   else if (view === "audit") renderAudit();
   const canWrite = Boolean(state.data.user.capabilities?.write);
-  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft').forEach((control) => {
+  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft, #company-profile-form input, #company-profile-form textarea, #company-profile-form button, #knowledge-form input, #knowledge-form textarea, #knowledge-form select, #knowledge-form button, #sync-inbox-button, .inbox-status-action, .archive-knowledge').forEach((control) => {
     control.disabled = !canWrite;
   });
 }
 
 function renderAll() {
   renderIdentity();
+  renderCompany();
+  renderInbox();
   renderView($(".view.is-visible")?.dataset.panel || "overview");
 }
 
@@ -548,6 +630,73 @@ async function createCampaign(event) {
   }
 }
 
+async function saveCompanyProfile(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = Object.fromEntries(new FormData(form).entries());
+  try {
+    await api("/api/v1/company/profile", { method: "PATCH", body });
+    state.profileDirty = false;
+    showToast("Профиль сохранён и доступен ChatGPT");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function saveCompanyKnowledge(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = Object.fromEntries(new FormData(form).entries());
+  try {
+    await api("/api/v1/company/knowledge", {
+      method: "POST",
+      body: {
+        category: values.category,
+        title: values.title,
+        content: { details: values.content },
+        source_type: "dashboard",
+      },
+    });
+    form.reset();
+    showToast("Факт добавлен в память агента");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function archiveCompanyKnowledge(itemId) {
+  if (!window.confirm("Переместить этот факт в архив? Он перестанет использоваться агентом.")) return;
+  try {
+    await api(`/api/v1/company/knowledge/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+    showToast("Факт перемещён в архив");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function syncAgentInbox() {
+  try {
+    const result = await api("/api/v1/agent/inbox/sync", { method: "POST", body: { scan_limit: 100 } });
+    showToast(result.new_events ? `Новых обращений: ${result.new_events}` : "Новых обращений нет");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function updateInboxStatus(eventId, status) {
+  try {
+    await api(`/api/v1/agent/inbox/${encodeURIComponent(eventId)}`, { method: "PATCH", body: { status } });
+    showToast("Статус обращения обновлён");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
 function bindEvents() {
   $("#logout-form").addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -602,6 +751,11 @@ function bindEvents() {
   $("#approve-draft-button").addEventListener("click", approveCurrentDraft);
   $("#create-campaign-button").addEventListener("click", createCampaign);
   $("#invite-form").addEventListener("submit", inviteMember);
+  $("#company-profile-form").addEventListener("input", () => { state.profileDirty = true; });
+  $("#company-profile-form").addEventListener("submit", saveCompanyProfile);
+  $("#knowledge-form").addEventListener("submit", saveCompanyKnowledge);
+  $("#inbox-status-filter").addEventListener("change", renderInbox);
+  $("#sync-inbox-button").addEventListener("click", syncAgentInbox);
   $("#whatsapp-qr").addEventListener("error", () => {
     $("#whatsapp-qr").hidden = true;
     $("#whatsapp-qr-empty").hidden = false;
@@ -621,6 +775,18 @@ function bindEvents() {
     const review = event.target.closest(".review-draft");
     if (review) openDraft(review.dataset.draftId);
 
+    const inboxAction = event.target.closest(".inbox-status-action");
+    if (inboxAction) {
+      await updateInboxStatus(inboxAction.dataset.eventId, inboxAction.dataset.status);
+      return;
+    }
+
+    const archiveKnowledge = event.target.closest(".archive-knowledge");
+    if (archiveKnowledge) {
+      await archiveCompanyKnowledge(archiveKnowledge.dataset.itemId);
+      return;
+    }
+
     const copy = event.target.closest(".copy-value");
     if (copy && copy.dataset.copy) {
       try { await navigator.clipboard.writeText(copy.dataset.copy); showToast("Скопировано"); }
@@ -639,6 +805,20 @@ function bindEvents() {
   });
 
   document.addEventListener("change", async (event) => {
+    const inboxLead = event.target.closest(".inbox-lead-select");
+    if (inboxLead) {
+      if (!inboxLead.value) return;
+      try {
+        const updated = await api(`/api/v1/agent/inbox/${encodeURIComponent(inboxLead.dataset.eventId)}`, { method: "PATCH", body: { lead_id: inboxLead.value } });
+        state.inbox = state.inbox.map((item) => item.id === updated.id ? updated : item);
+        showToast("Входящее сопоставлено с лидом");
+        renderInbox();
+      } catch (error) {
+        inboxLead.value = "";
+        showToast(error.message, true);
+      }
+      return;
+    }
     const memberRole = event.target.closest(".member-role-select");
     if (memberRole) {
       const previous = memberRole.dataset.currentRole;

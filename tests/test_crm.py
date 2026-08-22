@@ -155,7 +155,7 @@ class SalesCRMTests(unittest.TestCase):
             phones=["+7 (999) 123-45-67"],
         )
         with self.crm.connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
             }
@@ -419,6 +419,112 @@ class SalesCRMTests(unittest.TestCase):
                 member_id=owner["id"],
                 role="operator",
             )
+
+    def test_company_onboarding_memory_is_structured_and_persistent(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        initial = self.crm.get_company_onboarding_state("ollum-group")
+        self.assertEqual(initial["completion_percent"], 0)
+        self.assertLessEqual(len(initial["next_questions"]), 3)
+
+        self.crm.update_company_profile(
+            "ollum-group",
+            company_name="Example Studio",
+            website_url="https://example.com/about",
+            industry="Digital services",
+            geography="Russia",
+            target_customer="B2B companies with an existing sales team",
+            positioning="Grounded sales automation with human approval",
+            sales_process="Discovery, qualification, proposal, close",
+            tone_of_voice="Concise and respectful",
+            primary_goal="Increase qualified conversations",
+        )
+        service = self.crm.save_company_knowledge(
+            "ollum-group",
+            category="service",
+            title="Sales automation",
+            content={"scope": "research, scoring and drafts"},
+        )
+        self.crm.save_company_knowledge(
+            "ollum-group",
+            category="price",
+            title="Custom estimate",
+            content={"rule": "after discovery"},
+        )
+        state = self.crm.get_company_onboarding_state("ollum-group")
+        self.assertTrue(state["ready_for_sales"])
+        completed = self.crm.complete_company_onboarding(
+            "ollum-group", confirm_ready=True
+        )
+        self.assertEqual(completed["onboarding_status"], "ready")
+
+        reopened = SalesCRM(self.crm.db_path)
+        self.assertEqual(
+            reopened.get_company_onboarding_state("ollum-group")["onboarding_status"],
+            "ready",
+        )
+        archived = reopened.archive_company_knowledge("ollum-group", service["id"])
+        self.assertEqual(archived["status"], "archived")
+
+    def test_agent_inbox_is_idempotent_and_tracks_draft_state(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        lead = self.crm.upsert_lead(
+            "Example Lead",
+            "https://example-lead.test",
+            phones=["+7 999 123-45-67"],
+        )
+        event, created = self.crm.upsert_agent_inbox_event(
+            "ollum-group",
+            external_id="wa-message-1",
+            chat_jid="79991234567@s.whatsapp.net",
+            message_text="Расскажите о сроках",
+            received_at="2026-08-23T10:00:00+00:00",
+            lead_id=lead["id"],
+        )
+        duplicate, created_again = self.crm.upsert_agent_inbox_event(
+            "ollum-group",
+            external_id="wa-message-1",
+            chat_jid="79991234567@s.whatsapp.net",
+            message_text="Расскажите о сроках",
+            received_at="2026-08-23T10:00:00+00:00",
+            lead_id=lead["id"],
+        )
+        self.assertTrue(created)
+        self.assertFalse(created_again)
+        self.assertEqual(duplicate["id"], event["id"])
+        self.assertEqual(self.crm.agent_inbox_summary("ollum-group")["new"], 1)
+
+        unmatched, _created = self.crm.upsert_agent_inbox_event(
+            "ollum-group",
+            external_id="wa-message-2",
+            chat_jid="79990000000@s.whatsapp.net",
+            message_text="Можно уточнить детали?",
+            received_at="2026-08-23T10:01:00+00:00",
+        )
+        linked = self.crm.link_agent_inbox_event(
+            "ollum-group", unmatched["id"], lead["id"]
+        )
+        self.assertEqual(linked["lead_id"], lead["id"])
+
+        draft = self.crm.save_outreach_draft(
+            lead["id"],
+            channel="whatsapp",
+            recipient="+79991234567",
+            message="Подготовим подтверждённую оценку после короткого брифа.",
+        )
+        updated = self.crm.update_agent_inbox_event(
+            "ollum-group", event["id"], status="drafted", draft_id=draft["id"]
+        )
+        self.assertEqual(updated["draft_id"], draft["id"])
+        self.assertEqual(self.crm.agent_inbox_summary("ollum-group")["drafted"], 1)
+
+        resolved_count = self.crm.resolve_agent_inbox_for_draft(
+            "ollum-group", draft["id"]
+        )
+        self.assertEqual(resolved_count, 1)
+        self.assertEqual(
+            self.crm.get_agent_inbox_event("ollum-group", event["id"])["status"],
+            "resolved",
+        )
 
 
 if __name__ == "__main__":

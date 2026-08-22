@@ -532,3 +532,66 @@ def test_authenticated_whatsapp_qr_proxy_never_exposes_pairing_value(
     assert response.headers["content-type"] == "image/png"
     assert response.headers["cache-control"] == "no-store, max-age=0"
     assert response.content == png
+
+
+def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) -> None:
+    client, context, _autopilot, _sheets = admin_client
+    _login(client)
+
+    profile = client.patch(
+        "/api/v1/company/profile",
+        headers=_csrf_headers(),
+        json={
+            "company_name": "Ollum Group",
+            "industry": "Digital services",
+            "geography": "RU / worldwide",
+            "target_customer": "B2B companies",
+            "positioning": "Grounded digital delivery",
+        },
+    )
+    assert profile.status_code == 200
+    assert profile.json()["profile"]["company_name"] == "Ollum Group"
+
+    knowledge = client.post(
+        "/api/v1/company/knowledge",
+        headers=_csrf_headers(),
+        json={
+            "category": "service",
+            "title": "Web applications",
+            "content": {"details": "Personal cabinets and internal services"},
+        },
+    )
+    assert knowledge.status_code == 201
+    assert client.get("/api/v1/company/knowledge").json()[0]["category"] == "service"
+
+    event, _created = context.crm.upsert_agent_inbox_event(
+        "ollum-group",
+        external_id="admin-inbox-1",
+        chat_jid="79991234567@s.whatsapp.net",
+        message_text="Нужна консультация",
+        received_at="2026-08-23T10:00:00+00:00",
+    )
+    lead = context.crm.upsert_lead(
+        "Inbox Lead", "https://inbox-lead.example", phones=["+79991234567"]
+    )
+    inbox = client.get("/api/v1/agent/inbox?status=new")
+    assert inbox.status_code == 200
+    assert inbox.json()[0]["id"] == event["id"]
+    linked = client.patch(
+        f"/api/v1/agent/inbox/{event['id']}",
+        headers=_csrf_headers(),
+        json={"lead_id": lead["id"]},
+    )
+    assert linked.status_code == 200
+    assert linked.json()["lead_id"] == lead["id"]
+    updated = client.patch(
+        f"/api/v1/agent/inbox/{event['id']}",
+        headers=_csrf_headers(),
+        json={"status": "acknowledged"},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "acknowledged"
+
+    bootstrap = client.get("/api/v1/bootstrap").json()
+    assert bootstrap["company_onboarding"]["profile"]["company_name"] == "Ollum Group"
+    assert bootstrap["agent_inbox"]["acknowledged"] == 1

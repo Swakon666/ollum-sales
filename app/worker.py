@@ -4,6 +4,7 @@ import logging
 import signal
 import time
 
+from .agent_inbox import sync_whatsapp_inbox
 from .autopilot import AutopilotService
 from .config import settings
 from .crm import SalesCRM
@@ -24,6 +25,7 @@ def _stop(_signum: int, _frame: object) -> None:
 
 def create_service() -> AutopilotService:
     crm = SalesCRM(settings.crm_db_path)
+    crm.ensure_workspace(settings.default_workspace_id, settings.default_workspace_name)
     sheets = GoogleSheetsSync(
         crm,
         enabled=settings.google_sheets_enabled,
@@ -42,6 +44,16 @@ def main() -> None:
     logger.info("worker started; SAFE remains the default mode")
     while not stopping:
         try:
+            inbox = sync_whatsapp_inbox(
+                service.crm,
+                settings.default_workspace_id,
+                scan_limit=100,
+            )
+            if inbox["new_events"]:
+                logger.info(
+                    "queued %s new WhatsApp inbound event(s)",
+                    inbox["new_events"],
+                )
             state = service.status()
             if state["running"]:
                 result = service.run_cycle()

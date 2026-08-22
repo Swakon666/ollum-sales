@@ -50,6 +50,22 @@ FOLLOWUP_STATUSES = {"pending", "completed", "cancelled"}
 AUTOPILOT_MODES = {"safe", "semi_auto", "autopilot"}
 WORKSPACE_ROLES = {"viewer", "operator", "owner"}
 WORKSPACE_MEMBER_STATUSES = {"active", "revoked"}
+COMPANY_ONBOARDING_STATUSES = {"not_started", "in_progress", "ready"}
+COMPANY_KNOWLEDGE_CATEGORIES = {
+    "service",
+    "price",
+    "case",
+    "current_client",
+    "closed_client",
+    "faq",
+    "objection",
+    "constraint",
+    "proof",
+    "document",
+    "sales_process",
+}
+COMPANY_KNOWLEDGE_STATUSES = {"active", "archived"}
+AGENT_INBOX_STATUSES = {"new", "acknowledged", "drafted", "resolved", "ignored"}
 WEEKDAYS = {
     "monday",
     "tuesday",
@@ -337,6 +353,57 @@ class SalesCRM:
                     accepted_at TEXT
                 );
 
+                CREATE TABLE IF NOT EXISTS company_profiles (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+                    company_name TEXT,
+                    website_url TEXT,
+                    industry TEXT,
+                    geography TEXT,
+                    positioning TEXT,
+                    target_customer TEXT,
+                    sales_process TEXT,
+                    tone_of_voice TEXT,
+                    primary_goal TEXT,
+                    constraints TEXT,
+                    language TEXT,
+                    onboarding_status TEXT NOT NULL DEFAULT 'not_started',
+                    revision INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS company_knowledge_items (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    category TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    content_json TEXT NOT NULL,
+                    source_type TEXT NOT NULL DEFAULT 'chat',
+                    source_name TEXT,
+                    status TEXT NOT NULL DEFAULT 'active',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS agent_inbox_events (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    source TEXT NOT NULL DEFAULT 'whatsapp',
+                    external_id TEXT NOT NULL,
+                    lead_id TEXT REFERENCES leads(id) ON DELETE SET NULL,
+                    chat_jid TEXT NOT NULL,
+                    sender_label TEXT,
+                    message_text TEXT NOT NULL,
+                    media_type TEXT,
+                    received_at TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'new',
+                    draft_id TEXT REFERENCES outreach_drafts(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (workspace_id, source, external_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_campaign_leads_campaign ON campaign_leads(campaign_id);
                 CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score DESC);
                 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
@@ -355,6 +422,12 @@ class SalesCRM:
                     ON workspace_invitations(workspace_id, email) WHERE status = 'pending';
                 CREATE INDEX IF NOT EXISTS idx_workspace_members_subject
                     ON workspace_members(subject, status);
+                CREATE INDEX IF NOT EXISTS idx_company_knowledge_workspace
+                    ON company_knowledge_items(workspace_id, status, category, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_inbox_workspace
+                    ON agent_inbox_events(workspace_id, status, received_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_agent_inbox_chat
+                    ON agent_inbox_events(workspace_id, chat_jid, received_at DESC);
                 """
             )
             lead_columns = {
@@ -395,7 +468,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 8")
+            connection.execute("PRAGMA user_version = 9")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -761,6 +834,647 @@ class SalesCRM:
             ).fetchone()
         assert row is not None
         return self._workspace_member_view(row)
+
+    @staticmethod
+    def _company_profile_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    @staticmethod
+    def _company_knowledge_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["content"] = _load_json(result.pop("content_json", None), {})
+        return result
+
+    @staticmethod
+    def _agent_inbox_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def get_company_profile(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM company_profiles WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+        if row is not None:
+            return self._company_profile_from_row(row)
+        return {
+            "workspace_id": workspace_id,
+            "company_name": None,
+            "website_url": None,
+            "industry": None,
+            "geography": None,
+            "positioning": None,
+            "target_customer": None,
+            "sales_process": None,
+            "tone_of_voice": None,
+            "primary_goal": None,
+            "constraints": None,
+            "language": None,
+            "onboarding_status": "not_started",
+            "revision": 0,
+            "created_at": None,
+            "updated_at": None,
+            "completed_at": None,
+        }
+
+    def update_company_profile(
+        self, workspace_id: str, **fields: str | None
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        limits = {
+            "company_name": 200,
+            "website_url": 2048,
+            "industry": 300,
+            "geography": 800,
+            "positioning": 4000,
+            "target_customer": 4000,
+            "sales_process": 6000,
+            "tone_of_voice": 3000,
+            "primary_goal": 3000,
+            "constraints": 6000,
+            "language": 80,
+        }
+        unexpected = set(fields) - set(limits)
+        if unexpected:
+            raise ValueError(
+                f"unsupported company profile fields: {', '.join(sorted(unexpected))}"
+            )
+        if not fields:
+            raise ValueError("at least one company profile field is required")
+        clean: dict[str, str | None] = {}
+        for name, value in fields.items():
+            normalized = " ".join(str(value or "").split()) or None
+            if normalized and len(normalized) > limits[name]:
+                raise ValueError(f"{name} exceeds {limits[name]} characters")
+            if name == "website_url" and normalized:
+                normalized = canonical_company_url(normalized)
+            clean[name] = normalized
+
+        timestamp = utc_now()
+        assignments = ", ".join(f"{name} = ?" for name in clean)
+        values = list(clean.values())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO company_profiles (
+                    workspace_id, onboarding_status, revision, created_at, updated_at
+                ) VALUES (?, 'not_started', 0, ?, ?)
+                """,
+                (workspace_id, timestamp, timestamp),
+            )
+            connection.execute(
+                f"""
+                UPDATE company_profiles
+                SET {assignments},
+                    onboarding_status = CASE
+                        WHEN onboarding_status = 'ready' THEN 'in_progress'
+                        ELSE 'in_progress'
+                    END,
+                    revision = revision + 1,
+                    updated_at = ?,
+                    completed_at = NULL
+                WHERE workspace_id = ?
+                """,
+                (*values, timestamp, workspace_id),
+            )
+            row = connection.execute(
+                "SELECT * FROM company_profiles WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+        assert row is not None
+        return self._company_profile_from_row(row)
+
+    def save_company_knowledge(
+        self,
+        workspace_id: str,
+        *,
+        category: str,
+        title: str,
+        content: Any,
+        source_type: str = "chat",
+        source_name: str | None = None,
+        item_id: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        clean_category = self._validate_status(
+            category, COMPANY_KNOWLEDGE_CATEGORIES, "knowledge category"
+        )
+        clean_title = " ".join(title.split())
+        if not clean_title or len(clean_title) > 240:
+            raise ValueError(
+                "knowledge title must contain between 1 and 240 characters"
+            )
+        clean_source_type = " ".join(source_type.split()) or "chat"
+        clean_source_name = " ".join(str(source_name or "").split()) or None
+        if len(clean_source_type) > 80:
+            raise ValueError("source_type exceeds 80 characters")
+        if clean_source_name and len(clean_source_name) > 500:
+            raise ValueError("source_name exceeds 500 characters")
+        encoded = _json(content)
+        if len(encoded.encode("utf-8")) > 64_000:
+            raise ValueError(
+                "knowledge content exceeds 64 KB; split it into smaller facts"
+            )
+
+        timestamp = utc_now()
+        knowledge_id = str(item_id or uuid.uuid4())
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id FROM company_knowledge_items
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (knowledge_id, workspace_id),
+            ).fetchone()
+            if item_id and existing is None:
+                raise ValueError("company knowledge item not found")
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO company_knowledge_items (
+                        id, workspace_id, category, title, content_json, source_type,
+                        source_name, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+                    """,
+                    (
+                        knowledge_id,
+                        workspace_id,
+                        clean_category,
+                        clean_title,
+                        encoded,
+                        clean_source_type,
+                        clean_source_name,
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                connection.execute(
+                    """
+                    UPDATE company_knowledge_items
+                    SET category = ?, title = ?, content_json = ?, source_type = ?,
+                        source_name = ?, status = 'active', updated_at = ?
+                    WHERE id = ? AND workspace_id = ?
+                    """,
+                    (
+                        clean_category,
+                        clean_title,
+                        encoded,
+                        clean_source_type,
+                        clean_source_name,
+                        timestamp,
+                        knowledge_id,
+                        workspace_id,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM company_knowledge_items WHERE id = ?",
+                (knowledge_id,),
+            ).fetchone()
+        assert row is not None
+        return self._company_knowledge_from_row(row)
+
+    def list_company_knowledge(
+        self,
+        workspace_id: str,
+        *,
+        category: str | None = None,
+        status: str = "active",
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_status = self._validate_status(
+            status, COMPANY_KNOWLEDGE_STATUSES, "knowledge status"
+        )
+        params: list[Any] = [workspace_id, clean_status]
+        where = "workspace_id = ? AND status = ?"
+        if category:
+            clean_category = self._validate_status(
+                category, COMPANY_KNOWLEDGE_CATEGORIES, "knowledge category"
+            )
+            where += " AND category = ?"
+            params.append(clean_category)
+        params.append(max(1, min(int(limit), 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM company_knowledge_items
+                WHERE {where}
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._company_knowledge_from_row(row) for row in rows]
+
+    def archive_company_knowledge(
+        self, workspace_id: str, item_id: str
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE company_knowledge_items
+                SET status = 'archived', updated_at = ?
+                WHERE id = ? AND workspace_id = ? AND status = 'active'
+                """,
+                (timestamp, item_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("active company knowledge item not found")
+            row = connection.execute(
+                "SELECT * FROM company_knowledge_items WHERE id = ?", (item_id,)
+            ).fetchone()
+        assert row is not None
+        return self._company_knowledge_from_row(row)
+
+    def get_company_onboarding_state(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        profile = self.get_company_profile(workspace_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT category, COUNT(*) AS item_count
+                FROM company_knowledge_items
+                WHERE workspace_id = ? AND status = 'active'
+                GROUP BY category
+                """,
+                (workspace_id,),
+            ).fetchall()
+        counts = {str(row["category"]): int(row["item_count"]) for row in rows}
+
+        profile_checks = (
+            "company_name",
+            "industry",
+            "geography",
+            "target_customer",
+            "positioning",
+            "sales_process",
+            "tone_of_voice",
+            "primary_goal",
+        )
+        missing = [name for name in profile_checks if not profile.get(name)]
+        knowledge_checks = {
+            "services": counts.get("service", 0) > 0,
+            "prices": counts.get("price", 0) > 0,
+            "customer_proof": counts.get("case", 0) + counts.get("closed_client", 0)
+            > 0,
+            "active_clients": counts.get("current_client", 0) > 0,
+        }
+        missing.extend(
+            name for name, complete in knowledge_checks.items() if not complete
+        )
+        completed = len(profile_checks) - sum(
+            1 for name in profile_checks if name in missing
+        )
+        completed += sum(1 for complete in knowledge_checks.values() if complete)
+        completion_percent = round(
+            completed / (len(profile_checks) + len(knowledge_checks)) * 100
+        )
+        ready_requirements = (
+            bool(profile.get("company_name")),
+            bool(profile.get("industry")),
+            bool(profile.get("target_customer")),
+            bool(profile.get("positioning")),
+            knowledge_checks["services"],
+            knowledge_checks["prices"],
+        )
+        ready = all(ready_requirements)
+
+        questions: list[dict[str, Any]] = []
+        if not profile.get("company_name") or not profile.get("website_url"):
+            questions.append(
+                {
+                    "id": "identity",
+                    "prompt": "Как называется компания и какой у неё основной сайт? Если сайта нет, так и скажите.",
+                    "accepts": ["free_text", "url"],
+                }
+            )
+        if not profile.get("industry") or not profile.get("geography"):
+            questions.append(
+                {
+                    "id": "market",
+                    "prompt": "В какой отрасли вы работаете и в каких городах или странах продаёте?",
+                    "accepts": ["free_text"],
+                }
+            )
+        if not profile.get("target_customer"):
+            questions.append(
+                {
+                    "id": "target_customer",
+                    "prompt": "Кто ваш идеальный клиент: тип компании, размер, роль принимающего решение и типичная задача?",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not knowledge_checks["services"]:
+            questions.append(
+                {
+                    "id": "services",
+                    "prompt": "Опишите услуги или продукты. Можно прикрепить презентацию, каталог или объяснить свободным текстом.",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not knowledge_checks["prices"]:
+            questions.append(
+                {
+                    "id": "prices",
+                    "prompt": "Какие цены, пакеты, минимальный чек или правила расчёта можно использовать в продажах? Можно приложить прайс.",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not profile.get("positioning"):
+            questions.append(
+                {
+                    "id": "positioning",
+                    "prompt": "Почему клиент выбирает вас: ключевые отличия, подтверждённые преимущества и обещаемый результат?",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not knowledge_checks["customer_proof"]:
+            questions.append(
+                {
+                    "id": "closed_clients",
+                    "prompt": "Каких клиентов вы уже закрыли и какие результаты можно безопасно упоминать? Не раскрывайте то, что под NDA.",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not knowledge_checks["active_clients"] or not profile.get("sales_process"):
+            questions.append(
+                {
+                    "id": "pipeline",
+                    "prompt": "Какие клиенты сейчас в работе и как устроены стадии продажи от первого контакта до сделки?",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+        if not profile.get("tone_of_voice"):
+            questions.append(
+                {
+                    "id": "tone",
+                    "prompt": "Каким тоном агент должен писать и какие формулировки, обещания или темы запрещены?",
+                    "accepts": ["free_text", "file"],
+                }
+            )
+
+        return {
+            "profile": profile,
+            "knowledge_counts": counts,
+            "completion_percent": completion_percent,
+            "ready_for_sales": ready,
+            "missing": missing,
+            "next_questions": questions[:3],
+            "onboarding_status": profile["onboarding_status"],
+        }
+
+    def complete_company_onboarding(
+        self, workspace_id: str, *, confirm_ready: bool
+    ) -> dict[str, Any]:
+        if not confirm_ready:
+            raise ValueError(
+                "confirm_ready=true is required after reviewing the profile"
+            )
+        workspace_id = self._workspace_id(workspace_id)
+        state = self.get_company_onboarding_state(workspace_id)
+        if not state["ready_for_sales"]:
+            raise ValueError("onboarding is incomplete: " + ", ".join(state["missing"]))
+        timestamp = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE company_profiles
+                SET onboarding_status = 'ready', completed_at = ?, updated_at = ?,
+                    revision = revision + 1
+                WHERE workspace_id = ?
+                """,
+                (timestamp, timestamp, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("company profile not found")
+        return self.get_company_onboarding_state(workspace_id)
+
+    def upsert_agent_inbox_event(
+        self,
+        workspace_id: str,
+        *,
+        external_id: str,
+        chat_jid: str,
+        message_text: str,
+        received_at: str,
+        sender_label: str | None = None,
+        media_type: str | None = None,
+        lead_id: str | None = None,
+        source: str = "whatsapp",
+    ) -> tuple[dict[str, Any], bool]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        clean_external_id = external_id.strip()
+        clean_jid = chat_jid.strip()
+        clean_message = " ".join(message_text.split())
+        clean_source = source.strip().lower()
+        if not clean_external_id or len(clean_external_id) > 500:
+            raise ValueError(
+                "external_id is required and must not exceed 500 characters"
+            )
+        if not clean_jid or len(clean_jid) > 500:
+            raise ValueError("chat_jid is required and must not exceed 500 characters")
+        if not clean_message:
+            raise ValueError("message_text must not be empty")
+        if len(clean_message) > 4000:
+            clean_message = clean_message[:4000]
+        if lead_id:
+            self.get_lead(lead_id)
+        timestamp = utc_now()
+        event_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT id FROM agent_inbox_events
+                WHERE workspace_id = ? AND source = ? AND external_id = ?
+                """,
+                (workspace_id, clean_source, clean_external_id),
+            ).fetchone()
+            created = existing is None
+            if created:
+                connection.execute(
+                    """
+                    INSERT INTO agent_inbox_events (
+                        id, workspace_id, source, external_id, lead_id, chat_jid,
+                        sender_label, message_text, media_type, received_at, status,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'new', ?, ?)
+                    """,
+                    (
+                        event_id,
+                        workspace_id,
+                        clean_source,
+                        clean_external_id,
+                        lead_id,
+                        clean_jid,
+                        " ".join(str(sender_label or "").split()) or None,
+                        clean_message,
+                        media_type,
+                        normalize_datetime(received_at),
+                        timestamp,
+                        timestamp,
+                    ),
+                )
+            else:
+                event_id = str(existing["id"])
+                connection.execute(
+                    """
+                    UPDATE agent_inbox_events
+                    SET lead_id = COALESCE(?, lead_id), sender_label = ?,
+                        message_text = ?, media_type = ?, received_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        lead_id,
+                        " ".join(str(sender_label or "").split()) or None,
+                        clean_message,
+                        media_type,
+                        normalize_datetime(received_at),
+                        timestamp,
+                        event_id,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert row is not None
+        return self._agent_inbox_from_row(row), created
+
+    def get_agent_inbox_event(self, workspace_id: str, event_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM agent_inbox_events
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (event_id, workspace_id),
+            ).fetchone()
+        if row is None:
+            raise ValueError("agent inbox event not found")
+        return self._agent_inbox_from_row(row)
+
+    def list_agent_inbox_events(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        params: list[Any] = [workspace_id]
+        where = "workspace_id = ?"
+        if status:
+            clean_status = self._validate_status(
+                status, AGENT_INBOX_STATUSES, "agent inbox status"
+            )
+            where += " AND status = ?"
+            params.append(clean_status)
+        params.append(max(1, min(int(limit), 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM agent_inbox_events
+                WHERE {where}
+                ORDER BY received_at DESC, created_at DESC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._agent_inbox_from_row(row) for row in rows]
+
+    def update_agent_inbox_event(
+        self,
+        workspace_id: str,
+        event_id: str,
+        *,
+        status: str,
+        draft_id: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_status = self._validate_status(
+            status, AGENT_INBOX_STATUSES, "agent inbox status"
+        )
+        if draft_id:
+            self.get_outreach_draft(draft_id)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = ?, draft_id = COALESCE(?, draft_id), updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (clean_status, draft_id, timestamp, event_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("agent inbox event not found")
+            row = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert row is not None
+        return self._agent_inbox_from_row(row)
+
+    def link_agent_inbox_event(
+        self,
+        workspace_id: str,
+        event_id: str,
+        lead_id: str,
+    ) -> dict[str, Any]:
+        """Link an unmatched inbound event to an existing CRM lead."""
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_lead(lead_id)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET lead_id = ?, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (lead_id, timestamp, event_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("agent inbox event not found")
+            row = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert row is not None
+        return self._agent_inbox_from_row(row)
+
+    def agent_inbox_summary(self, workspace_id: str) -> dict[str, int]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS event_count
+                FROM agent_inbox_events WHERE workspace_id = ? GROUP BY status
+                """,
+                (workspace_id,),
+            ).fetchall()
+        counts = {status: 0 for status in AGENT_INBOX_STATUSES}
+        counts.update({str(row["status"]): int(row["event_count"]) for row in rows})
+        counts["total"] = sum(counts[status] for status in AGENT_INBOX_STATUSES)
+        return counts
+
+    def resolve_agent_inbox_for_draft(self, workspace_id: str, draft_id: str) -> int:
+        workspace_id = self._workspace_id(workspace_id)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'resolved', updated_at = ?
+                WHERE workspace_id = ? AND draft_id = ?
+                    AND status IN ('new', 'acknowledged', 'drafted')
+                """,
+                (timestamp, workspace_id, draft_id),
+            )
+            return int(cursor.rowcount)
 
     @staticmethod
     def _validate_status(value: str, allowed: set[str], field: str) -> str:
