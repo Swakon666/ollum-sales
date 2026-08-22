@@ -36,6 +36,9 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     )
     status_tool = server.mcp._tool_manager._tools["ollum_status"]
     send_tool = server.mcp._tool_manager._tools["whatsapp_send_message"]
+    evaluate_reply_tool = server.mcp._tool_manager._tools["sales_evaluate_whatsapp_reply"]
+    compare_replies_tool = server.mcp._tool_manager._tools["sales_compare_whatsapp_replies"]
+    save_reply_tool = server.mcp._tool_manager._tools["sales_save_whatsapp_reply_draft"]
     print(json.dumps({
         "metadata_status": metadata.status_code,
         "metadata": metadata.json(),
@@ -46,6 +49,12 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "status_meta": status_tool.meta,
         "send_annotations": send_tool.annotations.model_dump(by_alias=True),
         "send_meta": send_tool.meta,
+        "evaluate_reply_annotations": evaluate_reply_tool.annotations.model_dump(by_alias=True),
+        "evaluate_reply_meta": evaluate_reply_tool.meta,
+        "compare_replies_annotations": compare_replies_tool.annotations.model_dump(by_alias=True),
+        "compare_replies_meta": compare_replies_tool.meta,
+        "save_reply_annotations": save_reply_tool.annotations.model_dump(by_alias=True),
+        "save_reply_meta": save_reply_tool.meta,
     }))
 """
     env = os.environ.copy()
@@ -81,10 +90,26 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 43
+    assert payload["tool_count"] == 47
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
     assert payload["send_annotations"]["readOnlyHint"] is False
     assert payload["send_annotations"]["destructiveHint"] is True
     assert payload["send_meta"]["securitySchemes"][0]["scopes"] == ["sales:write"]
+    assert payload["evaluate_reply_annotations"]["readOnlyHint"] is True
+    assert payload["evaluate_reply_annotations"]["openWorldHint"] is True
+    assert payload["evaluate_reply_meta"]["securitySchemes"][0]["scopes"] == [
+        "sales:read"
+    ]
+    assert payload["compare_replies_annotations"]["readOnlyHint"] is True
+    assert payload["compare_replies_annotations"]["openWorldHint"] is True
+    assert payload["compare_replies_meta"]["securitySchemes"][0]["scopes"] == [
+        "sales:read"
+    ]
+    assert payload["save_reply_annotations"]["readOnlyHint"] is False
+    assert payload["save_reply_annotations"]["destructiveHint"] is False
+    assert payload["save_reply_annotations"]["openWorldHint"] is True
+    assert payload["save_reply_meta"]["securitySchemes"][0]["scopes"] == [
+        "sales:write"
+    ]

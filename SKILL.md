@@ -15,8 +15,8 @@ Use Ollum Sales MCP as the system of action and the persistent CRM as the campai
 4. Call `sales_analyze_lead`. When it returns `analysis_mode=codex_fallback`, analyze only the returned evidence and persist it with `sales_save_analysis`.
 5. Refine fit, need, budget, timing, or confidence with `sales_score_lead` when additional judgment is justified.
 6. Rank with `sales_rank_leads`; report evidence, score rationale, recommended Ollum service, and next action.
-7. Persist proposed messages with `sales_save_outreach_draft`.
-8. Retrieve the minimum useful WhatsApp context before outreach and revise the draft if needed.
+7. Pass the recipient JID to `sales_prepare_whatsapp_reply_brief`. It retrieves at most one latest unanswered inbound WhatsApp message; if our outbound message is newer, no reply context is reused.
+8. Draft the reply in ChatGPT. Use `sales_compare_whatsapp_replies` for up to five variants, then call `sales_evaluate_whatsapp_reply` on the selected text and revise until the verdict is `pass`. Save WhatsApp text with `sales_save_whatsapp_reply_draft`; use `sales_save_outreach_draft` for other channels.
 9. Call `sales_approve_outreach_draft` only after explicit user approval of the exact saved recipient and message.
 10. Call `sales_send_whatsapp_draft` only after a separate explicit send confirmation. Record other touches with `sales_record_interaction` and schedule next actions with `sales_schedule_followup`.
 
@@ -31,6 +31,8 @@ Store only supportable facts. Mark unknown contacts, revenue, technologies, budg
 For Codex fallback analysis, save the exact `LeadAnalysis` object: `company_name`, `industry`, `location`, `summary`, `contacts` (`phones`, `emails`, `messengers`, `social_links`), `website_strengths`, `website_problems`, `detected_tools`, `opportunities`, `recommended_ollum_services`, `outreach_angles`, `lead_score`, and `score_reason`.
 
 Never perform uncontrolled bulk messaging. Research and drafting may be autonomous; sending is operator-controlled. Approval applies only to one saved recipient/message pair. Any change requires a new draft and approval.
+
+The reply quality verdict is advisory for drafting and mandatory for `sales_save_whatsapp_reply_draft`; a reply without an unanswered inbound message is blocked. It never approves or sends a message. A test contact follows the same exact-recipient approval and separate-send boundary as a real prospect.
 
 Never reveal or commit tokens, keys, cookies, `.env` content, session credentials, local databases, or private conversation history. Do not put the MCP bearer token in prompts or tool arguments.
 

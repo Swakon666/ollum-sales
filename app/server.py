@@ -31,6 +31,11 @@ from .config import settings
 from .crm import SalesCRM
 from .data_quality import candidate_phones, normalize_phone, retry_call
 from .google_sheets import GoogleSheetsSync
+from .outreach_quality import (
+    build_whatsapp_reply_brief,
+    compare_whatsapp_messages,
+    evaluate_whatsapp_message,
+)
 from .schemas import LeadAnalysis
 from .scraping import analyze_website as scrape_analyze_website
 from .security import untrusted_result, validate_public_http_url
@@ -38,8 +43,10 @@ from .website_inspector import inspect_website
 from .whatsapp_service import (
     bridge_status,
     get_last_interaction,
+    get_latest_unanswered_inbound_message,
     list_chats,
     list_messages,
+    normalize_recipient,
     search_contacts,
     send_message,
 )
@@ -588,6 +595,143 @@ def sales_rank_leads(
         order_by_score=True,
         fresh_evidence_only=not include_stale,
     )
+
+
+def _resolve_whatsapp_reply_context(
+    latest_inbound_message: str | None,
+    jid: str | None,
+) -> tuple[str | None, dict[str, Any]]:
+    explicit = " ".join(str(latest_inbound_message or "").split())
+    if explicit:
+        return explicit, {"source": "provided", "found": True}
+    if not jid:
+        return None, {"source": "none", "found": False}
+    record = get_latest_unanswered_inbound_message(jid)
+    if not record:
+        return None, {
+            "source": "whatsapp_latest_unanswered",
+            "found": False,
+        }
+    return str(record["content"]), {
+        "source": "whatsapp_latest_unanswered",
+        "found": True,
+        "timestamp": record.get("timestamp"),
+        "message_id": record.get("id"),
+    }
+
+
+@_read_tool(open_world=True)
+def sales_prepare_whatsapp_reply_brief(
+    lead_id: str,
+    latest_inbound_message: str | None = None,
+    jid: str | None = None,
+) -> dict[str, Any]:
+    """Prepare a grounded brief, optionally fetching one unanswered inbound message."""
+    lead = crm.get_lead(lead_id)
+    inbound, context = _resolve_whatsapp_reply_context(latest_inbound_message, jid)
+    brief = build_whatsapp_reply_brief(lead, inbound)
+    brief["context"] = context
+    return brief
+
+
+@_read_tool(open_world=True)
+def sales_evaluate_whatsapp_reply(
+    lead_id: str,
+    message: str,
+    latest_inbound_message: str | None = None,
+    mode: str = "reply",
+    jid: str | None = None,
+) -> dict[str, Any]:
+    """Evaluate a proposed WhatsApp message against saved facts and inbound intent."""
+    if mode not in {"first_touch", "reply"}:
+        raise ValueError("mode must be first_touch or reply")
+    inbound, context = (
+        _resolve_whatsapp_reply_context(latest_inbound_message, jid)
+        if mode == "reply"
+        else (None, {"source": "not_applicable", "found": False})
+    )
+    quality = evaluate_whatsapp_message(
+        crm.get_lead(lead_id),
+        message,
+        latest_inbound_message=inbound,
+        mode=mode,
+    )
+    quality["context"] = context
+    return quality
+
+
+@_read_tool(open_world=True)
+def sales_compare_whatsapp_replies(
+    lead_id: str,
+    messages: list[str],
+    latest_inbound_message: str | None = None,
+    mode: str = "reply",
+    jid: str | None = None,
+) -> dict[str, Any]:
+    """Rank up to five candidate WhatsApp replies; this never saves or sends."""
+    if mode not in {"first_touch", "reply"}:
+        raise ValueError("mode must be first_touch or reply")
+    inbound, context = (
+        _resolve_whatsapp_reply_context(latest_inbound_message, jid)
+        if mode == "reply"
+        else (None, {"source": "not_applicable", "found": False})
+    )
+    comparison = compare_whatsapp_messages(
+        crm.get_lead(lead_id),
+        messages,
+        latest_inbound_message=inbound,
+        mode=mode,
+    )
+    comparison["context"] = context
+    return comparison
+
+
+@_write_tool(open_world=True)
+def sales_save_whatsapp_reply_draft(
+    lead_id: str,
+    recipient: str,
+    message: str,
+    latest_inbound_message: str | None = None,
+    mode: str = "reply",
+) -> dict[str, Any]:
+    """Quality-check and save a WhatsApp reply draft; this never sends or approves it."""
+    if mode not in {"first_touch", "reply"}:
+        raise ValueError("mode must be first_touch or reply")
+    normalized_recipient = normalize_recipient(recipient)
+    lead = crm.get_lead(lead_id)
+    inbound, context = (
+        _resolve_whatsapp_reply_context(latest_inbound_message, recipient)
+        if mode == "reply"
+        else (None, {"source": "not_applicable", "found": False})
+    )
+    quality = evaluate_whatsapp_message(
+        lead,
+        message,
+        latest_inbound_message=inbound,
+        mode=mode,
+    )
+    quality["context"] = context
+    if quality["verdict"] != "pass":
+        return {
+            "success": False,
+            "blocked": True,
+            "message": "Reply quality checks require revision before saving.",
+            "quality": quality,
+        }
+    draft = crm.save_outreach_draft(
+        lead_id,
+        channel="whatsapp",
+        message=message,
+        recipient=normalized_recipient,
+    )
+    return {
+        "success": True,
+        "blocked": False,
+        "draft": draft,
+        "quality": quality,
+        "approved": False,
+        "sent": False,
+    }
 
 
 @_write_tool()

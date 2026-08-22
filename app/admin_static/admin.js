@@ -172,6 +172,7 @@ function navigate(view) {
   });
   $("#page-title").textContent = VIEW_TITLES[next];
   if (window.location.hash !== VIEW_HASHES[next]) history.replaceState(null, "", VIEW_HASHES[next]);
+  window.scrollTo({ top: 0, left: 0, behavior: "auto" });
   if (state.data) renderView(next);
 }
 

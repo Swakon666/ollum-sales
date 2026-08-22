@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sqlite3
 import sys
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
@@ -200,27 +201,122 @@ def list_messages(
     normalized_jid = normalize_whatsapp_jid(chat_jid) if chat_jid else None
     if normalized_jid and is_technical_whatsapp_jid(normalized_jid):
         raise ValueError("Technical WhatsApp chats are excluded")
-    records = _serialize(
-        wa.list_messages(
-            sender_phone_number=normalized_phone,
-            chat_jid=normalized_jid,
-            query=query,
-            limit=limit,
-            page=0,
-            include_context=True,
-            context_before=2,
-            context_after=2,
-        )
-    )
-    if not isinstance(records, list):
+
+    bounded_limit = max(1, min(int(limit), 100))
+    database_path = Path(str(wa.MESSAGES_DB_PATH)).resolve()
+    if not database_path.is_file():
         return []
-    return [
-        item
-        for item in records
-        if not isinstance(item, dict)
-        or not item.get("chat_jid")
-        or not is_technical_whatsapp_jid(str(item["chat_jid"]))
+
+    query_parts = [
+        """
+        SELECT
+            m.timestamp,
+            m.sender,
+            c.name AS chat_name,
+            m.content,
+            m.is_from_me,
+            c.jid AS chat_jid,
+            m.id,
+            m.media_type
+        FROM messages AS m
+        JOIN chats AS c ON m.chat_jid = c.jid
+        """
     ]
+    where_clauses: list[str] = []
+    params: list[Any] = []
+
+    if normalized_phone:
+        where_clauses.append(
+            "(m.sender = ? OR m.sender = ? OR m.sender LIKE ?)"
+        )
+        params.extend(
+            [
+                normalized_phone,
+                f"{normalized_phone}@s.whatsapp.net",
+                f"{normalized_phone}:%@s.whatsapp.net",
+            ]
+        )
+    if normalized_jid:
+        if normalized_jid.endswith("@s.whatsapp.net"):
+            local = normalized_jid.split("@", 1)[0]
+            where_clauses.append("(m.chat_jid = ? OR m.chat_jid LIKE ?)")
+            params.extend([normalized_jid, f"{local}:%@s.whatsapp.net"])
+        else:
+            where_clauses.append("m.chat_jid = ?")
+            params.append(normalized_jid)
+    clean_query = " ".join(str(query or "").split())
+    if clean_query:
+        where_clauses.append("LOWER(COALESCE(m.content, '')) LIKE LOWER(?)")
+        params.append(f"%{clean_query[:200]}%")
+    if where_clauses:
+        query_parts.append("WHERE " + " AND ".join(where_clauses))
+    query_parts.append("ORDER BY m.timestamp DESC LIMIT ?")
+    params.append(bounded_limit)
+
+    try:
+        connection = sqlite3.connect(
+            f"{database_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute(" ".join(query_parts), params).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        if "connection" in locals():
+            connection.close()
+
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        raw_jid = str(row["chat_jid"] or "")
+        if is_technical_whatsapp_jid(raw_jid):
+            continue
+        records.append(
+            {
+                "timestamp": str(row["timestamp"] or ""),
+                "sender": str(row["sender"] or ""),
+                "chat_name": row["chat_name"],
+                "content": str(row["content"] or ""),
+                "is_from_me": bool(row["is_from_me"]),
+                "chat_jid": normalize_whatsapp_jid(raw_jid),
+                "id": str(row["id"] or ""),
+                "media_type": row["media_type"],
+            }
+        )
+    return records
+
+
+def get_latest_unanswered_inbound_message(
+    jid: str,
+    *,
+    scan_limit: int = 20,
+) -> dict[str, Any] | None:
+    """Return one minimal inbound message only when it is the latest chat event."""
+    normalized_jid = normalize_whatsapp_jid(jid)
+    if is_technical_whatsapp_jid(normalized_jid):
+        raise ValueError("Technical WhatsApp chats are excluded")
+
+    records = list_messages(
+        chat_jid=normalized_jid,
+        limit=max(1, min(int(scan_limit), 50)),
+    )
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        content = " ".join(str(record.get("content") or "").split())
+        if not content:
+            continue
+        if bool(record.get("is_from_me")):
+            return None
+        return {
+            "id": str(record.get("id") or ""),
+            "timestamp": str(record.get("timestamp") or ""),
+            "chat_jid": normalized_jid,
+            "content": content,
+            "media_type": record.get("media_type"),
+        }
+    return None
 
 
 def get_last_interaction(jid: str) -> Any:

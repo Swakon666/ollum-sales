@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light">
-    <meta name="theme-color" content="#efede6">
+    <meta name="theme-color" content="#f4f6f5">
     <meta name="description" content="Ollum Control — закрытый кабинет управления AI-продажами Ollum Group.">
     <title>Ollum Control</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
@@ -68,13 +68,13 @@
         <section class="view is-visible" data-panel="overview" data-section="01">
           <div class="hero-row">
             <div class="hero-copy">
-              <p class="eyebrow"><span>(01)</span> — Операционный центр</p>
-              <h2>Воронка<br><span>под<br>контролем</span></h2>
-              <p class="muted">Исследование, grounded scoring и черновики работают автономно. Внешние отправки заблокированы.</p>
+              <p class="eyebrow"><span>(01)</span> — Операционная сводка</p>
+              <h2>Продажи <span>под контролем</span></h2>
+              <p class="muted">Ключевые метрики, состояние воронки и безопасность — на одном экране.</p>
             </div>
             <div class="hero-actions">
               <button class="primary-button" data-action="run-cycle">Запустить SAFE-цикл</button>
-              <button class="secondary-button" data-action="sync-sheets">Синхронизировать Sheets</button>
+              <button class="secondary-button" data-action="sync-sheets">Обновить Sheets</button>
             </div>
           </div>
 
@@ -82,19 +82,19 @@
 
           <div class="dashboard-grid">
             <article class="card span-2">
-              <div class="card-header"><div><p class="eyebrow">Pipeline</p><h3>Состояние лидов</h3></div><span class="timestamp" id="updated-at">—</span></div>
+              <div class="card-header"><div><p class="eyebrow">Воронка</p><h3>Состояние лидов</h3></div><span class="timestamp" id="updated-at">—</span></div>
               <div class="funnel" id="funnel"></div>
             </article>
             <article class="card safety-card">
-              <div class="card-header"><div><p class="eyebrow">Guardrails</p><h3>Контур безопасности</h3></div><span class="lock-icon">⌾</span></div>
+              <div class="card-header"><div><p class="eyebrow">Безопасность</p><h3>Контур безопасности</h3></div><span class="lock-icon">⌾</span></div>
               <div class="safety-list" id="safety-list"></div>
             </article>
             <article class="card span-2">
-              <div class="card-header"><div><p class="eyebrow">Priority</p><h3>Топ лидов</h3></div><button class="text-button" data-view-link="leads">Все лиды →</button></div>
+              <div class="card-header"><div><p class="eyebrow">Приоритет</p><h3>Топ лидов</h3></div><button class="text-button" data-view-link="leads">Все лиды →</button></div>
               <div class="compact-list" id="top-leads"></div>
             </article>
             <article class="card">
-              <div class="card-header"><div><p class="eyebrow">Runtime</p><h3>Последние операции</h3></div></div>
+              <div class="card-header"><div><p class="eyebrow">Система</p><h3>Последние операции</h3></div></div>
               <div class="compact-list" id="recent-jobs"></div>
             </article>
           </div>

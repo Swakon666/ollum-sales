@@ -1,7 +1,9 @@
 # Ollum Sales MCP — Full Source Edition
 
-Version **0.6.0** adds an OAuth/OIDC-protected closed-beta service: a role-aware
-workspace cabinet on `api.ollumgroup.ru`, a ChatGPT MCP connection on
+Version **0.7.0** adds a grounded WhatsApp reply workflow for ChatGPT: compact reply
+briefs, inbound-intent checks, deterministic quality scoring, and a guarded draft-save
+tool that never approves or sends. The OAuth/OIDC-protected closed-beta service keeps
+the role-aware workspace cabinet on `api.ollumgroup.ru`, the ChatGPT MCP connection on
 `mcp.ollumgroup.ru`, and private browser-based WhatsApp pairing. It retains the
 persistent SAFE-first Autopilot, grounded scoring, reports, and Google Sheets panel.
 The full vendored upstream projects remain under `upstream/`; the WhatsApp bridge has
@@ -29,13 +31,13 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 43 tools. Existing tools remain compatible, plus
+The server exposes 47 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
-- CRM and outreach: `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
+- CRM and outreach: `sales_prepare_whatsapp_reply_brief`, `sales_evaluate_whatsapp_reply`, `sales_compare_whatsapp_replies`, `sales_save_whatsapp_reply_draft`, `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
 - WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
 - Autopilot: `autopilot_start`, `autopilot_stop`, `autopilot_status`, `autopilot_run_cycle`;
 - verticals: `vertical_create`, `vertical_list`, `vertical_update`;
@@ -291,11 +293,12 @@ the SAFE worker ignores send requests.
 3. `sales_import_leads` with one known company site
 4. `sales_analyze_lead`, then `sales_save_analysis` when Codex fallback evidence is returned
 5. `sales_rank_leads`
-6. `sales_save_outreach_draft`
-7. inspect WhatsApp context and review the exact recipient/message
-8. `sales_approve_outreach_draft`
-9. enable write mode and separately confirm `sales_send_whatsapp_draft`
-10. verify `sales_overview` and the follow-up timeline
+6. pass the recipient JID to `sales_prepare_whatsapp_reply_brief`; it reads only the latest unanswered inbound message
+7. draft in ChatGPT, call `sales_compare_whatsapp_replies` when testing variants, then validate the selected text with `sales_evaluate_whatsapp_reply` until the verdict is `pass`
+8. save with `sales_save_whatsapp_reply_draft` and review the exact recipient/message
+9. `sales_approve_outreach_draft`
+10. enable write mode and separately confirm `sales_send_whatsapp_draft`
+11. verify `sales_overview` and the follow-up timeline
 
 ## Upstream preservation
 
