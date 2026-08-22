@@ -114,6 +114,7 @@ jobs:
           bridge = compose["services"]["whatsapp-bridge"]
           environment = bridge["environment"]
           assert environment["OLLUM_ALLOW_WHATSAPP_SEND"] == "false"
+          assert environment["OLLUM_WHATSAPP_TEST_RECIPIENTS"] == ""
           healthcheck = " ".join(bridge["healthcheck"]["test"])
           assert "/health" in healthcheck
           for name, service in compose["services"].items():

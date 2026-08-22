@@ -49,6 +49,7 @@ from .whatsapp_service import (
     normalize_recipient,
     search_contacts,
     send_message,
+    whatsapp_test_recipient_allowlist,
 )
 
 crm = SalesCRM(settings.crm_db_path)
@@ -224,6 +225,7 @@ def ollum_whoami() -> dict[str, Any]:
 def ollum_status() -> dict[str, Any]:
     """Check local Ollum Sales MCP configuration without exposing secrets."""
     db = Path(settings.whatsapp_db_path)
+    test_recipients = whatsapp_test_recipient_allowlist()
     return {
         "service": "ollum-sales-mcp",
         "scrapegraph_model": settings.scrapegraph_model,
@@ -236,6 +238,8 @@ def ollum_status() -> dict[str, Any]:
         "whatsapp_api_configured": bool(settings.whatsapp_api_base_url),
         "whatsapp": bridge_status(),
         "whatsapp_send_enabled": settings.allow_whatsapp_send,
+        "whatsapp_test_send_enabled": bool(test_recipients),
+        "whatsapp_test_recipient_count": len(test_recipients),
         "mcp_auth_required": settings.auth_mode == "oidc" or settings.mcp_require_auth,
         "mcp_auth_mode": settings.auth_mode,
         "admin_enabled": settings.admin_enabled,

@@ -16,4 +16,6 @@ The MCP service exposes these intended tools:
 - `whatsapp_get_last_interaction`
 - `whatsapp_send_message`
 
-`whatsapp_send_message` is intentionally gated by `OLLUM_ALLOW_WHATSAPP_SEND`.
+`whatsapp_send_message` remains intentionally blocked for direct sends. Production can optionally
+allow an exact test recipient through the saved-draft approval flow while
+`OLLUM_ALLOW_WHATSAPP_SEND=false`; the exception is text-only and does not enable Autopilot sending.

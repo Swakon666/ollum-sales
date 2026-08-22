@@ -242,6 +242,17 @@ WhatsApp sending is disabled by default:
 OLLUM_ALLOW_WHATSAPP_SEND=false
 ```
 
+For an isolated closed-beta send test, keep the global flag disabled and configure only the exact
+recipient(s):
+
+```env
+OLLUM_WHATSAPP_TEST_RECIPIENTS=79770000000
+```
+
+The exception is text-only, is enforced independently by the Python service and the private Go
+bridge, and applies only to a saved draft that was approved for the same exact recipient and text.
+It does not enable Autopilot sending or the direct `whatsapp_send_message` tool.
+
 After testing contact resolution and message reads, explicitly enable sending:
 
 ```env
@@ -254,8 +265,9 @@ Direct sends require `confirm_send=true`. The recommended workflow adds a strong
 
 The bridge exposes read-only operational checks at `GET /health` and `GET /api/status`.
 `/api/status` returns `503` until the persisted session is both connected and logged in, and
-always reports the effective `send_enabled` policy without exposing session data. The MCP
-`ollum_status` tool includes the same whitelisted bridge state.
+reports the global `send_enabled` state plus only the boolean/count for the test policy without
+exposing recipients or session data. The MCP `ollum_status` tool includes the same whitelisted
+bridge state.
 
 After pairing, the production smoke test recreates only `whatsapp-bridge` and verifies that the
 authenticated account identity and `/app/store` volume are unchanged while sending remains

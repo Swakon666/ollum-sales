@@ -198,13 +198,15 @@ type SendMessageResponse struct {
 
 // BridgeStatusResponse reports bridge readiness without exposing session secrets.
 type BridgeStatusResponse struct {
-	Status        string `json:"status"`
-	Ready         bool   `json:"ready"`
-	Connected     bool   `json:"connected"`
-	LoggedIn      bool   `json:"logged_in"`
-	SendEnabled   bool   `json:"send_enabled"`
-	AccountJID    string `json:"account_jid,omitempty"`
-	UptimeSeconds int64  `json:"uptime_seconds"`
+	Status             string `json:"status"`
+	Ready              bool   `json:"ready"`
+	Connected          bool   `json:"connected"`
+	LoggedIn           bool   `json:"logged_in"`
+	SendEnabled        bool   `json:"send_enabled"`
+	TestSendEnabled    bool   `json:"test_send_enabled"`
+	TestRecipientCount int    `json:"test_recipient_count"`
+	AccountJID         string `json:"account_jid,omitempty"`
+	UptimeSeconds      int64  `json:"uptime_seconds"`
 }
 
 // PairingStatusResponse exposes pairing progress without leaking the QR payload.
@@ -594,7 +596,65 @@ func whatsappSendEnabled() bool {
 	return strings.EqualFold(strings.TrimSpace(os.Getenv("OLLUM_ALLOW_WHATSAPP_SEND")), "true")
 }
 
-func currentBridgeStatus(client *whatsmeow.Client, startedAt time.Time) BridgeStatusResponse {
+func normalizePolicyRecipient(recipient string) string {
+	trimmed := strings.TrimSpace(recipient)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.Contains(trimmed, "@") {
+		jid, err := types.ParseJID(trimmed)
+		if err != nil || jid.Server != types.DefaultUserServer {
+			return ""
+		}
+		trimmed = jid.User
+	}
+
+	var digits strings.Builder
+	for _, character := range trimmed {
+		if character >= '0' && character <= '9' {
+			digits.WriteRune(character)
+		}
+	}
+	normalized := strings.TrimPrefix(digits.String(), "00")
+	if len(normalized) == 11 && strings.HasPrefix(normalized, "8") {
+		normalized = "7" + normalized[1:]
+	}
+	if len(normalized) < 7 || len(normalized) > 15 || strings.Trim(normalized, "0") == "" {
+		return ""
+	}
+	return normalized
+}
+
+func whatsappTestRecipients() map[string]struct{} {
+	recipients := make(map[string]struct{})
+	for _, rawRecipient := range strings.FieldsFunc(
+		os.Getenv("OLLUM_WHATSAPP_TEST_RECIPIENTS"),
+		func(character rune) bool {
+			return character == ',' || character == ';' || character == '\n' || character == '\r'
+		},
+	) {
+		normalized := normalizePolicyRecipient(rawRecipient)
+		if normalized != "" {
+			recipients[normalized] = struct{}{}
+		}
+	}
+	return recipients
+}
+
+func testRecipientAllowed(recipient string, allowedRecipients map[string]struct{}) bool {
+	normalized := normalizePolicyRecipient(recipient)
+	if normalized == "" {
+		return false
+	}
+	_, allowed := allowedRecipients[normalized]
+	return allowed
+}
+
+func currentBridgeStatus(
+	client *whatsmeow.Client,
+	startedAt time.Time,
+	testRecipients map[string]struct{},
+) BridgeStatusResponse {
 	connected := client.IsConnected()
 	loggedIn := client.IsLoggedIn()
 	ready := connected && loggedIn
@@ -614,13 +674,15 @@ func currentBridgeStatus(client *whatsmeow.Client, startedAt time.Time) BridgeSt
 	}
 
 	return BridgeStatusResponse{
-		Status:        status,
-		Ready:         ready,
-		Connected:     connected,
-		LoggedIn:      loggedIn,
-		SendEnabled:   whatsappSendEnabled(),
-		AccountJID:    accountJID,
-		UptimeSeconds: uptimeSeconds,
+		Status:             status,
+		Ready:              ready,
+		Connected:          connected,
+		LoggedIn:           loggedIn,
+		SendEnabled:        whatsappSendEnabled(),
+		TestSendEnabled:    len(testRecipients) > 0,
+		TestRecipientCount: len(testRecipients),
+		AccountJID:         accountJID,
+		UptimeSeconds:      uptimeSeconds,
 	}
 }
 
@@ -644,20 +706,22 @@ func bridgeStatusHandler(provider bridgeStatusProvider, requireReady bool) http.
 	}
 }
 
-func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.HandlerFunc {
+type sendMessageFunc func(
+	client *whatsmeow.Client,
+	recipient string,
+	message string,
+	mediaPath string,
+) (bool, string)
+
+func sendMessageHandler(
+	client *whatsmeow.Client,
+	sendEnabled bool,
+	testRecipients map[string]struct{},
+	send sendMessageFunc,
+) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		if !sendEnabled {
-			w.WriteHeader(http.StatusForbidden)
-			_ = json.NewEncoder(w).Encode(SendMessageResponse{
-				Success: false,
-				Message: "WhatsApp sending is disabled by bridge policy",
-			})
 			return
 		}
 
@@ -676,7 +740,26 @@ func sendMessageHandler(client *whatsmeow.Client, sendEnabled bool) http.Handler
 			return
 		}
 
-		success, message := sendWhatsAppMessage(client, req.Recipient, req.Message, req.MediaPath)
+		w.Header().Set("Content-Type", "application/json")
+		testRecipient := testRecipientAllowed(req.Recipient, testRecipients)
+		if !sendEnabled && !testRecipient {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "WhatsApp sending is disabled for this recipient by bridge policy",
+			})
+			return
+		}
+		if !sendEnabled && testRecipient && req.MediaPath != "" {
+			w.WriteHeader(http.StatusForbidden)
+			_ = json.NewEncoder(w).Encode(SendMessageResponse{
+				Success: false,
+				Message: "Test-recipient policy permits text messages only",
+			})
+			return
+		}
+
+		success, message := send(client, req.Recipient, req.Message, req.MediaPath)
 		fmt.Println(sendAuditLine(success))
 		if !success {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -1003,15 +1086,24 @@ func extractDirectPathFromURL(url string) string {
 // Start a REST API server to expose the WhatsApp client functionality
 func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, pairingState *PairingState, port int) {
 	serverStartedAt := time.Now()
+	testRecipients := whatsappTestRecipients()
 	statusProvider := func() BridgeStatusResponse {
-		return currentBridgeStatus(client, serverStartedAt)
+		return currentBridgeStatus(client, serverStartedAt, testRecipients)
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", bridgeStatusHandler(statusProvider, false))
 	mux.HandleFunc("/api/status", bridgeStatusHandler(statusProvider, true))
 	mux.HandleFunc("/api/pairing", pairingStatusHandler(pairingState))
 	mux.HandleFunc("/api/pairing/qr", pairingQRHandler(pairingState))
-	mux.HandleFunc("/api/send", sendMessageHandler(client, whatsappSendEnabled()))
+	mux.HandleFunc(
+		"/api/send",
+		sendMessageHandler(
+			client,
+			whatsappSendEnabled(),
+			testRecipients,
+			sendWhatsAppMessage,
+		),
+	)
 
 	// Handler for downloading media
 	mux.HandleFunc("/api/download", func(w http.ResponseWriter, r *http.Request) {

@@ -62,6 +62,7 @@ Configure these repository secrets under **Settings â†’ Secrets and variables â†
 | `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
 | `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
 | `OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON` | yes for v0.4 | Complete Google service-account JSON; transferred as a mode-`0600` file and never written to `.env` |
+| `OLLUM_WHATSAPP_TEST_RECIPIENTS` | optional | Comma-separated exact test recipients; text-only and still subject to saved-draft approval plus separate send confirmation |
 
 Configure the non-sensitive repository variables for the closed beta:
 
@@ -83,7 +84,9 @@ OLLUM_DEFAULT_WORKSPACE_NAME=Ollum Group
 
 Also configure `OLLUM_GOOGLE_SHEETS_ID` with the target spreadsheet ID. Production
 deployment forces both `OLLUM_ALLOW_WHATSAPP_SEND=false` and
-`OLLUM_AUTOPILOT_ALLOW_SEND=false`; changing a repository secret cannot enable sends.
+`OLLUM_AUTOPILOT_ALLOW_SEND=false`. The optional test-recipient secret is the only scoped
+exception: it permits text-only sends to exact recipients after the normal persistent approval and
+separate send confirmation, without enabling global or Autopilot sending.
 
 Never commit or print any of these values. The workflow passes the SSH password through `sshpass`
 environment input and streams the sudo password over SSH. The generated production `.env` is copied
@@ -311,8 +314,10 @@ Rollback is unavailable before at least two successful releases exist.
   agent research and persist them with `sales_import_leads`.
 - **WhatsApp bridge not healthy:** follow the QR/auth logs and pair the device. A timed-out QR attempt
   is restarted automatically.
-- **WhatsApp sends blocked:** expected in this production profile. The deployment workflow pins
-  `OLLUM_ALLOW_WHATSAPP_SEND=false` and `OLLUM_AUTOPILOT_ALLOW_SEND=false`.
+- **WhatsApp sends blocked:** expected unless the exact recipient is in the isolated test allowlist.
+  The deployment workflow keeps `OLLUM_ALLOW_WHATSAPP_SEND=false` and
+  `OLLUM_AUTOPILOT_ALLOW_SEND=false`; allowlisted tests remain text-only and require the normal
+  saved-draft approval plus a separate send confirmation.
 - **Google Sheets not configured:** create/share the spreadsheet, mount the service-account JSON
   read-only into both Python services, and set `OLLUM_GOOGLE_SHEETS_ENABLED`,
   `OLLUM_GOOGLE_SHEETS_ID`, and `GOOGLE_SERVICE_ACCOUNT_FILE`. Never put the JSON key in `.env`.

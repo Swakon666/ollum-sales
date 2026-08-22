@@ -63,6 +63,8 @@ def bridge_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
         "connected": False,
         "logged_in": False,
         "send_enabled": False,
+        "test_send_enabled": False,
+        "test_recipient_count": 0,
     }
     try:
         response = requests.get(status_url, timeout=timeout_seconds)
@@ -90,6 +92,14 @@ def bridge_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
         "connected": payload.get("connected") is True,
         "logged_in": payload.get("logged_in") is True,
         "send_enabled": payload.get("send_enabled") is True,
+        "test_send_enabled": payload.get("test_send_enabled") is True,
+        "test_recipient_count": (
+            payload.get("test_recipient_count")
+            if isinstance(payload.get("test_recipient_count"), int)
+            and not isinstance(payload.get("test_recipient_count"), bool)
+            and payload.get("test_recipient_count") >= 0
+            else 0
+        ),
         "account_jid": account_jid if isinstance(account_jid, str) else None,
         "uptime_seconds": uptime_seconds
         if isinstance(uptime_seconds, int) and not isinstance(uptime_seconds, bool)
@@ -177,6 +187,17 @@ def normalize_recipient(recipient: str) -> str:
         raise ValueError("Technical WhatsApp JIDs cannot be used as recipients")
     jid = normalize_whatsapp_jid(recipient)
     return jid.split("@", 1)[0] if jid.endswith("@s.whatsapp.net") else jid
+
+
+def whatsapp_test_recipient_allowlist() -> tuple[str, ...]:
+    """Return a normalized, deduplicated allowlist without exposing it in status."""
+    recipients: set[str] = set()
+    for raw_recipient in settings.whatsapp_test_recipients:
+        try:
+            recipients.add(normalize_recipient(raw_recipient))
+        except ValueError:
+            continue
+    return tuple(sorted(recipients))
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
@@ -325,16 +346,22 @@ def get_last_interaction(jid: str) -> Any:
 
 
 def send_message(recipient: str, message: str) -> dict[str, Any]:
-    if not settings.allow_whatsapp_send:
+    normalized = normalize_recipient(recipient)
+    test_recipient = normalized in whatsapp_test_recipient_allowlist()
+    if not settings.allow_whatsapp_send and not test_recipient:
         return {
             "success": False,
             "blocked": True,
             "message": (
-                "WhatsApp sending is disabled. Set OLLUM_ALLOW_WHATSAPP_SEND=true "
-                "only after you have verified the recipient and message."
+                "WhatsApp sending is disabled for this recipient. Global sending remains "
+                "off and the recipient is not in OLLUM_WHATSAPP_TEST_RECIPIENTS."
             ),
         }
 
-    normalized = normalize_recipient(recipient)
     success, status = wa.send_message(normalized, message)
-    return {"success": bool(success), "message": status, "recipient": normalized}
+    return {
+        "success": bool(success),
+        "message": status,
+        "recipient": normalized,
+        "send_policy": "global" if settings.allow_whatsapp_send else "test_recipient",
+    }

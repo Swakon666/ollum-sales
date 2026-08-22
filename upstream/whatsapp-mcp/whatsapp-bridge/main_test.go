@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"go.mau.fi/whatsmeow"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,13 +18,15 @@ func TestBridgeStatusHandlerReady(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	provider := func() BridgeStatusResponse {
 		return BridgeStatusResponse{
-			Status:        "ready",
-			Ready:         true,
-			Connected:     true,
-			LoggedIn:      true,
-			SendEnabled:   false,
-			AccountJID:    "123456789@s.whatsapp.net",
-			UptimeSeconds: 12,
+			Status:             "ready",
+			Ready:              true,
+			Connected:          true,
+			LoggedIn:           true,
+			SendEnabled:        false,
+			TestSendEnabled:    true,
+			TestRecipientCount: 1,
+			AccountJID:         "123456789@s.whatsapp.net",
+			UptimeSeconds:      12,
 		}
 	}
 
@@ -36,7 +39,7 @@ func TestBridgeStatusHandlerReady(t *testing.T) {
 	if err := json.NewDecoder(w.Body).Decode(&response); err != nil {
 		t.Fatalf("decode status response: %v", err)
 	}
-	if !response.Ready || response.SendEnabled {
+	if !response.Ready || response.SendEnabled || !response.TestSendEnabled || response.TestRecipientCount != 1 {
 		t.Fatalf("unexpected status response: %+v", response)
 	}
 }
@@ -115,10 +118,23 @@ func TestPairingQRHandlerRejectsExpiredCode(t *testing.T) {
 }
 
 func TestSendMessageHandlerBlocksWhenDisabled(t *testing.T) {
+	sendCalled := false
 	w := httptest.NewRecorder()
-	r := httptest.NewRequest(http.MethodPost, "/api/send", nil)
+	r := httptest.NewRequest(
+		http.MethodPost,
+		"/api/send",
+		strings.NewReader(`{"recipient":"79990000000","message":"hello"}`),
+	)
 
-	sendMessageHandler(nil, false).ServeHTTP(w, r)
+	sendMessageHandler(
+		nil,
+		false,
+		map[string]struct{}{"79779335513": {}},
+		func(_ *whatsmeow.Client, _, _, _ string) (bool, string) {
+			sendCalled = true
+			return true, "sent"
+		},
+	).ServeHTTP(w, r)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected status 403, got %d", w.Code)
@@ -129,6 +145,78 @@ func TestSendMessageHandlerBlocksWhenDisabled(t *testing.T) {
 	}
 	if response.Success {
 		t.Fatal("disabled bridge unexpectedly allowed sending")
+	}
+	if sendCalled {
+		t.Fatal("disabled bridge called the WhatsApp client for a non-allowlisted recipient")
+	}
+}
+
+func TestSendMessageHandlerAllowsTextForExactTestRecipient(t *testing.T) {
+	var sentRecipient string
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodPost,
+		"/api/send",
+		strings.NewReader(`{"recipient":"+7 (977) 933-55-13","message":"hello"}`),
+	)
+
+	sendMessageHandler(
+		nil,
+		false,
+		map[string]struct{}{"79779335513": {}},
+		func(_ *whatsmeow.Client, recipient, _, _ string) (bool, string) {
+			sentRecipient = recipient
+			return true, "sent"
+		},
+	).ServeHTTP(w, r)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if sentRecipient != "+7 (977) 933-55-13" {
+		t.Fatalf("unexpected recipient passed to sender: %q", sentRecipient)
+	}
+}
+
+func TestPolicyRecipientNormalizationMatchesPythonBoundary(t *testing.T) {
+	for input, expected := range map[string]string{
+		"+7 (977) 933-55-13":              "79779335513",
+		"8 (977) 933-55-13":               "79779335513",
+		"0079779335513@s.whatsapp.net":    "79779335513",
+		"0@s.whatsapp.net":                "",
+		"123":                             "",
+		"1234567890123456@s.whatsapp.net": "",
+	} {
+		if actual := normalizePolicyRecipient(input); actual != expected {
+			t.Fatalf("normalize %q: expected %q, got %q", input, expected, actual)
+		}
+	}
+}
+
+func TestSendMessageHandlerBlocksMediaForTestRecipient(t *testing.T) {
+	sendCalled := false
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest(
+		http.MethodPost,
+		"/api/send",
+		strings.NewReader(`{"recipient":"79779335513","media_path":"private.jpg"}`),
+	)
+
+	sendMessageHandler(
+		nil,
+		false,
+		map[string]struct{}{"79779335513": {}},
+		func(_ *whatsmeow.Client, _, _, _ string) (bool, string) {
+			sendCalled = true
+			return true, "sent"
+		},
+	).ServeHTTP(w, r)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403, got %d", w.Code)
+	}
+	if sendCalled {
+		t.Fatal("test-recipient media request reached the WhatsApp client")
 	}
 }
 
@@ -162,7 +250,14 @@ func TestSendMessageHandlerValidatesRequestsBeforeUsingClient(t *testing.T) {
 			w := httptest.NewRecorder()
 			r := httptest.NewRequest(test.method, "/api/send", strings.NewReader(test.body))
 
-			sendMessageHandler(nil, true).ServeHTTP(w, r)
+			sendMessageHandler(
+				nil,
+				true,
+				nil,
+				func(_ *whatsmeow.Client, _, _, _ string) (bool, string) {
+					return true, "sent"
+				},
+			).ServeHTTP(w, r)
 
 			if w.Code != test.status {
 				t.Fatalf("expected status %d, got %d", test.status, w.Code)

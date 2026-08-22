@@ -116,6 +116,7 @@ jobs:
       GOOGLE_SHEETS_ID: ${{ vars.OLLUM_GOOGLE_SHEETS_ID }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON }}
       WHATSAPP_PROXY_URL: ${{ secrets.OLLUM_WHATSAPP_PROXY_URL }}
+      WHATSAPP_TEST_RECIPIENTS: ${{ secrets.OLLUM_WHATSAPP_TEST_RECIPIENTS }}
       MCP_BIND_PORT: "18000"
       PREBUILT_RELEASE_TAG: ${{ inputs.prebuilt_release_tag }}
       PREBUILT_ASSET_NAME: ${{ inputs.prebuilt_asset_name }}
@@ -419,6 +420,7 @@ jobs:
             printf 'WHATSAPP_MESSAGES_DB_PATH=/data/whatsapp/messages.db\n'
             printf 'WHATSAPP_PROXY_URL=%s\n' "${WHATSAPP_PROXY_URL:-}"
             printf 'OLLUM_ALLOW_WHATSAPP_SEND=false\n'
+            printf 'OLLUM_WHATSAPP_TEST_RECIPIENTS=%s\n' "${WHATSAPP_TEST_RECIPIENTS:-}"
             printf 'OLLUM_AUTOPILOT_ALLOW_SEND=false\n'
             printf 'OLLUM_AUTOPILOT_DEFAULT_MODE=safe\n'
             printf 'OLLUM_AUTOPILOT_INTERVAL_MINUTES=45\n'
