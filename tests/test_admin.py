@@ -276,10 +276,26 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     page = client.get("/admin")
     script = client.get("/assets/admin.js")
     stylesheet = client.get("/assets/admin.css")
+    display_font = client.get("/assets/fonts/bricolage-latin.woff2")
+    favicon = client.get("/assets/favicon.svg")
 
-    assert page.status_code == script.status_code == stylesheet.status_code == 200
+    assert (
+        page.status_code
+        == script.status_code
+        == stylesheet.status_code
+        == display_font.status_code
+        == favicon.status_code
+        == 200
+    )
+    assert display_font.headers["content-type"] == "font/woff2"
+    assert favicon.headers["content-type"] == "image/svg+xml"
+    assert 'rel="icon" href="/assets/favicon.svg"' in page.text
     assert 'class="skip-link"' in page.text
     assert 'id="main-content" tabindex="-1"' in page.text
+    assert 'id="mobile-nav-toggle"' in page.text
+    assert 'aria-controls="primary-navigation"' in page.text
+    assert 'rel="preload" href="/assets/fonts/bricolage-latin.woff2"' in page.text
+    assert 'class="nav-item is-active" href="#overview"' in page.text
     for pagination_id in (
         "leads-pagination",
         "campaigns-pagination",
@@ -290,8 +306,15 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     assert "const PAGE_SIZE = 50;" in script.text
     assert "function pageItems(" in script.text
     assert "function renderView(" in script.text
+    assert "function setMobileNavigation(" in script.text
+    assert "workspace.inert = expanded" in script.text
+    assert 'event.key === "Escape"' in script.text
     assert "aria-current" in script.text
     assert ":focus-visible" in stylesheet.text
+    assert "--paper: #efede6" in stylesheet.text
+    assert "--accent: #11d873" in stylesheet.text
+    assert "env(safe-area-inset-top)" in stylesheet.text
+    assert "overscroll-behavior: contain" in stylesheet.text
     assert "outline: none" not in stylesheet.text
 
 

@@ -147,8 +147,22 @@ async function refreshAll({ quiet = false, force = false } = {}) {
   }
 }
 
+function setMobileNavigation(open) {
+  const sidebar = $(".sidebar");
+  const toggle = $("#mobile-nav-toggle");
+  const workspace = $("#main-content");
+  const expanded = Boolean(open);
+  sidebar.classList.toggle("is-open", expanded);
+  toggle.setAttribute("aria-expanded", String(expanded));
+  toggle.setAttribute("aria-label", expanded ? "Закрыть меню" : "Открыть меню");
+  workspace.inert = expanded;
+  document.body.classList.toggle("nav-open", expanded);
+  if (expanded) requestAnimationFrame(() => $(".nav-item.is-active")?.focus());
+}
+
 function navigate(view) {
   const next = VIEW_TITLES[view] ? view : "overview";
+  setMobileNavigation(false);
   $$(".view").forEach((panel) => panel.classList.toggle("is-visible", panel.dataset.panel === next));
   $$(".nav-item").forEach((item) => {
     const active = item.dataset.view === next;
@@ -424,7 +438,7 @@ function renderPlugin() {
     ["Authorization server", plugin.authorization_server],
     ["Protected resource metadata", plugin.protected_resource_metadata],
   ];
-  $("#plugin-fields").innerHTML = fields.map(([name, value]) => `<div class="copy-field"><label>${escapeHtml(name)}</label><div class="copy-row"><code>${escapeHtml(value || "Не настроено")}</code><button class="icon-button copy-value" data-copy="${escapeHtml(value || "")}" aria-label="Копировать">⧉</button></div></div>`).join("");
+  $("#plugin-fields").innerHTML = fields.map(([name, value]) => `<div class="copy-field"><label>${escapeHtml(name)}</label><div class="copy-row"><code translate="no">${escapeHtml(value || "Не настроено")}</code><button class="icon-button copy-value" data-copy="${escapeHtml(value || "")}" aria-label="Копировать">⧉</button></div></div>`).join("");
   const names = {
     https_resource_url: "Публичный HTTPS /mcp", oidc_mode: "Режим OIDC",
     issuer_configured: "OIDC issuer", audience_configured: "Audience API",
@@ -550,7 +564,27 @@ function bindEvents() {
     window.location.assign("/auth/login");
   });
 
-  $$(".nav-item").forEach((button) => button.addEventListener("click", () => navigate(button.dataset.view)));
+  $("#mobile-nav-toggle").addEventListener("click", () => {
+    setMobileNavigation(!$(".sidebar").classList.contains("is-open"));
+  });
+  $(".brand").addEventListener("click", (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate("overview");
+    $("#main-content").focus({ preventScroll: true });
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && $(".sidebar").classList.contains("is-open")) {
+      setMobileNavigation(false);
+      $("#mobile-nav-toggle").focus();
+    }
+  });
+  $$(".nav-item").forEach((link) => link.addEventListener("click", (event) => {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    navigate(link.dataset.view);
+    $("#main-content").focus({ preventScroll: true });
+  }));
   $$('[data-view-link]').forEach((button) => button.addEventListener("click", () => navigate(button.dataset.viewLink)));
   $("#refresh-button").addEventListener("click", () => refreshAll());
   $("#refresh-whatsapp-button").addEventListener("click", () => refreshWhatsApp());
