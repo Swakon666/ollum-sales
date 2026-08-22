@@ -136,6 +136,16 @@ install -d -m 0700 -o "$deploy_user" -g "$deploy_group" \
 
 shared_env="$deploy_root/shared/.env"
 shared_google_credentials="$deploy_root/shared/secrets/ollum-google-service-account.json"
+
+install_runtime_google_credentials() {
+  local source_file=$1
+  [[ -f $source_file ]] || die 'Google service-account credential source is missing'
+  install -m 0400 -o 10001 -g 10001 \
+    "$source_file" "$shared_google_credentials"
+  [[ $(stat -c '%u:%g:%a' "$shared_google_credentials") == '10001:10001:400' ]] \
+    || die 'Google service-account credential permissions are unsafe'
+}
+
 if [[ -f $shared_env ]]; then
   shared_env_backup=$(mktemp)
   cp --preserve=mode,ownership,timestamps "$shared_env" "$shared_env_backup"
@@ -155,8 +165,7 @@ restore_shared_configuration() {
   fi
   if [[ -n $shared_google_credentials_backup \
     && -f $shared_google_credentials_backup ]]; then
-    install -m 0600 -o "$deploy_user" -g "$deploy_group" \
-      "$shared_google_credentials_backup" "$shared_google_credentials"
+    install_runtime_google_credentials "$shared_google_credentials_backup"
   else
     rm -f -- "$shared_google_credentials"
   fi
@@ -175,9 +184,7 @@ chown -R "$deploy_user:$deploy_group" "$release_dir"
 
 install -m 0600 -o "$deploy_user" -g "$deploy_group" \
   "$incoming_env" "$shared_env"
-install -m 0600 -o "$deploy_user" -g "$deploy_group" \
-  "$incoming_google_credentials" \
-  "$shared_google_credentials"
+install_runtime_google_credentials "$incoming_google_credentials"
 ln -sfn ../../shared/.env "$release_dir/.env"
 chown -h "$deploy_user:$deploy_group" "$release_dir/.env"
 
