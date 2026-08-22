@@ -3,6 +3,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -98,6 +99,8 @@ class TestWhatsAppService(unittest.TestCase):
                     "connected": True,
                     "logged_in": True,
                     "send_enabled": False,
+                    "test_send_enabled": True,
+                    "test_recipient_count": 1,
                     "account_jid": "123456789@s.whatsapp.net",
                     "uptime_seconds": 42,
                     "session_secret": "must-not-leak",
@@ -117,6 +120,8 @@ class TestWhatsAppService(unittest.TestCase):
                 "connected": True,
                 "logged_in": True,
                 "send_enabled": False,
+                "test_send_enabled": True,
+                "test_recipient_count": 1,
                 "account_jid": "123456789@s.whatsapp.net",
                 "uptime_seconds": 42,
             },
@@ -133,6 +138,46 @@ class TestWhatsAppService(unittest.TestCase):
         self.assertFalse(result["ready"])
         self.assertFalse(result["send_enabled"])
         self.assertEqual(result["error"], "ConnectionError")
+
+    def test_send_message_blocks_recipient_outside_test_allowlist(self) -> None:
+        test_settings = replace(
+            whatsapp_service.settings,
+            allow_whatsapp_send=False,
+            whatsapp_test_recipients=("79779335513",),
+        )
+        with (
+            patch.object(whatsapp_service, "settings", test_settings),
+            patch.object(whatsapp_service.wa, "send_message") as send,
+        ):
+            result = whatsapp_service.send_message("79990000000", "test")
+
+        self.assertTrue(result["blocked"])
+        self.assertFalse(result["success"])
+        send.assert_not_called()
+
+    def test_send_message_allows_only_normalized_test_recipient(self) -> None:
+        test_settings = replace(
+            whatsapp_service.settings,
+            allow_whatsapp_send=False,
+            whatsapp_test_recipients=("+7 (977) 933-55-13",),
+        )
+        with (
+            patch.object(whatsapp_service, "settings", test_settings),
+            patch.object(
+                whatsapp_service.wa,
+                "send_message",
+                return_value=(True, "sent"),
+            ) as send,
+        ):
+            result = whatsapp_service.send_message(
+                "79779335513@s.whatsapp.net",
+                "test",
+            )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["recipient"], "79779335513")
+        self.assertEqual(result["send_policy"], "test_recipient")
+        send.assert_called_once_with("79779335513", "test")
 
     def test_pairing_status_whitelists_metadata_and_never_returns_code(self) -> None:
         with patch.object(

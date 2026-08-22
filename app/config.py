@@ -100,6 +100,9 @@ class Settings:
     allow_whatsapp_send: bool = os.getenv(
         "OLLUM_ALLOW_WHATSAPP_SEND", "false"
     ).lower() in {"1", "true", "yes", "on"}
+    whatsapp_test_recipients: tuple[str, ...] = _env_csv(
+        "OLLUM_WHATSAPP_TEST_RECIPIENTS"
+    )
     autopilot_default_mode: str = (
         os.getenv("OLLUM_AUTOPILOT_DEFAULT_MODE", "safe").strip().lower()
     )
