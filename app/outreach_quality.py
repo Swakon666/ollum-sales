@@ -11,9 +11,9 @@ _PERSONAL_GREETING_RE = re.compile(
     re.IGNORECASE,
 )
 _SPECIFIC_CLAIM_RE = re.compile(
-    r"\b\d+(?:[.,]\d+)?\s*(?:%|₽|руб(?:лей|ля|ль)?|дн(?:я|ей)?|"
+    r"\b(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d+)?\s*(?:%|₽|руб(?:лей|ля|ль)?|дн(?:я|ей)?|"
     r"недел(?:я|и|ь)|месяц(?:а|ев)?|час(?:а|ов)?|минут(?:а|ы)?|"
-    r"лид(?:а|ов)?|заяв(?:ка|ки|ок))\b",
+    r"лид(?:а|ов)?|заяв(?:ка|ки|ок))(?!\w)",
     re.IGNORECASE,
 )
 
@@ -132,6 +132,11 @@ def _strings(value: Any) -> list[str]:
         for item in value:
             result.extend(_strings(item))
         return result
+    if isinstance(value, dict):
+        result = []
+        for item in value.values():
+            result.extend(_strings(item))
+        return result
     return []
 
 
@@ -241,6 +246,7 @@ def evaluate_whatsapp_message(
     *,
     latest_inbound_message: str | None = None,
     mode: OutreachMode = "reply",
+    company_evidence: Any = None,
 ) -> dict[str, Any]:
     text = " ".join(str(message or "").split())
     lower = text.lower()
@@ -289,6 +295,7 @@ def evaluate_whatsapp_message(
         *_strings(lead.get("industry")),
         *_strings(lead.get("location")),
         *_strings(latest_inbound_message),
+        *_strings(company_evidence),
     ]
     evidence_text = " ".join(evidence_values).lower()
     evidence_keywords = _keywords(evidence_values)
@@ -456,6 +463,7 @@ def evaluate_whatsapp_message(
         "passed_checks": passed,
         "safe_to_save_as_draft": verdict == "pass",
         "safe_to_send": False,
+        "company_evidence_used": bool(_strings(company_evidence)),
         "send_requires": [
             "сохранённый WhatsApp-черновик",
             "явное подтверждение точного получателя и текста",
@@ -471,6 +479,7 @@ def compare_whatsapp_messages(
     *,
     latest_inbound_message: str | None = None,
     mode: OutreachMode = "reply",
+    company_evidence: Any = None,
 ) -> dict[str, Any]:
     """Evaluate and rank a bounded set of candidate replies without saving them."""
     if not messages:
@@ -485,6 +494,7 @@ def compare_whatsapp_messages(
             message,
             latest_inbound_message=latest_inbound_message,
             mode=mode,
+            company_evidence=company_evidence,
         )
         candidates.append(
             {

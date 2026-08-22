@@ -15,8 +15,9 @@ ChatGPT тем же аккаунтом. Access token не сохраняется
 - подписанная `HttpOnly`, `Secure`, `SameSite=Lax` session-cookie и CSRF для mutations;
 - workspace и роли `owner`, `operator`, `viewer`;
 - приглашения в закрытую beta без отправки внешней почты;
-- личный кабинет: CRM, лиды, кампании, SAFE Autopilot, черновики, аудит,
-  Google Sheets, состояние MCP, команда и WhatsApp;
+- личный кабинет: профиль компании, база знаний, очередь ответов, CRM, лиды,
+  кампании, SAFE Autopilot, черновики, аудит, Google Sheets, состояние MCP,
+  команда и WhatsApp;
 - versioned API `/api/v1/*` с теми же session, role и CSRF-проверками;
 - приватная WhatsApp-привязка: bridge держит pairing code только в памяти,
   а кабинет получает только PNG через авторизованный proxy;
@@ -116,6 +117,35 @@ environment. Никогда не добавляйте их в repository или 
 чтобы создать или принять workspace membership. Первый smoke-запрос должен быть
 read-only: «Покажи `ollum_whoami`, статус и overview, ничего не изменяй».
 
+### Первичная настройка компании через ChatGPT
+
+После подключения ChatGPT начинает с `sales_get_company_onboarding` и задаёт не
+более трёх вопросов за один ход. Пользователь может отвечать свободным текстом или
+передавать файлы в сам чат. ChatGPT извлекает только явно указанные факты и сохраняет:
+
+- профиль компании, позиционирование, географию и целевую аудиторию;
+- услуги и цены;
+- кейсы, закрытых и текущих клиентов;
+- ограничения, доказательства, FAQ и процесс продаж.
+
+Данные хранятся в workspace, поэтому они доступны в следующих чатах и отображаются
+в разделах «Компания» и «Входящие» без перезагрузки страницы. Завершить интервью
+можно только после явного подтверждения пользователя и заполнения обязательного
+ядра: компания, отрасль, аудитория, позиционирование, минимум одна услуга и цена.
+
+### Автономный контур входящих
+
+Worker каждые 30 секунд читает WhatsApp в read-only режиме и идемпотентно помещает
+последний неотвеченный входящий диалог в постоянную очередь. Группы, newsletters и
+технические JID не попадают в очередь. `sales_agent_next_action` всегда сначала
+возвращает незавершённое интервью или наиболее приоритетный ответ клиенту.
+Несопоставленный контакт можно вручную связать с подтверждённым CRM-лидом в кабинете
+или через `sales_link_agent_inbox_lead`; автоматическое угадывание запрещено.
+
+MCP не может самостоятельно разбудить закрытый чат ChatGPT. Поэтому фоновая часть
+надёжно собирает события, а ChatGPT продолжает работу при следующем обращении к
+плагину. Подготовленный ответ остаётся черновиком: автоматическая отправка запрещена.
+
 ## WhatsApp через кабинет
 
 1. Owner или operator открывает раздел «WhatsApp».
@@ -142,6 +172,14 @@ GET  /api/v1/audit
 GET  /api/v1/jobs
 GET  /api/v1/whatsapp/status
 GET  /api/v1/whatsapp/qr
+GET  /api/v1/company/profile
+PATCH /api/v1/company/profile
+GET  /api/v1/company/knowledge
+POST /api/v1/company/knowledge
+DELETE /api/v1/company/knowledge/{item_id}
+GET  /api/v1/agent/inbox
+POST /api/v1/agent/inbox/sync
+PATCH /api/v1/agent/inbox/{event_id}
 GET  /api/v1/workspace/members
 POST /api/v1/workspace/invitations
 PATCH /api/v1/workspace/members/{member_id}

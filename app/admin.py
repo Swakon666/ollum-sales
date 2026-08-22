@@ -21,6 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .agent_inbox import sync_whatsapp_inbox
 from .auth import AuthenticationError, OIDCSessionManager
 from .autopilot import AutopilotService
 from .config import Settings
@@ -500,6 +501,10 @@ async def api_bootstrap(
                 ),
                 "pending_invitations": len(invitations),
             },
+            "company_onboarding": context.crm.get_company_onboarding_state(
+                workspace_id
+            ),
+            "agent_inbox": context.crm.agent_inbox_summary(workspace_id),
             "overview": context.crm.overview(),
             "crm": context.crm.stats(),
             "autopilot": state,
@@ -576,6 +581,189 @@ async def api_whatsapp_qr(
             "Pragma": "no-cache",
         },
     )
+
+
+@admin_endpoint()
+async def api_company_profile(
+    _request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    workspace_id = str(user["workspace_id"])
+    return JSONResponse(context.crm.get_company_onboarding_state(workspace_id))
+
+
+@admin_endpoint(write=True)
+async def api_update_company_profile(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    allowed = {
+        "company_name",
+        "website_url",
+        "industry",
+        "geography",
+        "positioning",
+        "target_customer",
+        "sales_process",
+        "tone_of_voice",
+        "primary_goal",
+        "constraints",
+        "language",
+    }
+    unexpected = set(body) - allowed
+    if unexpected:
+        raise ValueError(
+            f"unsupported company profile fields: {', '.join(sorted(unexpected))}"
+        )
+    workspace_id = str(user["workspace_id"])
+    context.crm.update_company_profile(workspace_id, **body)
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="company.profile_update",
+        target_type="workspace",
+        target_id=workspace_id,
+        outcome="success",
+        details={"fields": sorted(body)},
+    )
+    return JSONResponse(context.crm.get_company_onboarding_state(workspace_id))
+
+
+@admin_endpoint()
+async def api_company_knowledge(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    return JSONResponse(
+        context.crm.list_company_knowledge(
+            str(user["workspace_id"]),
+            category=request.query_params.get("category") or None,
+            status=request.query_params.get("status") or "active",
+            limit=_bounded_int(
+                request.query_params.get("limit", 200),
+                name="limit",
+                minimum=1,
+                maximum=500,
+            ),
+        )
+    )
+
+
+@admin_endpoint(write=True)
+async def api_save_company_knowledge(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    result = context.crm.save_company_knowledge(
+        str(user["workspace_id"]),
+        category=str(body.get("category") or ""),
+        title=str(body.get("title") or ""),
+        content=body.get("content"),
+        source_type=str(body.get("source_type") or "dashboard"),
+        source_name=str(body.get("source_name") or "") or None,
+        item_id=str(body.get("item_id") or "") or None,
+    )
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="company.knowledge_save",
+        target_type="company_knowledge",
+        target_id=result["id"],
+        outcome="success",
+        details={"category": result["category"]},
+    )
+    return JSONResponse(result, status_code=201 if not body.get("item_id") else 200)
+
+
+@admin_endpoint(write=True)
+async def api_archive_company_knowledge(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    item_id = str(request.path_params["item_id"])
+    result = context.crm.archive_company_knowledge(str(user["workspace_id"]), item_id)
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="company.knowledge_archive",
+        target_type="company_knowledge",
+        target_id=item_id,
+        outcome="success",
+    )
+    return JSONResponse(result)
+
+
+@admin_endpoint()
+async def api_agent_inbox(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    return JSONResponse(
+        context.crm.list_agent_inbox_events(
+            str(user["workspace_id"]),
+            status=request.query_params.get("status") or None,
+            limit=_bounded_int(
+                request.query_params.get("limit", 100),
+                name="limit",
+                minimum=1,
+                maximum=500,
+            ),
+        )
+    )
+
+
+@admin_endpoint(write=True)
+async def api_sync_agent_inbox(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    result = sync_whatsapp_inbox(
+        context.crm,
+        str(user["workspace_id"]),
+        scan_limit=_bounded_int(
+            body.get("scan_limit", 100),
+            name="scan_limit",
+            minimum=1,
+            maximum=100,
+        ),
+    )
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="agent.inbox_sync",
+        target_type="workspace",
+        target_id=str(user["workspace_id"]),
+        outcome="success",
+        details={key: result[key] for key in ("new_events", "existing_events")},
+    )
+    return JSONResponse(result)
+
+
+@admin_endpoint(write=True)
+async def api_update_agent_inbox(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    workspace_id = str(user["workspace_id"])
+    event_id = str(request.path_params["event_id"])
+    status = str(body.get("status") or "").strip()
+    lead_id = str(body.get("lead_id") or "").strip()
+    if not status and not lead_id:
+        raise ValueError("status or lead_id is required")
+    result = context.crm.get_agent_inbox_event(workspace_id, event_id)
+    if lead_id:
+        result = context.crm.link_agent_inbox_event(workspace_id, event_id, lead_id)
+    if status:
+        result = context.crm.update_agent_inbox_event(
+            workspace_id,
+            event_id,
+            status=status,
+            draft_id=str(body.get("draft_id") or "") or None,
+        )
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="agent.inbox_status",
+        target_type="agent_inbox_event",
+        target_id=result["id"],
+        outcome="success",
+        details={
+            "status": result["status"],
+            "lead_linked": bool(lead_id),
+        },
+    )
+    return JSONResponse(result)
 
 
 @admin_endpoint()
@@ -980,6 +1168,30 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
         Route("/api/admin/session", api_session, methods=["GET"]),
         Route("/api/admin/whatsapp/status", api_whatsapp_status, methods=["GET"]),
         Route("/api/admin/whatsapp/qr", api_whatsapp_qr, methods=["GET"]),
+        Route("/api/admin/company/profile", api_company_profile, methods=["GET"]),
+        Route(
+            "/api/admin/company/profile",
+            api_update_company_profile,
+            methods=["PATCH"],
+        ),
+        Route("/api/admin/company/knowledge", api_company_knowledge, methods=["GET"]),
+        Route(
+            "/api/admin/company/knowledge",
+            api_save_company_knowledge,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/company/knowledge/{item_id:str}",
+            api_archive_company_knowledge,
+            methods=["DELETE"],
+        ),
+        Route("/api/admin/agent/inbox", api_agent_inbox, methods=["GET"]),
+        Route("/api/admin/agent/inbox/sync", api_sync_agent_inbox, methods=["POST"]),
+        Route(
+            "/api/admin/agent/inbox/{event_id:str}",
+            api_update_agent_inbox,
+            methods=["PATCH"],
+        ),
         Route("/api/admin/workspace/members", api_workspace_members, methods=["GET"]),
         Route(
             "/api/admin/workspace/invitations",
@@ -1018,6 +1230,30 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
         Route("/api/v1/session", api_session, methods=["GET"]),
         Route("/api/v1/whatsapp/status", api_whatsapp_status, methods=["GET"]),
         Route("/api/v1/whatsapp/qr", api_whatsapp_qr, methods=["GET"]),
+        Route("/api/v1/company/profile", api_company_profile, methods=["GET"]),
+        Route(
+            "/api/v1/company/profile",
+            api_update_company_profile,
+            methods=["PATCH"],
+        ),
+        Route("/api/v1/company/knowledge", api_company_knowledge, methods=["GET"]),
+        Route(
+            "/api/v1/company/knowledge",
+            api_save_company_knowledge,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/v1/company/knowledge/{item_id:str}",
+            api_archive_company_knowledge,
+            methods=["DELETE"],
+        ),
+        Route("/api/v1/agent/inbox", api_agent_inbox, methods=["GET"]),
+        Route("/api/v1/agent/inbox/sync", api_sync_agent_inbox, methods=["POST"]),
+        Route(
+            "/api/v1/agent/inbox/{event_id:str}",
+            api_update_agent_inbox,
+            methods=["PATCH"],
+        ),
         Route("/api/v1/workspace/members", api_workspace_members, methods=["GET"]),
         Route(
             "/api/v1/workspace/invitations",

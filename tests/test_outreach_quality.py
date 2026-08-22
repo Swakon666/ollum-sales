@@ -115,6 +115,36 @@ def test_reply_evaluation_distinguishes_price_answer_from_ignored_question() -> 
     )
 
 
+def test_saved_company_price_can_ground_a_numeric_reply() -> None:
+    inbound = "Сколько стоит базовый пакет?"
+    message = (
+        "Стоимость базового пакета — 120 000 ₽. Могу уточнить состав под вашу задачу?"
+    )
+
+    without_company_memory = evaluate_whatsapp_message(
+        _lead(), message, latest_inbound_message=inbound, mode="reply"
+    )
+    with_company_memory = evaluate_whatsapp_message(
+        _lead(),
+        message,
+        latest_inbound_message=inbound,
+        mode="reply",
+        company_evidence={
+            "knowledge": [
+                {
+                    "category": "price",
+                    "title": "Базовый пакет",
+                    "content": {"price": "120 000 ₽"},
+                }
+            ]
+        },
+    )
+
+    assert without_company_memory["verdict"] == "block"
+    assert with_company_memory["verdict"] == "pass"
+    assert with_company_memory["company_evidence_used"] is True
+
+
 def test_reply_without_inbound_context_is_blocked() -> None:
     quality = evaluate_whatsapp_message(
         _lead(),

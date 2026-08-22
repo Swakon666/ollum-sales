@@ -29,14 +29,16 @@
         </button>
         <nav class="nav-list" id="primary-navigation">
           <a class="nav-item is-active" href="#overview" data-view="overview"><span>01</span>Обзор</a>
-          <a class="nav-item" href="#leads" data-view="leads"><span>02</span>Лиды</a>
-          <a class="nav-item" href="#campaigns" data-view="campaigns"><span>03</span>Кампании</a>
-          <a class="nav-item" href="#drafts" data-view="drafts"><span>04</span>Черновики</a>
-          <a class="nav-item" href="#autopilot" data-view="autopilot"><span>05</span>Autopilot</a>
-          <a class="nav-item" href="#whatsapp" data-view="whatsapp"><span>06</span>WhatsApp</a>
-          <a class="nav-item" href="#plugin" data-view="plugin"><span>07</span>GPT-плагин</a>
-          <a class="nav-item" href="#team" data-view="team"><span>08</span>Команда</a>
-          <a class="nav-item" href="#audit" data-view="audit"><span>09</span>Аудит</a>
+          <a class="nav-item" href="#company" data-view="company"><span>02</span>Компания</a>
+          <a class="nav-item" href="#inbox" data-view="inbox"><span>03</span>Входящие</a>
+          <a class="nav-item" href="#leads" data-view="leads"><span>04</span>Лиды</a>
+          <a class="nav-item" href="#campaigns" data-view="campaigns"><span>05</span>Кампании</a>
+          <a class="nav-item" href="#drafts" data-view="drafts"><span>06</span>Черновики</a>
+          <a class="nav-item" href="#autopilot" data-view="autopilot"><span>07</span>Autopilot</a>
+          <a class="nav-item" href="#whatsapp" data-view="whatsapp"><span>08</span>WhatsApp</a>
+          <a class="nav-item" href="#plugin" data-view="plugin"><span>09</span>GPT-плагин</a>
+          <a class="nav-item" href="#team" data-view="team"><span>10</span>Команда</a>
+          <a class="nav-item" href="#audit" data-view="audit"><span>11</span>Аудит</a>
         </nav>
         <div class="sidebar-footer">
           <div class="connection-state">
@@ -100,7 +102,53 @@
           </div>
         </section>
 
-        <section class="view" data-panel="leads" data-section="02">
+        <section class="view" data-panel="company" data-section="02">
+          <div class="section-heading">
+            <div><p class="eyebrow">Agent memory</p><h2>Профиль компании</h2><p class="muted">Единая память для ChatGPT, кабинета, scoring и персональных ответов.</p></div>
+            <span class="readiness-badge" id="onboarding-readiness">Не заполнено</span>
+          </div>
+          <div class="onboarding-progress" aria-label="Прогресс настройки"><span id="onboarding-progress-bar"></span></div>
+          <div class="dashboard-grid company-workspace">
+            <article class="card span-2">
+              <div class="card-header"><div><p class="eyebrow">Profile</p><h3>Основные параметры</h3></div><span class="timestamp" id="company-profile-updated">—</span></div>
+              <form id="company-profile-form" class="stack-form profile-form">
+                <div class="two-columns"><label>Компания<input name="company_name" maxlength="200" autocomplete="organization"></label><label>Сайт<input name="website_url" type="url" maxlength="2048" placeholder="https://example.com" autocomplete="url"></label></div>
+                <div class="two-columns"><label>Отрасль<input name="industry" maxlength="300"></label><label>География<input name="geography" maxlength="800"></label></div>
+                <label>Идеальный клиент<textarea name="target_customer" rows="3" maxlength="4000"></textarea></label>
+                <label>Позиционирование и отличия<textarea name="positioning" rows="3" maxlength="4000"></textarea></label>
+                <label>Процесс продажи<textarea name="sales_process" rows="3" maxlength="6000"></textarea></label>
+                <div class="two-columns"><label>Главная цель<textarea name="primary_goal" rows="2" maxlength="3000"></textarea></label><label>Тон общения<textarea name="tone_of_voice" rows="2" maxlength="3000"></textarea></label></div>
+                <label>Ограничения и запрещённые обещания<textarea name="constraints" rows="2" maxlength="6000"></textarea></label>
+                <div class="form-footer"><small class="muted">Изменения сохраняются без перезагрузки и сразу доступны плагину.</small><button class="primary-button" type="submit">Сохранить профиль</button></div>
+              </form>
+            </article>
+            <article class="card">
+              <div class="card-header"><div><p class="eyebrow">Interview</p><h3>Следующие вопросы</h3></div></div>
+              <div class="compact-list" id="onboarding-questions"></div>
+            </article>
+            <article class="card span-3">
+              <div class="card-header"><div><p class="eyebrow">Knowledge base</p><h3>Услуги, цены, кейсы и клиенты</h3></div><span class="timestamp" id="knowledge-count">0 записей</span></div>
+              <form id="knowledge-form" class="inline-knowledge-form">
+                <label>Тип<select name="category"><option value="service">Услуга</option><option value="price">Цена / пакет</option><option value="case">Кейс</option><option value="closed_client">Закрытый клиент</option><option value="current_client">Клиент в работе</option><option value="proof">Подтверждение</option><option value="objection">Возражение</option><option value="constraint">Ограничение</option><option value="faq">FAQ</option><option value="sales_process">Процесс продажи</option><option value="document">Документ</option></select></label>
+                <label>Название<input name="title" maxlength="240" required></label>
+                <label class="knowledge-content">Факты<textarea name="content" rows="2" required placeholder="Только подтверждённая информация"></textarea></label>
+                <button class="secondary-button" type="submit">Добавить факт</button>
+              </form>
+              <div class="knowledge-grid" id="knowledge-grid"></div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" data-panel="inbox" data-section="03">
+          <div class="section-heading">
+            <div><p class="eyebrow">Agent queue</p><h2>Входящие обращения</h2><p class="muted">Последние неотвеченные сообщения. Текст используется как недоверенный контекст, отправка отсюда невозможна.</p></div>
+            <div class="hero-actions"><select id="inbox-status-filter" aria-label="Статус входящего"><option value="">Все</option><option value="new">Новые</option><option value="acknowledged">В работе</option><option value="drafted">Черновик готов</option><option value="resolved">Закрытые</option><option value="ignored">Игнор</option></select><button class="secondary-button" id="sync-inbox-button">Проверить WhatsApp</button></div>
+          </div>
+          <div class="metric-grid compact-metrics" id="inbox-metrics"></div>
+          <article class="table-card inbox-table-card"><div class="table-wrap"><table class="inbox-table"><thead><tr><th>Получено</th><th>Контакт</th><th>Сообщение</th><th>Лид</th><th>Статус</th><th></th></tr></thead><tbody id="inbox-table"></tbody></table></div></article>
+        </section>
+
+        <section class="view" data-panel="leads" data-section="04">
           <div class="section-heading">
             <div><p class="eyebrow">CRM</p><h2>Лиды</h2><p class="muted">Grounded evidence, score и текущая стадия.</p></div>
             <div class="filter-bar">
@@ -113,7 +161,7 @@
           <div class="pagination" id="leads-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="campaigns" data-section="03">
+        <section class="view" data-panel="campaigns" data-section="05">
           <div class="section-heading">
             <div><p class="eyebrow">Discovery</p><h2>Кампании</h2><p class="muted">Сохранённые рынки и прогресс сбора компаний.</p></div>
             <button class="primary-button" id="new-campaign-button">Новая кампания</button>
@@ -122,7 +170,7 @@
           <div class="pagination" id="campaigns-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="drafts" data-section="04">
+        <section class="view" data-panel="drafts" data-section="06">
           <div class="section-heading">
             <div><p class="eyebrow">Outreach</p><h2>Черновики</h2><p class="muted">Проверка точного получателя и текста. Одобрение не отправляет сообщение.</p></div>
             <select id="draft-status-filter" name="draft_status" aria-label="Статус черновика"><option value="">Все статусы</option><option value="draft">Требует проверки</option><option value="approved">Одобрен</option><option value="sent">Отправлен</option><option value="failed">Ошибка</option></select>
@@ -131,7 +179,7 @@
           <div class="pagination" id="drafts-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="autopilot" data-section="05">
+        <section class="view" data-panel="autopilot" data-section="07">
           <div class="section-heading">
             <div><p class="eyebrow">Automation</p><h2>Autopilot</h2><p class="muted">Управление расписанием и вертикалями в SAFE-контуре.</p></div>
             <div class="hero-actions"><button class="secondary-button" data-action="stop-autopilot">Остановить</button><button class="primary-button" data-action="start-autopilot">Запустить SAFE</button></div>
@@ -143,7 +191,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="whatsapp" data-section="06">
+        <section class="view" data-panel="whatsapp" data-section="08">
           <div class="section-heading">
             <div><p class="eyebrow">Channel</p><h2>Подключение WhatsApp</h2><p class="muted">Привязка устройства выполняется здесь. QR временный и доступен только после входа в кабинет.</p></div>
             <div class="hero-actions"><span class="readiness-badge" id="whatsapp-state">Проверка…</span><button class="secondary-button" id="refresh-whatsapp-button">Обновить</button></div>
@@ -165,7 +213,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="team" data-section="08">
+        <section class="view" data-panel="team" data-section="10">
           <div class="section-heading">
             <div><p class="eyebrow">Workspace</p><h2>Команда и доступ</h2><p class="muted">Единые роли действуют и в кабинете, и в GPT-плагине через OAuth.</p></div>
             <span class="readiness-badge is-ready" id="workspace-role">—</span>
@@ -191,7 +239,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="plugin" data-section="07">
+        <section class="view" data-panel="plugin" data-section="09">
           <div class="section-heading"><div><p class="eyebrow">ChatGPT</p><h2>GPT-плагин</h2><p class="muted">OAuth 2.1 + PKCE, HTTPS и MCP Streamable HTTP.</p></div><span class="readiness-badge" id="plugin-readiness">Проверка…</span></div>
           <div class="dashboard-grid">
             <article class="card span-2"><div class="card-header"><div><p class="eyebrow">Connection</p><h3>Параметры подключения</h3></div></div><div class="copy-fields" id="plugin-fields"></div></article>
@@ -200,7 +248,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="audit" data-section="09">
+        <section class="view" data-panel="audit" data-section="11">
           <div class="section-heading"><div><p class="eyebrow">Governance</p><h2>Журнал действий</h2><p class="muted">В журнал не попадают токены, секреты и полный текст переписки.</p></div></div>
           <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Время</th><th>Оператор</th><th>Действие</th><th>Объект</th><th>Результат</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
           <div class="pagination" id="audit-pagination" aria-live="polite"></div>

@@ -73,6 +73,81 @@ MEMBERS = [
     },
 ]
 
+COMPANY_ONBOARDING = {
+    "profile": {
+        "workspace_id": "ollum-group",
+        "company_name": "Ollum Group",
+        "website_url": "https://ollumgroup.ru",
+        "industry": "Digital production",
+        "geography": "Россия и worldwide",
+        "positioning": "Digital-студия полного цикла",
+        "target_customer": "Компании, которым нужен собственный канал продаж",
+        "sales_process": "Диагностика, план проекта, предложение, запуск",
+        "tone_of_voice": "Коротко, конкретно, без неподтверждённых обещаний",
+        "primary_goal": "Квалифицированные обращения",
+        "constraints": "Не раскрывать данные клиентов под NDA",
+        "language": "ru",
+        "onboarding_status": "in_progress",
+        "revision": 7,
+        "updated_at": "2026-08-23T10:20:00+00:00",
+    },
+    "knowledge_counts": {"service": 2, "price": 1, "case": 1},
+    "completion_percent": 92,
+    "ready_for_sales": True,
+    "missing": ["active_clients"],
+    "next_questions": [
+        {
+            "id": "pipeline",
+            "prompt": "Какие клиенты сейчас в работе и как устроены стадии продажи?",
+            "accepts": ["free_text", "file"],
+        }
+    ],
+    "onboarding_status": "in_progress",
+}
+
+COMPANY_KNOWLEDGE = [
+    {
+        "id": "knowledge-service",
+        "category": "service",
+        "title": "Разработка сайтов",
+        "content": {"description": "Стратегия, UX/UI, разработка и запуск под ключ"},
+        "source_type": "chat",
+        "status": "active",
+    },
+    {
+        "id": "knowledge-price",
+        "category": "price",
+        "title": "Правило расчёта",
+        "content": {
+            "description": "Точная стоимость определяется после диагностики задачи"
+        },
+        "source_type": "file",
+        "source_name": "Прайс.pdf",
+        "status": "active",
+    },
+]
+
+AGENT_INBOX = [
+    {
+        "id": "inbox-1",
+        "chat_jid": "79990000001@s.whatsapp.net",
+        "sender_label": "Тестовый клиент",
+        "message_text": "Подскажите, с чего начинается работа и как оценивается проект?",
+        "received_at": "2026-08-23T10:25:00+00:00",
+        "status": "new",
+        "lead_id": "lead-1",
+    },
+    {
+        "id": "inbox-2",
+        "chat_jid": "79990000002@s.whatsapp.net",
+        "sender_label": "Новый контакт",
+        "message_text": "Можно получить примеры похожих проектов?",
+        "received_at": "2026-08-23T10:28:00+00:00",
+        "status": "new",
+        "lead_id": None,
+    },
+]
+
 
 def bootstrap() -> dict[str, Any]:
     whatsapp = {
@@ -91,6 +166,15 @@ def bootstrap() -> dict[str, Any]:
             "status": "active",
             "active_members": 2,
             "pending_invitations": 1,
+        },
+        "company_onboarding": COMPANY_ONBOARDING,
+        "agent_inbox": {
+            "new": 2,
+            "acknowledged": 0,
+            "drafted": 0,
+            "resolved": 0,
+            "ignored": 0,
+            "total": 2,
         },
         "overview": {
             "lead_count": 24,
@@ -201,7 +285,9 @@ async def index(_request) -> Response:
 
 async def preview_api(request) -> Response:
     if request.method != "GET":
-        return JSONResponse({"error": "Preview mutations are disabled"}, status_code=405)
+        return JSONResponse(
+            {"error": "Preview mutations are disabled"}, status_code=405
+        )
     path = request.url.path
     payload = bootstrap()
     if path == "/api/v1/bootstrap":
@@ -228,6 +314,12 @@ async def preview_api(request) -> Response:
                 ],
             }
         )
+    if path == "/api/v1/company/profile":
+        return JSONResponse(COMPANY_ONBOARDING)
+    if path == "/api/v1/company/knowledge":
+        return JSONResponse(COMPANY_KNOWLEDGE)
+    if path == "/api/v1/agent/inbox":
+        return JSONResponse(AGENT_INBOX)
     if path == "/api/v1/whatsapp/status":
         return JSONResponse(
             {

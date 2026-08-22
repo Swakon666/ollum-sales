@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from app import agent_inbox
+from app.crm import SalesCRM
+
+
+def test_sync_whatsapp_inbox_queues_only_latest_unanswered_private_chats(
+    tmp_path, monkeypatch
+) -> None:
+    crm = SalesCRM(tmp_path / "sales.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    lead = crm.upsert_lead(
+        "Known Lead",
+        "https://known-lead.test",
+        phones=["+7 999 123-45-67"],
+    )
+    messages = [
+        {
+            "id": "m-1",
+            "timestamp": "2026-08-23T10:00:00+00:00",
+            "chat_jid": "79991234567@s.whatsapp.net",
+            "chat_name": "Known contact",
+            "content": "Какие сроки запуска?",
+            "is_from_me": False,
+            "media_type": None,
+        },
+        {
+            "id": "m-2",
+            "timestamp": "2026-08-23T09:59:00+00:00",
+            "chat_jid": "78880000000@s.whatsapp.net",
+            "chat_name": "Already answered",
+            "content": "Наш ответ",
+            "is_from_me": True,
+            "media_type": None,
+        },
+        {
+            "id": "m-3",
+            "timestamp": "2026-08-23T09:58:00+00:00",
+            "chat_jid": "78880000000@s.whatsapp.net",
+            "chat_name": "Already answered",
+            "content": "Старый вопрос",
+            "is_from_me": False,
+            "media_type": None,
+        },
+        {
+            "id": "m-4",
+            "timestamp": "2026-08-23T09:57:00+00:00",
+            "chat_jid": "77770000000@s.whatsapp.net",
+            "chat_name": "New contact",
+            "content": "",
+            "is_from_me": False,
+            "media_type": "image",
+        },
+        {
+            "id": "m-5",
+            "timestamp": "2026-08-23T09:56:00+00:00",
+            "chat_jid": "12345@g.us",
+            "chat_name": "Group",
+            "content": "Групповое сообщение",
+            "is_from_me": False,
+            "media_type": None,
+        },
+    ]
+    monkeypatch.setattr(agent_inbox, "list_messages", lambda limit: messages[:limit])
+
+    first = agent_inbox.sync_whatsapp_inbox(crm, "ollum-group")
+    second = agent_inbox.sync_whatsapp_inbox(crm, "ollum-group")
+
+    assert first["new_events"] == 2
+    assert first["matched_leads"] == 1
+    assert first["unmatched_leads"] == 1
+    assert second["new_events"] == 0
+    queued = crm.list_agent_inbox_events("ollum-group", status="new")
+    assert {item["external_id"] for item in queued} == {"m-1", "m-4"}
+    known = next(item for item in queued if item["external_id"] == "m-1")
+    assert known["lead_id"] == lead["id"]
+    attachment = next(item for item in queued if item["external_id"] == "m-4")
+    assert attachment["message_text"] == "[WhatsApp attachment: image]"
+
+
+def test_next_action_moves_from_interview_to_inbound_reply_without_sending(
+    tmp_path,
+) -> None:
+    crm = SalesCRM(tmp_path / "workflow.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    first = agent_inbox.next_agent_action(crm, "ollum-group")
+    assert first["action"] == "continue_company_onboarding"
+    assert len(first["onboarding"]["next_questions"]) <= 3
+
+    crm.update_company_profile(
+        "ollum-group",
+        company_name="Example Studio",
+        industry="Digital services",
+        target_customer="B2B companies",
+        positioning="Grounded sales automation",
+    )
+    crm.save_company_knowledge(
+        "ollum-group",
+        category="service",
+        title="Sales agent",
+        content={"details": "research, scoring and reply drafts"},
+    )
+    crm.save_company_knowledge(
+        "ollum-group",
+        category="price",
+        title="Custom estimate",
+        content={"details": "calculated after discovery"},
+    )
+    review = agent_inbox.next_agent_action(crm, "ollum-group")
+    assert review["action"] == "review_company_onboarding"
+    crm.complete_company_onboarding("ollum-group", confirm_ready=True)
+
+    lead = crm.upsert_lead(
+        "Prospect",
+        "https://prospect.test",
+        phones=["+7 999 111-22-33"],
+    )
+    event, _created = crm.upsert_agent_inbox_event(
+        "ollum-group",
+        external_id="reply-1",
+        chat_jid="79991112233@s.whatsapp.net",
+        message_text="Сколько это стоит?",
+        received_at="2026-08-23T11:00:00+00:00",
+        lead_id=lead["id"],
+    )
+    reply = agent_inbox.next_agent_action(crm, "ollum-group")
+    assert reply["action"] == "prepare_whatsapp_reply"
+    assert reply["inbox_event"]["id"] == event["id"]
+    assert reply["external_side_effect"] is False
+    assert "two separate" in reply["instruction"]
+
+    crm.update_agent_inbox_event("ollum-group", event["id"], status="acknowledged")
+    idle = agent_inbox.next_agent_action(crm, "ollum-group")
+    assert idle["action"] == "continue_safe_lead_work"
+    assert idle["external_side_effect"] is False
