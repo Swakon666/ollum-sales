@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import mimetypes
 import threading
 import time
 import uuid
@@ -34,6 +35,7 @@ from .whatsapp_service import (
 logger = logging.getLogger("ollum-sales-admin")
 STATIC_ROOT = Path(__file__).with_name("admin_static")
 ROLE_RANK = {"viewer": 0, "operator": 1, "owner": 2}
+mimetypes.add_type("font/woff2", ".woff2")
 
 
 class AdminRequestError(RuntimeError):
