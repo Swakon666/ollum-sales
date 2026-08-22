@@ -111,6 +111,23 @@ def test_runtime_containers_are_unprivileged_and_read_only() -> None:
     assert "chown -R 10001:10001 /data/crm /data/whatsapp" in deploy
 
 
+def test_google_credentials_are_private_and_readable_by_runtime_user() -> None:
+    compose = (REPOSITORY_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    deploy = (REPOSITORY_ROOT / "deploy" / "remote_deploy.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert compose.count("/run/secrets/ollum-google-service-account.json:ro") == 2
+    assert "install_runtime_google_credentials" in deploy
+    assert "install -m 0400 -o 10001 -g 10001" in deploy
+    assert "10001:10001:400" in deploy
+    assert 'install_runtime_google_credentials "$incoming_google_credentials"' in deploy
+    assert (
+        'install_runtime_google_credentials "$shared_google_credentials_backup"'
+        in deploy
+    )
+
+
 def test_backup_and_restore_require_encryption_integrity_and_confirmation() -> None:
     backup = (REPOSITORY_ROOT / "deploy" / "backup_data.sh").read_text(encoding="utf-8")
     restore = (REPOSITORY_ROOT / "deploy" / "restore_data.sh").read_text(
