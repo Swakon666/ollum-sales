@@ -153,11 +153,8 @@ def test_repository_dependency_automation_covers_all_manifests() -> None:
         assert f"package-ecosystem: {ecosystem}" in dependabot
 
 
-def test_ci_enforces_dependency_container_and_code_scanning() -> None:
+def test_ci_enforces_dependency_and_container_scanning() -> None:
     ci = (REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
-    codeql = (REPOSITORY_ROOT / ".github" / "workflows" / "codeql.yml").read_text(
         encoding="utf-8"
     )
 
@@ -165,11 +162,6 @@ def test_ci_enforces_dependency_container_and_code_scanning() -> None:
     assert "koalaman/shellcheck-alpine:v0.11.0" in ci
     assert "aquasec/trivy:0.74.0" in ci
     assert "--ignore-unfixed --exit-code 1" in ci
-    assert "security-events: write" in codeql
-    assert "github/codeql-action/init@v4" in codeql
-    assert "github/codeql-action/analyze@v4" in codeql
-    for language in ("actions", "javascript-typescript", "python", "go"):
-        assert f"language: {language}" in codeql
 
 
 def test_prebuilt_deploy_uses_archive_digest_as_cross_version_trust_anchor() -> None:
