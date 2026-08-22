@@ -215,7 +215,9 @@ class TestWhatsAppService(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Technical WhatsApp JIDs"):
             whatsapp_service.normalize_recipient("0@s.whatsapp.net")
 
-    def test_list_messages_returns_structured_records_in_latest_first_order(self) -> None:
+    def test_list_messages_returns_structured_records_in_latest_first_order(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database_path = Path(directory) / "messages.db"
             self._create_message_database(database_path)

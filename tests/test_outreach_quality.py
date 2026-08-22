@@ -63,8 +63,7 @@ def test_first_touch_is_not_created_without_grounded_problem_and_service() -> No
 
 def test_quality_gate_blocks_fabricated_name_guarantee_and_numeric_promise() -> None:
     message = (
-        "Здравствуйте, Иван! Гарантируем рост заявок на 35% за 7 дней. "
-        "Давайте начнём?"
+        "Здравствуйте, Иван! Гарантируем рост заявок на 35% за 7 дней. Давайте начнём?"
     )
     quality = evaluate_whatsapp_message(_lead(), message, mode="first_touch")
     codes = {item["code"] for item in quality["issues"]}
@@ -125,9 +124,7 @@ def test_reply_without_inbound_context_is_blocked() -> None:
 
     assert quality["verdict"] == "block"
     assert quality["safe_to_save_as_draft"] is False
-    assert any(
-        item["code"] == "missing_inbound_context" for item in quality["issues"]
-    )
+    assert any(item["code"] == "missing_inbound_context" for item in quality["issues"])
 
 
 def test_candidate_comparison_prefers_direct_grounded_reply() -> None:

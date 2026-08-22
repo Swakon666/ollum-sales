@@ -110,6 +110,4 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["save_reply_annotations"]["readOnlyHint"] is False
     assert payload["save_reply_annotations"]["destructiveHint"] is False
     assert payload["save_reply_annotations"]["openWorldHint"] is True
-    assert payload["save_reply_meta"]["securitySchemes"][0]["scopes"] == [
-        "sales:write"
-    ]
+    assert payload["save_reply_meta"]["securitySchemes"][0]["scopes"] == ["sales:write"]

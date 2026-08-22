@@ -226,9 +226,7 @@ def list_messages(
     params: list[Any] = []
 
     if normalized_phone:
-        where_clauses.append(
-            "(m.sender = ? OR m.sender = ? OR m.sender LIKE ?)"
-        )
+        where_clauses.append("(m.sender = ? OR m.sender = ? OR m.sender LIKE ?)")
         params.extend(
             [
                 normalized_phone,

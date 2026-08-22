@@ -82,8 +82,22 @@ _SENSITIVE_OUTPUT_MARKERS = (
 
 _INTENTS: dict[str, dict[str, Any]] = {
     "opt_out": {
-        "patterns": ("не интересно", "неактуально", "не актуально", "не пишите", "отпишите", "стоп"),
-        "response_terms": ("понял", "поняла", "принято", "больше не", "не буду", "спасибо"),
+        "patterns": (
+            "не интересно",
+            "неактуально",
+            "не актуально",
+            "не пишите",
+            "отпишите",
+            "стоп",
+        ),
+        "response_terms": (
+            "понял",
+            "поняла",
+            "принято",
+            "больше не",
+            "не буду",
+            "спасибо",
+        ),
         "goal": "Коротко подтвердить отказ и завершить диалог без нового предложения.",
     },
     "price": {
@@ -239,7 +253,9 @@ def evaluate_whatsapp_message(
     if not text:
         issue("empty_message", "block", "Текст ответа пуст.")
     elif len(text) < 35:
-        issue("too_short", "major", "Текст слишком короткий для содержательного ответа.")
+        issue(
+            "too_short", "major", "Текст слишком короткий для содержательного ответа."
+        )
     else:
         passed.append("message_has_substance")
 
@@ -374,9 +390,7 @@ def evaluate_whatsapp_message(
             passed.append("contact_name_verified")
 
     intents = detect_inbound_intents(latest_inbound_message)
-    if mode == "reply" and not " ".join(
-        str(latest_inbound_message or "").split()
-    ):
+    if mode == "reply" and not " ".join(str(latest_inbound_message or "").split()):
         issue(
             "missing_inbound_context",
             "block",
