@@ -7,6 +7,7 @@ import time
 from .agent_inbox import sync_whatsapp_inbox
 from .autopilot import AutopilotService
 from .config import settings
+from .conversation_agent import ConversationAgent
 from .crm import SalesCRM
 from .google_sheets import GoogleSheetsSync
 
@@ -41,6 +42,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _stop)
     signal.signal(signal.SIGINT, _stop)
     service = create_service()
+    conversation_agent = ConversationAgent(service.crm, settings)
     logger.info("worker started; SAFE remains the default mode")
     while not stopping:
         try:
@@ -54,6 +56,16 @@ def main() -> None:
                     "queued %s new WhatsApp inbound event(s)",
                     inbox["new_events"],
                 )
+            dialogue = conversation_agent.process_pending(
+                settings.default_workspace_id,
+                limit=settings.conversation_agent_batch_size,
+            )
+            if dialogue["drafts_created"] or dialogue["escalated"]:
+                logger.info(
+                    "conversation agent created %s draft(s), escalated %s event(s)",
+                    dialogue["drafts_created"],
+                    dialogue["escalated"],
+                )
             state = service.status()
             if state["running"]:
                 result = service.run_cycle()
@@ -63,7 +75,9 @@ def main() -> None:
                     logger.warning("autopilot cycle failed: %s", result)
         except Exception:
             logger.exception("worker iteration failed")
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + max(
+            5, int(settings.conversation_agent_poll_seconds)
+        )
         while not stopping and time.monotonic() < deadline:
             time.sleep(1)
     logger.info("worker stopped")

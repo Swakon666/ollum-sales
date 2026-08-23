@@ -67,8 +67,9 @@ def test_sync_whatsapp_inbox_queues_only_latest_unanswered_private_chats(
     second = agent_inbox.sync_whatsapp_inbox(crm, "ollum-group")
 
     assert first["new_events"] == 2
-    assert first["matched_leads"] == 1
-    assert first["unmatched_leads"] == 1
+    assert first["matched_leads"] == 2
+    assert first["unmatched_leads"] == 0
+    assert first["created_inbound_contacts"] == 1
     assert second["new_events"] == 0
     queued = crm.list_agent_inbox_events("ollum-group", status="new")
     assert {item["external_id"] for item in queued} == {"m-1", "m-4"}
@@ -76,6 +77,7 @@ def test_sync_whatsapp_inbox_queues_only_latest_unanswered_private_chats(
     assert known["lead_id"] == lead["id"]
     attachment = next(item for item in queued if item["external_id"] == "m-4")
     assert attachment["message_text"] == "[WhatsApp attachment: image]"
+    assert attachment["lead_id"] is not None
 
 
 def test_next_action_moves_from_interview_to_inbound_reply_without_sending(

@@ -57,7 +57,7 @@ Configure these repository secrets under **Settings â†’ Secrets and variables â†
 | `OLLUM_ADMIN_ALLOWED_EMAILS` | OIDC cabinet | Comma-separated bootstrap allowlist |
 | `OLLUM_WORKSPACE_OWNER_EMAILS` | OIDC cabinet | Comma-separated owner emails |
 | `OLLUM_ADMIN_SESSION_SECRET` | OIDC cabinet | At least 32 random bytes |
-| `OPENAI_API_KEY` | for OpenAI | ScrapeGraphAI provider credential |
+| `OPENAI_API_KEY` | for OpenAI | ScrapeGraphAI and autonomous conversation-agent credential |
 | `LLM_API_KEY` | optional | Generic provider credential override |
 | `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
 | `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
@@ -80,6 +80,8 @@ OLLUM_ADMIN_ENABLED=true
 OLLUM_ADMIN_OIDC_CLIENT_ID=<regular web application client id>
 OLLUM_DEFAULT_WORKSPACE_ID=ollum-group
 OLLUM_DEFAULT_WORKSPACE_NAME=Ollum Group
+OLLUM_CONVERSATION_AGENT_ENABLED=true
+OLLUM_CONVERSATION_AGENT_MODEL=gpt-5.6-luna
 ```
 
 Also configure `OLLUM_GOOGLE_SHEETS_ID` with the target spreadsheet ID. Production

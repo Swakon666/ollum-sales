@@ -155,7 +155,9 @@ class SalesCRMTests(unittest.TestCase):
             phones=["+7 (999) 123-45-67"],
         )
         with self.crm.connect() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], 10
+            )
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
             }
@@ -525,6 +527,104 @@ class SalesCRMTests(unittest.TestCase):
             self.crm.get_agent_inbox_event("ollum-group", event["id"])["status"],
             "resolved",
         )
+
+    def test_conversation_agent_settings_sessions_and_queue_lease_are_persistent(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        defaults = self.crm.get_conversation_agent_settings(workspace_id)
+        self.assertTrue(defaults["enabled"])
+        self.assertFalse(defaults["send_enabled"])
+
+        updated = self.crm.update_conversation_agent_settings(
+            workspace_id,
+            niche="e-commerce",
+            tone="Кратко и по делу",
+            qualification_questions=["Какой каталог?", "Какая география?"],
+            forbidden_topics=["Неподтверждённые скидки"],
+            escalation_rules=["Передать менеджеру вопросы по договору"],
+            max_context_messages=999,
+            max_reply_chars=20,
+            confidence_threshold=99,
+        )
+        self.assertEqual(updated["niche"], "e-commerce")
+        self.assertEqual(updated["max_context_messages"], 30)
+        self.assertEqual(updated["max_reply_chars"], 120)
+        self.assertEqual(updated["confidence_threshold"], 95)
+        self.assertEqual(len(updated["qualification_questions"]), 2)
+
+        lead = self.crm.upsert_lead(
+            "Conversation Lead",
+            "https://conversation-lease.test",
+            phones=["+79990000001"],
+        )
+        event, _created = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="lease-event",
+            chat_jid="79990000001@s.whatsapp.net",
+            message_text="Есть вопрос",
+            received_at="2026-08-23T12:00:00+00:00",
+            lead_id=lead["id"],
+        )
+        claimed = self.crm.claim_next_agent_inbox_event(workspace_id)
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed["id"], event["id"])
+        self.assertEqual(claimed["status"], "processing")
+        self.assertEqual(claimed["agent_attempts"], 1)
+        self.assertIsNone(self.crm.claim_next_agent_inbox_event(workspace_id))
+
+        self.crm.finish_agent_inbox_event(
+            workspace_id,
+            event["id"],
+            status="new",
+            error="temporary",
+        )
+        retried = self.crm.claim_next_agent_inbox_event(workspace_id)
+        assert retried is not None
+        self.assertEqual(retried["agent_attempts"], 2)
+        self.crm.finish_agent_inbox_event(
+            workspace_id,
+            event["id"],
+            status="needs_review",
+            decision={"action": "escalate", "approved": False, "sent": False},
+        )
+
+        first = self.crm.upsert_conversation_session(
+            workspace_id,
+            "79990000001@s.whatsapp.net",
+            lead_id=lead["id"],
+            stage="qualification",
+            intent="price",
+            summary="Уточняет стоимость",
+            facts={"budget_known": False},
+            increment_turn=True,
+        )
+        second = self.crm.upsert_conversation_session(
+            workspace_id,
+            "79990000001@s.whatsapp.net",
+            lead_id=lead["id"],
+            stage="interested",
+            intent="demo",
+            summary="Готов посмотреть решение",
+            facts={"budget_known": False, "demo_requested": True},
+            increment_turn=True,
+        )
+        self.assertEqual(first["turn_count"], 1)
+        self.assertEqual(second["turn_count"], 2)
+
+        reopened = SalesCRM(self.crm.db_path)
+        self.assertEqual(
+            reopened.get_conversation_agent_settings(workspace_id)["niche"],
+            "e-commerce",
+        )
+        session = reopened.get_conversation_session(
+            workspace_id, "79990000001@s.whatsapp.net"
+        )
+        assert session is not None
+        self.assertEqual(session["stage"], "interested")
+        self.assertTrue(session["facts"]["demo_requested"])
 
 
 if __name__ == "__main__":

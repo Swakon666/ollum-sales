@@ -414,6 +414,12 @@ jobs:
             printf 'OLLUM_WORKSPACE_OWNER_EMAILS=%s\n' "${WORKSPACE_OWNER_EMAILS:-${ADMIN_ALLOWED_EMAILS:-}}"
             printf 'SCRAPEGRAPH_MODEL=%s\n' "$model"
             printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-}"
+            printf 'OLLUM_CONVERSATION_AGENT_ENABLED=true\n'
+            printf 'OLLUM_CONVERSATION_AGENT_MODEL=gpt-5.6-luna\n'
+            printf 'OLLUM_CONVERSATION_AGENT_POLL_SECONDS=30\n'
+            printf 'OLLUM_CONVERSATION_AGENT_BATCH_SIZE=3\n'
+            printf 'OLLUM_CONVERSATION_AGENT_TIMEOUT_SECONDS=90\n'
+            printf 'OLLUM_CONVERSATION_AGENT_MAX_REVISIONS=2\n'
             printf 'LLM_API_KEY=%s\n' "${LLM_API_KEY:-}"
             printf 'SERPER_API_KEY=%s\n' "${SERPER_API_KEY:-}"
             printf 'WHATSAPP_API_BASE_URL=http://whatsapp-bridge:8080/api\n'

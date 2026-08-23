@@ -65,7 +65,26 @@ COMPANY_KNOWLEDGE_CATEGORIES = {
     "sales_process",
 }
 COMPANY_KNOWLEDGE_STATUSES = {"active", "archived"}
-AGENT_INBOX_STATUSES = {"new", "acknowledged", "drafted", "resolved", "ignored"}
+AGENT_INBOX_STATUSES = {
+    "new",
+    "acknowledged",
+    "processing",
+    "drafted",
+    "needs_review",
+    "resolved",
+    "ignored",
+}
+CONVERSATION_AUTONOMY_MODES = {"observe", "draft"}
+CONVERSATION_STAGES = {
+    "new",
+    "discovery",
+    "qualification",
+    "interested",
+    "objection",
+    "proposal",
+    "handoff",
+    "closed",
+}
 WEEKDAYS = {
     "monday",
     "tuesday",
@@ -399,9 +418,56 @@ class SalesCRM:
                     received_at TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'new',
                     draft_id TEXT REFERENCES outreach_drafts(id) ON DELETE SET NULL,
+                    agent_attempts INTEGER NOT NULL DEFAULT 0,
+                    agent_lock_until TEXT,
+                    agent_error TEXT,
+                    decision_json TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     UNIQUE (workspace_id, source, external_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_agent_settings (
+                    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    autonomy_mode TEXT NOT NULL DEFAULT 'draft',
+                    niche TEXT NOT NULL DEFAULT 'auto',
+                    objective TEXT,
+                    instructions TEXT,
+                    tone TEXT,
+                    qualification_questions_json TEXT NOT NULL DEFAULT '[]',
+                    forbidden_topics_json TEXT NOT NULL DEFAULT '[]',
+                    escalation_rules_json TEXT NOT NULL DEFAULT '[]',
+                    max_context_messages INTEGER NOT NULL DEFAULT 12,
+                    max_reply_chars INTEGER NOT NULL DEFAULT 700,
+                    confidence_threshold INTEGER NOT NULL DEFAULT 65,
+                    auto_create_inbound_leads INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS conversation_sessions (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    channel TEXT NOT NULL DEFAULT 'whatsapp',
+                    external_chat_id TEXT NOT NULL,
+                    lead_id TEXT REFERENCES leads(id) ON DELETE SET NULL,
+                    stage TEXT NOT NULL DEFAULT 'new',
+                    intent TEXT,
+                    sentiment TEXT,
+                    summary TEXT,
+                    facts_json TEXT NOT NULL DEFAULT '{}',
+                    unanswered_question TEXT,
+                    next_action TEXT,
+                    escalation_status TEXT NOT NULL DEFAULT 'none',
+                    escalation_reason TEXT,
+                    last_response_id TEXT,
+                    last_draft_id TEXT REFERENCES outreach_drafts(id) ON DELETE SET NULL,
+                    turn_count INTEGER NOT NULL DEFAULT 0,
+                    last_inbound_at TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (workspace_id, channel, external_chat_id)
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_campaign_leads_campaign ON campaign_leads(campaign_id);
@@ -428,6 +494,10 @@ class SalesCRM:
                     ON agent_inbox_events(workspace_id, status, received_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_chat
                     ON agent_inbox_events(workspace_id, chat_jid, received_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_conversation_sessions_workspace
+                    ON conversation_sessions(workspace_id, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_conversation_sessions_lead
+                    ON conversation_sessions(lead_id, updated_at DESC);
                 """
             )
             lead_columns = {
@@ -446,6 +516,28 @@ class SalesCRM:
                     connection.execute(
                         f"ALTER TABLE leads ADD COLUMN {name} {column_type}"
                     )
+            inbox_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(agent_inbox_events)"
+                ).fetchall()
+            }
+            for name, column_type in (
+                ("agent_attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("agent_lock_until", "TEXT"),
+                ("agent_error", "TEXT"),
+                ("decision_json", "TEXT"),
+            ):
+                if name not in inbox_columns:
+                    connection.execute(
+                        f"ALTER TABLE agent_inbox_events ADD COLUMN {name} {column_type}"
+                    )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_agent_inbox_claim
+                ON agent_inbox_events(workspace_id, status, agent_lock_until, received_at)
+                """
+            )
             connection.executescript(
                 """
                 CREATE INDEX IF NOT EXISTS idx_leads_domain_key
@@ -468,7 +560,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 9")
+            connection.execute("PRAGMA user_version = 10")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -847,7 +939,30 @@ class SalesCRM:
 
     @staticmethod
     def _agent_inbox_from_row(row: sqlite3.Row) -> dict[str, Any]:
-        return dict(row)
+        result = dict(row)
+        result["decision"] = _load_json(result.pop("decision_json", None), {})
+        return result
+
+    @staticmethod
+    def _conversation_settings_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["enabled"] = bool(result["enabled"])
+        result["auto_create_inbound_leads"] = bool(result["auto_create_inbound_leads"])
+        for source, target in (
+            ("qualification_questions_json", "qualification_questions"),
+            ("forbidden_topics_json", "forbidden_topics"),
+            ("escalation_rules_json", "escalation_rules"),
+        ):
+            result[target] = _load_json(result.pop(source, None), [])
+        result["send_enabled"] = False
+        result["approval_policy"] = "exact_draft_then_separate_send"
+        return result
+
+    @staticmethod
+    def _conversation_session_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        result["facts"] = _load_json(result.pop("facts_json", None), {})
+        return result
 
     def get_company_profile(self, workspace_id: str) -> dict[str, Any]:
         workspace_id = self._workspace_id(workspace_id)
@@ -1254,6 +1369,366 @@ class SalesCRM:
                 raise ValueError("company profile not found")
         return self.get_company_onboarding_state(workspace_id)
 
+    def get_conversation_agent_settings(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_agent_settings (
+                    workspace_id, enabled, autonomy_mode, niche,
+                    max_context_messages, max_reply_chars, confidence_threshold,
+                    auto_create_inbound_leads, created_at, updated_at
+                ) VALUES (?, 1, 'draft', 'auto', 12, 700, 65, 1, ?, ?)
+                """,
+                (workspace_id, timestamp, timestamp),
+            )
+            row = connection.execute(
+                "SELECT * FROM conversation_agent_settings WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+        assert row is not None
+        return self._conversation_settings_from_row(row)
+
+    def update_conversation_agent_settings(
+        self, workspace_id: str, **fields: Any
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_conversation_agent_settings(workspace_id)
+        allowed = {
+            "enabled",
+            "autonomy_mode",
+            "niche",
+            "objective",
+            "instructions",
+            "tone",
+            "qualification_questions",
+            "forbidden_topics",
+            "escalation_rules",
+            "max_context_messages",
+            "max_reply_chars",
+            "confidence_threshold",
+            "auto_create_inbound_leads",
+        }
+        unexpected = set(fields) - allowed
+        if unexpected:
+            raise ValueError(
+                "unsupported conversation agent fields: "
+                + ", ".join(sorted(unexpected))
+            )
+        assignments: list[str] = []
+        values: list[Any] = []
+        text_limits = {
+            "niche": 120,
+            "objective": 3000,
+            "instructions": 6000,
+            "tone": 2000,
+        }
+        for name, value in fields.items():
+            if name in {"enabled", "auto_create_inbound_leads"}:
+                assignments.append(f"{name} = ?")
+                values.append(int(bool(value)))
+            elif name == "autonomy_mode":
+                clean = self._validate_status(
+                    str(value), CONVERSATION_AUTONOMY_MODES, "autonomy_mode"
+                )
+                assignments.append("autonomy_mode = ?")
+                values.append(clean)
+            elif name in text_limits:
+                clean = " ".join(str(value or "").split())
+                if len(clean) > text_limits[name]:
+                    raise ValueError(
+                        f"{name} must not exceed {text_limits[name]} characters"
+                    )
+                assignments.append(f"{name} = ?")
+                values.append(clean or None)
+            elif name in {
+                "qualification_questions",
+                "forbidden_topics",
+                "escalation_rules",
+            }:
+                if not isinstance(value, list):
+                    raise ValueError(f"{name} must be a list")
+                clean_items = [
+                    " ".join(str(item).split())[:500]
+                    for item in value[:30]
+                    if " ".join(str(item).split())
+                ]
+                assignments.append(f"{name}_json = ?")
+                values.append(_json(clean_items))
+            elif name == "max_context_messages":
+                assignments.append("max_context_messages = ?")
+                values.append(max(4, min(int(value), 30)))
+            elif name == "max_reply_chars":
+                assignments.append("max_reply_chars = ?")
+                values.append(max(120, min(int(value), 700)))
+            elif name == "confidence_threshold":
+                assignments.append("confidence_threshold = ?")
+                values.append(max(40, min(int(value), 95)))
+        if not assignments:
+            return self.get_conversation_agent_settings(workspace_id)
+        assignments.append("updated_at = ?")
+        values.extend([utc_now(), workspace_id])
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE conversation_agent_settings SET {', '.join(assignments)} "
+                "WHERE workspace_id = ?",
+                values,
+            )
+        return self.get_conversation_agent_settings(workspace_id)
+
+    def get_conversation_session(
+        self, workspace_id: str, chat_id: str, *, channel: str = "whatsapp"
+    ) -> dict[str, Any] | None:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM conversation_sessions
+                WHERE workspace_id = ? AND channel = ? AND external_chat_id = ?
+                """,
+                (workspace_id, channel.strip().lower(), chat_id.strip()),
+            ).fetchone()
+        return self._conversation_session_from_row(row) if row is not None else None
+
+    def upsert_conversation_session(
+        self,
+        workspace_id: str,
+        chat_id: str,
+        *,
+        channel: str = "whatsapp",
+        lead_id: str | None = None,
+        stage: str = "new",
+        intent: str | None = None,
+        sentiment: str | None = None,
+        summary: str | None = None,
+        facts: dict[str, Any] | None = None,
+        unanswered_question: str | None = None,
+        next_action: str | None = None,
+        escalation_status: str = "none",
+        escalation_reason: str | None = None,
+        last_response_id: str | None = None,
+        last_draft_id: str | None = None,
+        last_inbound_at: str | None = None,
+        increment_turn: bool = False,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        clean_chat_id = chat_id.strip()
+        clean_channel = channel.strip().lower()
+        clean_stage = self._validate_status(stage, CONVERSATION_STAGES, "stage")
+        if not clean_chat_id or len(clean_chat_id) > 500:
+            raise ValueError("chat_id is required and must not exceed 500 characters")
+        if clean_channel not in {"whatsapp"}:
+            raise ValueError("only whatsapp conversation sessions are supported")
+        if lead_id:
+            self.get_lead(lead_id)
+        if last_draft_id:
+            self.get_outreach_draft(last_draft_id)
+        timestamp = utc_now()
+        session_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO conversation_sessions (
+                    id, workspace_id, channel, external_chat_id, lead_id, stage,
+                    intent, sentiment, summary, facts_json, unanswered_question,
+                    next_action, escalation_status, escalation_reason,
+                    last_response_id, last_draft_id, turn_count, last_inbound_at,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id, channel, external_chat_id) DO UPDATE SET
+                    lead_id = COALESCE(excluded.lead_id, conversation_sessions.lead_id),
+                    stage = excluded.stage,
+                    intent = excluded.intent,
+                    sentiment = excluded.sentiment,
+                    summary = excluded.summary,
+                    facts_json = excluded.facts_json,
+                    unanswered_question = excluded.unanswered_question,
+                    next_action = excluded.next_action,
+                    escalation_status = excluded.escalation_status,
+                    escalation_reason = excluded.escalation_reason,
+                    last_response_id = COALESCE(excluded.last_response_id, conversation_sessions.last_response_id),
+                    last_draft_id = COALESCE(excluded.last_draft_id, conversation_sessions.last_draft_id),
+                    turn_count = conversation_sessions.turn_count + excluded.turn_count,
+                    last_inbound_at = COALESCE(excluded.last_inbound_at, conversation_sessions.last_inbound_at),
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    workspace_id,
+                    clean_channel,
+                    clean_chat_id,
+                    lead_id,
+                    clean_stage,
+                    " ".join(str(intent or "").split())[:240] or None,
+                    " ".join(str(sentiment or "").split())[:80] or None,
+                    " ".join(str(summary or "").split())[:3000] or None,
+                    _json(facts or {}),
+                    " ".join(str(unanswered_question or "").split())[:1000] or None,
+                    " ".join(str(next_action or "").split())[:1000] or None,
+                    " ".join(str(escalation_status or "none").split())[:80] or "none",
+                    " ".join(str(escalation_reason or "").split())[:2000] or None,
+                    " ".join(str(last_response_id or "").split())[:500] or None,
+                    last_draft_id,
+                    int(bool(increment_turn)),
+                    normalize_datetime(last_inbound_at) if last_inbound_at else None,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM conversation_sessions
+                WHERE workspace_id = ? AND channel = ? AND external_chat_id = ?
+                """,
+                (workspace_id, clean_channel, clean_chat_id),
+            ).fetchone()
+        assert row is not None
+        return self._conversation_session_from_row(row)
+
+    def list_conversation_sessions(
+        self,
+        workspace_id: str,
+        *,
+        stage: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        params: list[Any] = [workspace_id]
+        where = "workspace_id = ?"
+        if stage:
+            where += " AND stage = ?"
+            params.append(self._validate_status(stage, CONVERSATION_STAGES, "stage"))
+        params.append(max(1, min(int(limit), 500)))
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT * FROM conversation_sessions
+                WHERE {where}
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        return [self._conversation_session_from_row(row) for row in rows]
+
+    def claim_next_agent_inbox_event(
+        self, workspace_id: str, *, lease_seconds: int = 180
+    ) -> dict[str, Any] | None:
+        workspace_id = self._workspace_id(workspace_id)
+        now = datetime.now(UTC)
+        now_value = now.isoformat(timespec="seconds")
+        lock_until = (now + timedelta(seconds=max(30, lease_seconds))).isoformat(
+            timespec="seconds"
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT id FROM agent_inbox_events
+                WHERE workspace_id = ?
+                  AND (
+                    status = 'new'
+                    OR (status = 'processing' AND agent_lock_until <= ?)
+                  )
+                ORDER BY received_at ASC, created_at ASC
+                LIMIT 1
+                """,
+                (workspace_id, now_value),
+            ).fetchone()
+            if row is None:
+                return None
+            event_id = str(row["id"])
+            connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'processing', agent_attempts = agent_attempts + 1,
+                    agent_lock_until = ?, agent_error = NULL, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (lock_until, now_value, event_id, workspace_id),
+            )
+            claimed = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert claimed is not None
+        return self._agent_inbox_from_row(claimed)
+
+    def finish_agent_inbox_event(
+        self,
+        workspace_id: str,
+        event_id: str,
+        *,
+        status: str,
+        decision: dict[str, Any] | None = None,
+        draft_id: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        clean_status = self._validate_status(
+            status, AGENT_INBOX_STATUSES, "agent inbox status"
+        )
+        if draft_id:
+            self.get_outreach_draft(draft_id)
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = ?, draft_id = COALESCE(?, draft_id),
+                    decision_json = ?, agent_error = ?, agent_lock_until = NULL,
+                    updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (
+                    clean_status,
+                    draft_id,
+                    _json(decision or {}),
+                    " ".join(str(error or "").split())[:2000] or None,
+                    utc_now(),
+                    event_id,
+                    workspace_id,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("agent inbox event not found")
+            row = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert row is not None
+        return self._agent_inbox_from_row(row)
+
+    def conversation_agent_summary(self, workspace_id: str) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            event_rows = connection.execute(
+                """
+                SELECT status, COUNT(*) AS item_count FROM agent_inbox_events
+                WHERE workspace_id = ? GROUP BY status
+                """,
+                (workspace_id,),
+            ).fetchall()
+            session_rows = connection.execute(
+                """
+                SELECT stage, COUNT(*) AS item_count FROM conversation_sessions
+                WHERE workspace_id = ? GROUP BY stage
+                """,
+                (workspace_id,),
+            ).fetchall()
+        return {
+            "settings": self.get_conversation_agent_settings(workspace_id),
+            "inbox": {str(row["status"]): int(row["item_count"]) for row in event_rows},
+            "sessions": {
+                str(row["stage"]): int(row["item_count"]) for row in session_rows
+            },
+            "active_sessions": sum(
+                int(row["item_count"])
+                for row in session_rows
+                if str(row["stage"]) not in {"closed"}
+            ),
+            "send_enabled": False,
+        }
+
     def upsert_agent_inbox_event(
         self,
         workspace_id: str,
@@ -1406,10 +1881,19 @@ class SalesCRM:
             cursor = connection.execute(
                 """
                 UPDATE agent_inbox_events
-                SET status = ?, draft_id = COALESCE(?, draft_id), updated_at = ?
+                SET status = ?, draft_id = COALESCE(?, draft_id),
+                    agent_lock_until = CASE WHEN ? = 'processing' THEN agent_lock_until ELSE NULL END,
+                    updated_at = ?
                 WHERE id = ? AND workspace_id = ?
                 """,
-                (clean_status, draft_id, timestamp, event_id, workspace_id),
+                (
+                    clean_status,
+                    draft_id,
+                    clean_status,
+                    timestamp,
+                    event_id,
+                    workspace_id,
+                ),
             )
             if cursor.rowcount != 1:
                 raise ValueError("agent inbox event not found")
@@ -1470,7 +1954,7 @@ class SalesCRM:
                 UPDATE agent_inbox_events
                 SET status = 'resolved', updated_at = ?
                 WHERE workspace_id = ? AND draft_id = ?
-                    AND status IN ('new', 'acknowledged', 'drafted')
+                    AND status IN ('new', 'acknowledged', 'processing', 'drafted', 'needs_review')
                 """,
                 (timestamp, workspace_id, draft_id),
             )

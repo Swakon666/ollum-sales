@@ -1,10 +1,12 @@
 # Ollum Sales MCP — Full Source Edition
 
-Version **0.8.0** adds durable company onboarding and an agent inbox. ChatGPT can
-interview the operator in small batches, persist the company profile, services, prices,
-cases and client context, then resume the latest unanswered WhatsApp request in a later
-chat. Grounded reply quality checks and the guarded draft-save flow remain mandatory;
-no onboarding or inbox tool can approve or send. The OAuth/OIDC-protected service keeps
+Version **0.9.0** adds a durable conversation agent and a focused commerce-style control
+cabinet. ChatGPT can interview the operator in small batches, persist the company profile,
+services, prices, cases and client context, and configure a niche-specific dialogue playbook.
+The server worker classifies each unanswered WhatsApp message, maintains a per-chat sales
+stage and factual memory, then either saves a grounded reply draft or escalates to a person.
+Grounded quality checks and the guarded draft-save flow remain mandatory; the agent can
+never approve or send. The OAuth/OIDC-protected service keeps
 the role-aware workspace cabinet on `api.ollumgroup.ru`, the ChatGPT MCP connection on
 `mcp.ollumgroup.ru`, and private browser-based WhatsApp pairing. It retains the
 persistent SAFE-first Autopilot, grounded scoring, reports, and Google Sheets panel.
@@ -33,13 +35,14 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 58 tools. Existing tools remain compatible, plus
+The server exposes 62 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding`;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_agent_next_action`;
+- autonomous conversation planning: `sales_get_conversation_agent_status`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_process_pending_conversations`;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
 - CRM and outreach: `sales_prepare_whatsapp_reply_brief`, `sales_evaluate_whatsapp_reply`, `sales_compare_whatsapp_replies`, `sales_save_whatsapp_reply_draft`, `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
 - WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
@@ -58,7 +61,8 @@ Closed-beta OIDC setup and ChatGPT connection instructions are in
 [`docs/CLOSED_BETA.md`](docs/CLOSED_BETA.md).
 
 The cabinet is served at `https://api.ollumgroup.ru/`. It includes the editable company
-profile and knowledge base, inbound agent queue, CRM, SAFE Autopilot, drafts,
+profile and knowledge base, niche/tone/escalation controls for the AI agent, durable dialogue
+sessions, inbound agent queue, CRM, SAFE Autopilot, drafts,
 audit/jobs, workspace members and roles, plugin readiness, and a short-lived WhatsApp
 QR. All profile and queue actions update without a page reload. The bridge itself
 remains private on the Docker network.
@@ -81,6 +85,8 @@ Ollum Sales MCP :8000 (container)       Autopilot worker
    |                 |                       +--> scheduled SAFE cycles
 CRM SQLite volume   website evidence        +--> Google Sheets panel
    |                                         +--> durable inbound queue (30 s poll)
+   |                                         +--> AI decision + grounded quality gate
+   |                                         +--> session memory + draft / escalation
                      |                       |
                      +--> ScrapeGraphAI      +--> shared WhatsApp SQLite
                           when configured    |
@@ -205,6 +211,13 @@ follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot start unless all of these are tru
 
 The worker polls every 30 seconds and starts a cycle only when `next_cycle_at` is due. The cycle
 interval itself defaults to 60 minutes.
+
+The same worker also polls unanswered private WhatsApp conversations. When company onboarding
+is ready and `OLLUM_CONVERSATION_AGENT_ENABLED=true`, it uses the workspace playbook and durable
+per-chat memory to prepare up to three replies per poll. Every reply passes the grounded quality
+gate before it can be stored as a `draft`; low-confidence, contractual, sensitive, or unsupported
+questions move to `needs_review`. This path never approves a draft, never queues a send request,
+and never records an outbound interaction.
 
 ## Google Sheets panel
 

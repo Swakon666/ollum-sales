@@ -25,6 +25,7 @@ from .agent_inbox import sync_whatsapp_inbox
 from .auth import AuthenticationError, OIDCSessionManager
 from .autopilot import AutopilotService
 from .config import Settings
+from .conversation_agent import ConversationAgent
 from .crm import SalesCRM, utc_now
 from .google_sheets import GoogleSheetsSync
 from .whatsapp_service import (
@@ -50,7 +51,17 @@ def _safe_job_result(result: Any) -> dict[str, Any]:
         return {"success": True}
     summary: dict[str, Any] = {
         key: result[key]
-        for key in ("success", "blocked", "message", "tabs")
+        for key in (
+            "success",
+            "blocked",
+            "message",
+            "tabs",
+            "processed",
+            "drafted",
+            "needs_review",
+            "ignored",
+            "failed",
+        )
         if key in result
     }
     cycle = result.get("cycle")
@@ -153,6 +164,7 @@ class AdminContext:
     settings: Settings
     sessions: OIDCSessionManager
     jobs: AdminJobRegistry
+    conversation_agent: ConversationAgent | None = None
 
 
 class SecurityHeadersMiddleware:
@@ -505,6 +517,21 @@ async def api_bootstrap(
                 workspace_id
             ),
             "agent_inbox": context.crm.agent_inbox_summary(workspace_id),
+            "conversation_agent": (
+                context.conversation_agent.status(workspace_id)
+                if context.conversation_agent is not None
+                else {
+                    "settings": context.crm.get_conversation_agent_settings(
+                        workspace_id
+                    ),
+                    "summary": context.crm.conversation_agent_summary(workspace_id),
+                    "runtime": {
+                        "ready": False,
+                        "reason": "conversation agent runtime is unavailable",
+                    },
+                    "safety": {"approves": False, "sends": False},
+                }
+            ),
             "overview": context.crm.overview(),
             "crm": context.crm.stats(),
             "autopilot": state,
@@ -764,6 +791,126 @@ async def api_update_agent_inbox(
         },
     )
     return JSONResponse(result)
+
+
+@admin_endpoint()
+async def api_conversation_agent_settings(
+    _request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    workspace_id = str(user["workspace_id"])
+    return JSONResponse(
+        context.conversation_agent.status(workspace_id)
+        if context.conversation_agent is not None
+        else {
+            "settings": context.crm.get_conversation_agent_settings(workspace_id),
+            "summary": context.crm.conversation_agent_summary(workspace_id),
+            "runtime": {"ready": False, "reason": "runtime unavailable"},
+            "safety": {"approves": False, "sends": False},
+        }
+    )
+
+
+@admin_endpoint(write=True)
+async def api_update_conversation_agent_settings(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    allowed = {
+        "enabled",
+        "autonomy_mode",
+        "niche",
+        "objective",
+        "instructions",
+        "tone",
+        "qualification_questions",
+        "forbidden_topics",
+        "escalation_rules",
+        "max_context_messages",
+        "max_reply_chars",
+        "confidence_threshold",
+        "auto_create_inbound_leads",
+    }
+    unexpected = set(body) - allowed
+    if unexpected:
+        raise ValueError(
+            "unsupported conversation agent fields: " + ", ".join(sorted(unexpected))
+        )
+    workspace_id = str(user["workspace_id"])
+    settings = context.crm.update_conversation_agent_settings(workspace_id, **body)
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="conversation_agent.settings_update",
+        target_type="workspace",
+        target_id=workspace_id,
+        outcome="success",
+        details={"fields": sorted(body), "send_enabled": False},
+    )
+    return JSONResponse(
+        context.conversation_agent.status(workspace_id)
+        if context.conversation_agent is not None
+        else {
+            "settings": settings,
+            "summary": context.crm.conversation_agent_summary(workspace_id),
+            "runtime": {"ready": False, "reason": "runtime unavailable"},
+            "safety": {"approves": False, "sends": False},
+        }
+    )
+
+
+@admin_endpoint()
+async def api_conversation_sessions(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    return JSONResponse(
+        context.crm.list_conversation_sessions(
+            str(user["workspace_id"]),
+            stage=request.query_params.get("stage") or None,
+            limit=_bounded_int(
+                request.query_params.get("limit", 100),
+                name="limit",
+                minimum=1,
+                maximum=500,
+            ),
+        )
+    )
+
+
+@admin_endpoint(write=True)
+async def api_process_conversations(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    if context.conversation_agent is None:
+        raise AdminRequestError(503, "Conversation agent runtime is unavailable")
+    body = await _read_json(request)
+    limit = _bounded_int(
+        body.get("limit", context.settings.conversation_agent_batch_size),
+        name="limit",
+        minimum=1,
+        maximum=10,
+    )
+    workspace_id = str(user["workspace_id"])
+    job = context.jobs.create(
+        name="conversation_agent.process_pending", actor=str(user["email"])
+    )
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="conversation_agent.process_pending",
+        target_type="background_job",
+        target_id=job["id"],
+        outcome="queued",
+        details={"limit": limit, "approves": False, "sends": False},
+    )
+    agent = context.conversation_agent
+    return JSONResponse(
+        {"job": job},
+        status_code=202,
+        background=BackgroundTask(
+            context.jobs.run,
+            job["id"],
+            lambda: agent.process_pending(workspace_id, limit=limit),
+            context.crm,
+        ),
+    )
 
 
 @admin_endpoint()
@@ -1192,6 +1339,26 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             api_update_agent_inbox,
             methods=["PATCH"],
         ),
+        Route(
+            "/api/admin/conversation-agent/settings",
+            api_conversation_agent_settings,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/admin/conversation-agent/settings",
+            api_update_conversation_agent_settings,
+            methods=["PATCH"],
+        ),
+        Route(
+            "/api/admin/conversation-agent/sessions",
+            api_conversation_sessions,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/admin/conversation-agent/process",
+            api_process_conversations,
+            methods=["POST"],
+        ),
         Route("/api/admin/workspace/members", api_workspace_members, methods=["GET"]),
         Route(
             "/api/admin/workspace/invitations",
@@ -1253,6 +1420,26 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             "/api/v1/agent/inbox/{event_id:str}",
             api_update_agent_inbox,
             methods=["PATCH"],
+        ),
+        Route(
+            "/api/v1/conversation-agent/settings",
+            api_conversation_agent_settings,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/v1/conversation-agent/settings",
+            api_update_conversation_agent_settings,
+            methods=["PATCH"],
+        ),
+        Route(
+            "/api/v1/conversation-agent/sessions",
+            api_conversation_sessions,
+            methods=["GET"],
+        ),
+        Route(
+            "/api/v1/conversation-agent/process",
+            api_process_conversations,
+            methods=["POST"],
         ),
         Route("/api/v1/workspace/members", api_workspace_members, methods=["GET"]),
         Route(

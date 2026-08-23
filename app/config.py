@@ -82,6 +82,24 @@ class Settings:
     scrapegraph_model: str = os.getenv("SCRAPEGRAPH_MODEL", "openai/gpt-4o-mini")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY")
     llm_api_key: str | None = os.getenv("LLM_API_KEY")
+    conversation_agent_enabled: bool = _env_bool(
+        "OLLUM_CONVERSATION_AGENT_ENABLED", True
+    )
+    conversation_agent_model: str = os.getenv(
+        "OLLUM_CONVERSATION_AGENT_MODEL", "gpt-5.6-luna"
+    ).strip()
+    conversation_agent_poll_seconds: int = int(
+        os.getenv("OLLUM_CONVERSATION_AGENT_POLL_SECONDS", "30")
+    )
+    conversation_agent_batch_size: int = int(
+        os.getenv("OLLUM_CONVERSATION_AGENT_BATCH_SIZE", "3")
+    )
+    conversation_agent_timeout_seconds: float = float(
+        os.getenv("OLLUM_CONVERSATION_AGENT_TIMEOUT_SECONDS", "90")
+    )
+    conversation_agent_max_revisions: int = int(
+        os.getenv("OLLUM_CONVERSATION_AGENT_MAX_REVISIONS", "2")
+    )
     serper_api_key: str | None = os.getenv("SERPER_API_KEY")
     crm_db_path: str = os.getenv("OLLUM_CRM_DB_PATH", str(DEFAULT_CRM_DB))
     company_search_timeout: int = int(os.getenv("OLLUM_COMPANY_SEARCH_TIMEOUT", "20"))

@@ -74,6 +74,40 @@ class FakeSheets:
         return {"success": True, "sheets_updated": 6}
 
 
+class FakeConversationAgent:
+    def __init__(self, crm: SalesCRM) -> None:
+        self.crm = crm
+        self.process_calls = 0
+
+    def status(self, workspace_id: str) -> dict[str, Any]:
+        summary = self.crm.conversation_agent_summary(workspace_id)
+        return {
+            "settings": summary.pop("settings"),
+            "summary": summary,
+            "runtime": {
+                "enabled": True,
+                "ready": True,
+                "model": "test-model",
+                "llm_configured": True,
+                "company_ready": True,
+            },
+            "safety": {"approves": False, "sends": False, "external_send": False},
+        }
+
+    def process_pending(self, _workspace_id: str, *, limit: int) -> dict[str, Any]:
+        self.process_calls += 1
+        return {
+            "success": True,
+            "processed": min(limit, 1),
+            "drafted": 1,
+            "needs_review": 0,
+            "ignored": 0,
+            "failed": 0,
+            "approved": False,
+            "sent": False,
+        }
+
+
 class FakeSessions:
     def __init__(self) -> None:
         self.handoffs: dict[str, dict[str, Any]] = {}
@@ -152,6 +186,7 @@ def admin_client(tmp_path, monkeypatch):
         settings=beta_settings,
         sessions=FakeSessions(),  # type: ignore[arg-type]
         jobs=AdminJobRegistry(),
+        conversation_agent=FakeConversationAgent(crm),  # type: ignore[arg-type]
     )
 
     async def test_login(request: Request) -> JSONResponse:
@@ -312,9 +347,14 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     assert "aria-current" in script.text
     assert 'window.scrollTo({ top: 0, left: 0, behavior: "auto" })' in script.text
     assert ":focus-visible" in stylesheet.text
-    assert "--paper: #f4f6f5" in stylesheet.text
-    assert "--accent: #16845f" in stylesheet.text
-    assert "--accent-soft: #e5f3ed" in stylesheet.text
+    assert "--paper: #f2f3ef" in stylesheet.text
+    assert "--accent: #12cc77" in stylesheet.text
+    assert "--accent-soft: #e5f8ef" in stylesheet.text
+    assert 'href="#agent" data-view="agent"' in page.text
+    assert 'id="conversation-agent-form"' in page.text
+    assert 'id="agent-sessions-table"' in page.text
+    assert "function renderConversationAgent(" in script.text
+    assert "transition: all" not in stylesheet.text
     assert "background-image: none" in stylesheet.text
     assert "env(safe-area-inset-top)" in stylesheet.text
     assert "overscroll-behavior: contain" in stylesheet.text
@@ -595,3 +635,62 @@ def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) 
     bootstrap = client.get("/api/v1/bootstrap").json()
     assert bootstrap["company_onboarding"]["profile"]["company_name"] == "Ollum Group"
     assert bootstrap["agent_inbox"]["acknowledged"] == 1
+
+
+def test_conversation_agent_api_is_configurable_but_cannot_send(admin_client) -> None:
+    client, context, _autopilot, _sheets = admin_client
+    _login(client)
+
+    status = client.get("/api/v1/conversation-agent/settings")
+    assert status.status_code == 200
+    assert status.json()["safety"] == {
+        "approves": False,
+        "sends": False,
+        "external_send": False,
+    }
+
+    assert (
+        client.patch(
+            "/api/v1/conversation-agent/settings",
+            json={"niche": "e-commerce"},
+        ).status_code
+        == 403
+    )
+    updated = client.patch(
+        "/api/v1/conversation-agent/settings",
+        headers=_csrf_headers(),
+        json={
+            "enabled": True,
+            "autonomy_mode": "draft",
+            "niche": "e-commerce",
+            "tone": "Кратко и уважительно",
+            "qualification_questions": ["Какой объём каталога?"],
+            "confidence_threshold": 74,
+        },
+    )
+    assert updated.status_code == 200
+    assert updated.json()["settings"]["niche"] == "e-commerce"
+    assert updated.json()["settings"]["send_enabled"] is False
+
+    forbidden = client.patch(
+        "/api/v1/conversation-agent/settings",
+        headers=_csrf_headers(),
+        json={"send_enabled": True},
+    )
+    assert forbidden.status_code == 400
+
+    queued = client.post(
+        "/api/v1/conversation-agent/process",
+        headers=_csrf_headers(),
+        json={"limit": 3},
+    )
+    assert queued.status_code == 202
+    assert context.conversation_agent is not None
+    assert context.conversation_agent.process_calls == 1  # type: ignore[union-attr]
+    assert context.crm.list_pending_send_requests(limit=10) == []
+    assert (
+        client.post(
+            "/api/v1/conversation-agent/send", headers=_csrf_headers()
+        ).status_code
+        == 404
+    )
