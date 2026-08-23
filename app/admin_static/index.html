@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="color-scheme" content="light">
-    <meta name="theme-color" content="#f4f6f5">
+    <meta name="theme-color" content="#111512">
     <meta name="description" content="Ollum Control — закрытый кабинет управления AI-продажами Ollum Group.">
     <title>Ollum Control</title>
     <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
@@ -30,15 +30,16 @@
         <nav class="nav-list" id="primary-navigation">
           <a class="nav-item is-active" href="#overview" data-view="overview"><span>01</span>Обзор</a>
           <a class="nav-item" href="#company" data-view="company"><span>02</span>Компания</a>
-          <a class="nav-item" href="#inbox" data-view="inbox"><span>03</span>Входящие</a>
-          <a class="nav-item" href="#leads" data-view="leads"><span>04</span>Лиды</a>
-          <a class="nav-item" href="#campaigns" data-view="campaigns"><span>05</span>Кампании</a>
-          <a class="nav-item" href="#drafts" data-view="drafts"><span>06</span>Черновики</a>
-          <a class="nav-item" href="#autopilot" data-view="autopilot"><span>07</span>Autopilot</a>
-          <a class="nav-item" href="#whatsapp" data-view="whatsapp"><span>08</span>WhatsApp</a>
-          <a class="nav-item" href="#plugin" data-view="plugin"><span>09</span>GPT-плагин</a>
-          <a class="nav-item" href="#team" data-view="team"><span>10</span>Команда</a>
-          <a class="nav-item" href="#audit" data-view="audit"><span>11</span>Аудит</a>
+          <a class="nav-item" href="#agent" data-view="agent"><span>03</span>AI-агент</a>
+          <a class="nav-item" href="#inbox" data-view="inbox"><span>04</span>Входящие</a>
+          <a class="nav-item" href="#leads" data-view="leads"><span>05</span>Лиды</a>
+          <a class="nav-item" href="#campaigns" data-view="campaigns"><span>06</span>Кампании</a>
+          <a class="nav-item" href="#drafts" data-view="drafts"><span>07</span>Черновики</a>
+          <a class="nav-item" href="#autopilot" data-view="autopilot"><span>08</span>Autopilot</a>
+          <a class="nav-item" href="#whatsapp" data-view="whatsapp"><span>09</span>WhatsApp</a>
+          <a class="nav-item" href="#plugin" data-view="plugin"><span>10</span>GPT-плагин</a>
+          <a class="nav-item" href="#team" data-view="team"><span>11</span>Команда</a>
+          <a class="nav-item" href="#audit" data-view="audit"><span>12</span>Аудит</a>
         </nav>
         <div class="sidebar-footer">
           <div class="connection-state">
@@ -139,16 +140,70 @@
           </div>
         </section>
 
-        <section class="view" data-panel="inbox" data-section="03">
+        <section class="view" data-panel="agent" data-section="03">
+          <div class="section-heading agent-heading">
+            <div><p class="eyebrow">Conversation intelligence</p><h2>AI-агент продаж</h2><p class="muted">Сам понимает входящие, ведёт контекст по каждому диалогу и готовит grounded-ответ. Одобрение и отправка всегда остаются за человеком.</p></div>
+            <div class="hero-actions"><span class="readiness-badge" id="agent-runtime-state">Проверка…</span><button class="primary-button" id="process-conversations-button" type="button">Обработать очередь</button></div>
+          </div>
+
+          <div class="metric-grid compact-metrics" id="agent-metrics" aria-live="polite"></div>
+
+          <div class="agent-layout">
+            <article class="card agent-settings-card">
+              <div class="card-header"><div><p class="eyebrow">Playbook</p><h3>Логика диалога</h3></div><span class="safety-chip">Draft only</span></div>
+              <form id="conversation-agent-form" class="stack-form agent-form">
+                <div class="agent-switches">
+                  <label class="switch-row"><span><strong>AI-обработка включена</strong><small>Worker проверяет очередь и создаёт черновики</small></span><input name="enabled" type="checkbox" role="switch"></label>
+                  <label class="switch-row"><span><strong>Создавать входящие контакты</strong><small>Неизвестный номер получит безопасную CRM-карточку</small></span><input name="auto_create_inbound_leads" type="checkbox" role="switch"></label>
+                </div>
+                <div class="two-columns">
+                  <label>Режим автономности<select name="autonomy_mode"><option value="draft">Draft — готовить ответ</option><option value="observe">Observe — только классифицировать</option></select></label>
+                  <label>Ниша<input name="niche" maxlength="120" placeholder="Автоопределение или, например, e-commerce"></label>
+                </div>
+                <label>Цель агента<textarea name="objective" rows="2" maxlength="3000" placeholder="Какой результат диалога считать успешным"></textarea></label>
+                <label>Тон общения<textarea name="tone" rows="2" maxlength="2000" placeholder="Кратко, по делу, без давления"></textarea></label>
+                <label>Дополнительные правила<textarea name="instructions" rows="3" maxlength="6000" placeholder="Что уточнять, как квалифицировать, когда передавать менеджеру"></textarea></label>
+                <div class="three-columns">
+                  <label>Вопросы квалификации<textarea name="qualification_questions" rows="5" placeholder="Один вопрос на строку"></textarea></label>
+                  <label>Запрещённые темы<textarea name="forbidden_topics" rows="5" placeholder="Одна тема на строку"></textarea></label>
+                  <label>Правила эскалации<textarea name="escalation_rules" rows="5" placeholder="Одно правило на строку"></textarea></label>
+                </div>
+                <div class="three-columns compact-fields">
+                  <label>Порог уверенности, %<input name="confidence_threshold" type="number" min="40" max="95" inputmode="numeric"></label>
+                  <label>Сообщений в контексте<input name="max_context_messages" type="number" min="4" max="30" inputmode="numeric"></label>
+                  <label>Максимум символов<input name="max_reply_chars" type="number" min="120" max="700" inputmode="numeric"></label>
+                </div>
+                <div class="form-footer"><small class="muted">Настройки применяются без перезагрузки. Агент не может одобрять или отправлять сообщения.</small><button class="primary-button" type="submit">Сохранить playbook</button></div>
+              </form>
+            </article>
+
+            <article class="card agent-insight-card">
+              <div class="card-header"><div><p class="eyebrow">Runtime</p><h3>Как он работает сейчас</h3></div></div>
+              <dl class="detail-list" id="agent-runtime-details"></dl>
+              <div class="agent-flow" aria-label="Цикл AI-агента">
+                <div><span>01</span><strong>Понимает</strong><small>намерение и этап</small></div>
+                <div><span>02</span><strong>Проверяет</strong><small>факты и ограничения</small></div>
+                <div><span>03</span><strong>Готовит</strong><small>черновик или эскалацию</small></div>
+              </div>
+            </article>
+          </div>
+
+          <article class="table-card agent-sessions-card">
+            <div class="card-header"><div><p class="eyebrow">Memory</p><h3>Активные диалоги</h3></div><select id="agent-stage-filter" aria-label="Этап диалога"><option value="">Все этапы</option><option value="new">Новый</option><option value="discovery">Знакомство</option><option value="qualification">Квалификация</option><option value="interested">Интерес</option><option value="objection">Возражение</option><option value="proposal">Предложение</option><option value="handoff">Передача менеджеру</option><option value="closed">Закрыт</option></select></div>
+            <div class="table-wrap"><table><thead><tr><th>Диалог</th><th>Этап</th><th>Намерение</th><th>Контекст</th><th>Следующий шаг</th><th>Обновлён</th></tr></thead><tbody id="agent-sessions-table"></tbody></table></div>
+          </article>
+        </section>
+
+        <section class="view" data-panel="inbox" data-section="04">
           <div class="section-heading">
             <div><p class="eyebrow">Agent queue</p><h2>Входящие обращения</h2><p class="muted">Последние неотвеченные сообщения. Текст используется как недоверенный контекст, отправка отсюда невозможна.</p></div>
-            <div class="hero-actions"><select id="inbox-status-filter" aria-label="Статус входящего"><option value="">Все</option><option value="new">Новые</option><option value="acknowledged">В работе</option><option value="drafted">Черновик готов</option><option value="resolved">Закрытые</option><option value="ignored">Игнор</option></select><button class="secondary-button" id="sync-inbox-button">Проверить WhatsApp</button></div>
+            <div class="hero-actions"><select id="inbox-status-filter" aria-label="Статус входящего"><option value="">Все</option><option value="new">Новые</option><option value="processing">AI обрабатывает</option><option value="needs_review">Нужен человек</option><option value="acknowledged">В работе</option><option value="drafted">Черновик готов</option><option value="resolved">Закрытые</option><option value="ignored">Игнор</option></select><button class="secondary-button" id="sync-inbox-button">Проверить WhatsApp</button></div>
           </div>
           <div class="metric-grid compact-metrics" id="inbox-metrics"></div>
           <article class="table-card inbox-table-card"><div class="table-wrap"><table class="inbox-table"><thead><tr><th>Получено</th><th>Контакт</th><th>Сообщение</th><th>Лид</th><th>Статус</th><th></th></tr></thead><tbody id="inbox-table"></tbody></table></div></article>
         </section>
 
-        <section class="view" data-panel="leads" data-section="04">
+        <section class="view" data-panel="leads" data-section="05">
           <div class="section-heading">
             <div><p class="eyebrow">CRM</p><h2>Лиды</h2><p class="muted">Grounded evidence, score и текущая стадия.</p></div>
             <div class="filter-bar">
@@ -161,7 +216,7 @@
           <div class="pagination" id="leads-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="campaigns" data-section="05">
+        <section class="view" data-panel="campaigns" data-section="06">
           <div class="section-heading">
             <div><p class="eyebrow">Discovery</p><h2>Кампании</h2><p class="muted">Сохранённые рынки и прогресс сбора компаний.</p></div>
             <button class="primary-button" id="new-campaign-button">Новая кампания</button>
@@ -170,7 +225,7 @@
           <div class="pagination" id="campaigns-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="drafts" data-section="06">
+        <section class="view" data-panel="drafts" data-section="07">
           <div class="section-heading">
             <div><p class="eyebrow">Outreach</p><h2>Черновики</h2><p class="muted">Проверка точного получателя и текста. Одобрение не отправляет сообщение.</p></div>
             <select id="draft-status-filter" name="draft_status" aria-label="Статус черновика"><option value="">Все статусы</option><option value="draft">Требует проверки</option><option value="approved">Одобрен</option><option value="sent">Отправлен</option><option value="failed">Ошибка</option></select>
@@ -179,7 +234,7 @@
           <div class="pagination" id="drafts-pagination" aria-live="polite"></div>
         </section>
 
-        <section class="view" data-panel="autopilot" data-section="07">
+        <section class="view" data-panel="autopilot" data-section="08">
           <div class="section-heading">
             <div><p class="eyebrow">Automation</p><h2>Autopilot</h2><p class="muted">Управление расписанием и вертикалями в SAFE-контуре.</p></div>
             <div class="hero-actions"><button class="secondary-button" data-action="stop-autopilot">Остановить</button><button class="primary-button" data-action="start-autopilot">Запустить SAFE</button></div>
@@ -191,7 +246,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="whatsapp" data-section="08">
+        <section class="view" data-panel="whatsapp" data-section="09">
           <div class="section-heading">
             <div><p class="eyebrow">Channel</p><h2>Подключение WhatsApp</h2><p class="muted">Привязка устройства выполняется здесь. QR временный и доступен только после входа в кабинет.</p></div>
             <div class="hero-actions"><span class="readiness-badge" id="whatsapp-state">Проверка…</span><button class="secondary-button" id="refresh-whatsapp-button">Обновить</button></div>
@@ -213,7 +268,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="team" data-section="10">
+        <section class="view" data-panel="team" data-section="11">
           <div class="section-heading">
             <div><p class="eyebrow">Workspace</p><h2>Команда и доступ</h2><p class="muted">Единые роли действуют и в кабинете, и в GPT-плагине через OAuth.</p></div>
             <span class="readiness-badge is-ready" id="workspace-role">—</span>
@@ -239,7 +294,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="plugin" data-section="09">
+        <section class="view" data-panel="plugin" data-section="10">
           <div class="section-heading"><div><p class="eyebrow">ChatGPT</p><h2>GPT-плагин</h2><p class="muted">OAuth 2.1 + PKCE, HTTPS и MCP Streamable HTTP.</p></div><span class="readiness-badge" id="plugin-readiness">Проверка…</span></div>
           <div class="dashboard-grid">
             <article class="card span-2"><div class="card-header"><div><p class="eyebrow">Connection</p><h3>Параметры подключения</h3></div></div><div class="copy-fields" id="plugin-fields"></div></article>
@@ -248,7 +303,7 @@
           </div>
         </section>
 
-        <section class="view" data-panel="audit" data-section="11">
+        <section class="view" data-panel="audit" data-section="12">
           <div class="section-heading"><div><p class="eyebrow">Governance</p><h2>Журнал действий</h2><p class="muted">В журнал не попадают токены, секреты и полный текст переписки.</p></div></div>
           <article class="table-card"><div class="table-wrap"><table><thead><tr><th>Время</th><th>Оператор</th><th>Действие</th><th>Объект</th><th>Результат</th></tr></thead><tbody id="audit-table"></tbody></table></div></article>
           <div class="pagination" id="audit-pagination" aria-live="polite"></div>

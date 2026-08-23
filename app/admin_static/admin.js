@@ -22,18 +22,20 @@ const STATUS_LABELS = {
   timed_out: "Время истекло", restarting: "Перезапускается",
   not_started: "Не настроено", in_progress: "Настройка",
   acknowledged: "В работе", drafted: "Черновик готов", resolved: "Закрыто",
-  ignored: "Игнор",
+  ignored: "Игнор", processing: "AI обрабатывает", needs_review: "Нужен человек",
+  discovery: "Знакомство", qualification: "Квалификация", objection: "Возражение",
+  handoff: "Передача менеджеру", closed: "Закрыт", observe: "Наблюдение",
 };
 
 const VIEW_TITLES = {
-  overview: "Обзор системы", company: "Профиль компании", inbox: "Входящие обращения",
+  overview: "Обзор системы", company: "Профиль компании", agent: "AI-агент продаж", inbox: "Входящие обращения",
   leads: "Лиды", campaigns: "Кампании",
   drafts: "Черновики", autopilot: "Autopilot", plugin: "GPT-плагин",
   whatsapp: "Подключение WhatsApp", team: "Команда и доступ", audit: "Журнал действий",
 };
 
 const VIEW_HASHES = Object.freeze({
-  overview: "#overview", company: "#company", inbox: "#inbox",
+  overview: "#overview", company: "#company", agent: "#agent", inbox: "#inbox",
   leads: "#leads", campaigns: "#campaigns",
   drafts: "#drafts", autopilot: "#autopilot", plugin: "#plugin",
   whatsapp: "#whatsapp", team: "#team", audit: "#audit",
@@ -50,7 +52,9 @@ const state = {
   workspaceInvitations: [],
   companyKnowledge: [],
   inbox: [],
+  conversationSessions: [],
   profileDirty: false,
+  agentDirty: false,
   currentDraft: null,
   csrf: "",
   loading: false,
@@ -84,8 +88,8 @@ function label(value) {
 
 function statusClass(value) {
   if (["completed", "ready", "active", "qualified", "approved", "won", "sent", "resolved"].includes(value)) return "is-good";
-  if (["failed", "lost", "cancelled"].includes(value)) return "is-bad";
-  if (["queued", "running", "paused", "blocked", "draft", "drafted", "acknowledged", "researching"].includes(value)) return "is-warn";
+  if (["failed", "lost", "cancelled", "needs_review"].includes(value)) return "is-bad";
+  if (["queued", "running", "paused", "blocked", "draft", "drafted", "acknowledged", "researching", "processing"].includes(value)) return "is-warn";
   return "";
 }
 
@@ -136,13 +140,14 @@ async function refreshAll({ quiet = false, force = false } = {}) {
     const bootstrap = await api("/api/v1/bootstrap");
     state.data = bootstrap;
     state.csrf = bootstrap.user.csrf || "";
-    const [leads, campaigns, drafts, workspace, knowledge, inbox] = await Promise.all([
+    const [leads, campaigns, drafts, workspace, knowledge, inbox, sessions] = await Promise.all([
       api("/api/v1/leads?limit=200"),
       api("/api/v1/campaigns"),
       api("/api/v1/drafts"),
       api("/api/v1/workspace/members"),
       api("/api/v1/company/knowledge?limit=500"),
       api("/api/v1/agent/inbox?limit=200"),
+      api("/api/v1/conversation-agent/sessions?limit=200"),
     ]);
     state.leads = leads;
     state.campaigns = campaigns;
@@ -151,6 +156,7 @@ async function refreshAll({ quiet = false, force = false } = {}) {
     state.workspaceInvitations = workspace.invitations || [];
     state.companyKnowledge = knowledge || [];
     state.inbox = inbox || [];
+    state.conversationSessions = sessions || [];
     renderAll();
   } catch (error) {
     showToast(error.message || "Не удалось обновить данные", true);
@@ -434,13 +440,71 @@ function renderCompany() {
     : `<div class="empty-state"><strong>База знаний пока пуста</strong><span>Добавьте услуги и цены здесь или пройдите интервью в ChatGPT.</span></div>`;
 }
 
+function renderConversationAgent() {
+  const status = state.data.conversation_agent || {};
+  const settings = status.settings || {};
+  const summary = status.summary || {};
+  const inbox = summary.inbox || {};
+  const runtime = status.runtime || {};
+  const badge = $("#agent-runtime-state");
+  badge.textContent = runtime.ready ? "Готов к диалогам" : "Требует настройки";
+  badge.classList.toggle("is-ready", Boolean(runtime.ready));
+
+  const metrics = [
+    ["Ждут AI", Number(inbox.new || 0) + Number(inbox.processing || 0)],
+    ["Черновики", inbox.drafted || 0],
+    ["Нужен человек", inbox.needs_review || 0],
+    ["Активные диалоги", summary.active_sessions || 0],
+  ];
+  $("#agent-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
+
+  const form = $("#conversation-agent-form");
+  if (!state.agentDirty && !form.contains(document.activeElement)) {
+    ["niche", "objective", "tone", "instructions", "autonomy_mode", "confidence_threshold", "max_context_messages", "max_reply_chars"].forEach((name) => {
+      const field = form.elements.namedItem(name);
+      if (field) field.value = settings[name] ?? "";
+    });
+    ["qualification_questions", "forbidden_topics", "escalation_rules"].forEach((name) => {
+      const field = form.elements.namedItem(name);
+      if (field) field.value = Array.isArray(settings[name]) ? settings[name].join("\n") : "";
+    });
+    form.elements.namedItem("enabled").checked = Boolean(settings.enabled);
+    form.elements.namedItem("auto_create_inbound_leads").checked = Boolean(settings.auto_create_inbound_leads);
+  }
+
+  const runtimeRows = [
+    ["Модель", runtime.model || "—"],
+    ["Режим", label(settings.autonomy_mode || "draft")],
+    ["Ниша", settings.niche === "auto" ? "Определяется по контексту" : (settings.niche || "—")],
+    ["Память компании", runtime.company_ready ? "Готова" : "Нужно закончить интервью"],
+    ["AI-провайдер", runtime.llm_configured ? "Подключён" : "Не настроен"],
+    ["Отправка", "Только после отдельного одобрения"],
+  ];
+  $("#agent-runtime-details").innerHTML = runtimeRows.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+
+  const stage = $("#agent-stage-filter").value;
+  const sessions = state.conversationSessions.filter((item) => !stage || item.stage === stage);
+  $("#agent-sessions-table").innerHTML = sessions.length
+    ? sessions.map((item) => {
+      const lead = state.leads.find((candidate) => candidate.id === item.lead_id);
+      const rawChat = String(item.external_chat_id || "").split("@", 1)[0].replace(/\D/g, "");
+      const chatLabel = lead?.company_name || (rawChat ? `WhatsApp ••••${rawChat.slice(-4)}` : "Диалог");
+      const context = String(item.summary || "Контекст формируется");
+      const nextAction = item.escalation_status === "required"
+        ? `Передать человеку: ${item.escalation_reason || "нужна проверка"}`
+        : (item.next_action || item.unanswered_question || "Ожидать ответ");
+      return `<tr><td><strong>${escapeHtml(chatLabel)}</strong><small>${escapeHtml(`${item.turn_count || 0} сообщений обработано`)}</small></td><td>${statusPill(item.stage)}</td><td>${escapeHtml(item.intent || "—")}</td><td class="message-preview">${escapeHtml(context.slice(0, 240))}${context.length > 240 ? "…" : ""}</td><td class="message-preview">${escapeHtml(String(nextAction).slice(0, 220))}</td><td>${formatDate(item.updated_at)}</td></tr>`;
+    }).join("")
+    : `<tr><td class="empty-row" colspan="6">Активных диалогов с таким этапом пока нет</td></tr>`;
+}
+
 function renderInbox() {
   const summary = state.data.agent_inbox || {};
   const metrics = [
     ["Новые", summary.new || 0],
-    ["В работе", summary.acknowledged || 0],
+    ["AI обрабатывает", summary.processing || 0],
     ["Черновики", summary.drafted || 0],
-    ["Закрытые", summary.resolved || 0],
+    ["Нужен человек", summary.needs_review || 0],
   ];
   $("#inbox-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
   const filter = $("#inbox-status-filter").value;
@@ -456,7 +520,9 @@ function renderInbox() {
         : item.status !== "resolved" && item.status !== "ignored"
           ? `<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="resolved">Закрыть</button>`
           : "";
-      return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие">${actions}</td></tr>`;
+      const decision = item.decision || {};
+      const decisionMeta = decision.intent ? `<small>${escapeHtml(decision.intent)} · ${escapeHtml(decision.confidence ?? "—")}%</small>` : "";
+      return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}${decisionMeta}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие">${actions}</td></tr>`;
     }).join("")
     : `<tr class="empty-inbox-row"><td colspan="6"><div class="empty-state"><strong>Нет входящих с таким статусом</strong><span>Фоновый worker проверяет личные чаты каждые 30 секунд.</span></div></td></tr>`;
 }
@@ -538,6 +604,7 @@ function renderView(view) {
   if (view === "overview") {
     renderMetrics(); renderFunnel(); renderSafety(); renderTopLeads(); renderJobs();
   } else if (view === "company") renderCompany();
+  else if (view === "agent") renderConversationAgent();
   else if (view === "inbox") renderInbox();
   else if (view === "leads") renderLeads();
   else if (view === "campaigns") renderCampaigns();
@@ -548,7 +615,7 @@ function renderView(view) {
   else if (view === "plugin") renderPlugin();
   else if (view === "audit") renderAudit();
   const canWrite = Boolean(state.data.user.capabilities?.write);
-  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft, #company-profile-form input, #company-profile-form textarea, #company-profile-form button, #knowledge-form input, #knowledge-form textarea, #knowledge-form select, #knowledge-form button, #sync-inbox-button, .inbox-status-action, .archive-knowledge').forEach((control) => {
+  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft, #company-profile-form input, #company-profile-form textarea, #company-profile-form button, #conversation-agent-form input, #conversation-agent-form textarea, #conversation-agent-form select, #conversation-agent-form button, #process-conversations-button, #knowledge-form input, #knowledge-form textarea, #knowledge-form select, #knowledge-form button, #sync-inbox-button, .inbox-status-action, .archive-knowledge').forEach((control) => {
     control.disabled = !canWrite;
   });
 }
@@ -556,6 +623,7 @@ function renderView(view) {
 function renderAll() {
   renderIdentity();
   renderCompany();
+  renderConversationAgent();
   renderInbox();
   renderView($(".view.is-visible")?.dataset.panel || "overview");
 }
@@ -641,6 +709,56 @@ async function saveCompanyProfile(event) {
     await refreshAll({ quiet: true, force: true });
   } catch (error) {
     showToast(error.message, true);
+  }
+}
+
+function linesFromField(form, name) {
+  return String(form.elements.namedItem(name)?.value || "")
+    .split(/\r?\n/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+async function saveConversationAgent(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const body = {
+    enabled: form.elements.namedItem("enabled").checked,
+    auto_create_inbound_leads: form.elements.namedItem("auto_create_inbound_leads").checked,
+    autonomy_mode: form.elements.namedItem("autonomy_mode").value,
+    niche: form.elements.namedItem("niche").value.trim() || "auto",
+    objective: form.elements.namedItem("objective").value.trim(),
+    tone: form.elements.namedItem("tone").value.trim(),
+    instructions: form.elements.namedItem("instructions").value.trim(),
+    qualification_questions: linesFromField(form, "qualification_questions"),
+    forbidden_topics: linesFromField(form, "forbidden_topics"),
+    escalation_rules: linesFromField(form, "escalation_rules"),
+    confidence_threshold: Number(form.elements.namedItem("confidence_threshold").value),
+    max_context_messages: Number(form.elements.namedItem("max_context_messages").value),
+    max_reply_chars: Number(form.elements.namedItem("max_reply_chars").value),
+  };
+  try {
+    state.data.conversation_agent = await api("/api/v1/conversation-agent/settings", { method: "PATCH", body });
+    state.agentDirty = false;
+    renderConversationAgent();
+    showToast("Playbook сохранён. Worker применит его к следующему входящему.");
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function processConversations() {
+  const button = $("#process-conversations-button");
+  button.disabled = true;
+  try {
+    await api("/api/v1/conversation-agent/process", { method: "POST", body: { limit: 3 } });
+    showToast("AI-обработка запущена. Ответы появятся только как черновики.");
+    window.setTimeout(() => refreshAll({ quiet: true, force: true }), 1400);
+    window.setTimeout(() => refreshAll({ quiet: true, force: true }), 4200);
+  } catch (error) {
+    showToast(error.message, true);
+  } finally {
+    button.disabled = !Boolean(state.data?.user?.capabilities?.write);
   }
 }
 
@@ -753,6 +871,10 @@ function bindEvents() {
   $("#invite-form").addEventListener("submit", inviteMember);
   $("#company-profile-form").addEventListener("input", () => { state.profileDirty = true; });
   $("#company-profile-form").addEventListener("submit", saveCompanyProfile);
+  $("#conversation-agent-form").addEventListener("input", () => { state.agentDirty = true; });
+  $("#conversation-agent-form").addEventListener("submit", saveConversationAgent);
+  $("#process-conversations-button").addEventListener("click", processConversations);
+  $("#agent-stage-filter").addEventListener("change", renderConversationAgent);
   $("#knowledge-form").addEventListener("submit", saveCompanyKnowledge);
   $("#inbox-status-filter").addEventListener("change", renderInbox);
   $("#sync-inbox-button").addEventListener("click", syncAgentInbox);

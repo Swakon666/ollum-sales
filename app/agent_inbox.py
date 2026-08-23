@@ -34,6 +34,25 @@ def _external_id(record: dict[str, Any], chat_jid: str, content: str) -> str:
     return "sha256:" + hashlib.sha256(material).hexdigest()
 
 
+def _create_inbound_contact_lead(
+    crm: SalesCRM,
+    *,
+    phone: str,
+    sender_label: str | None,
+) -> dict[str, Any]:
+    """Create a stable CRM placeholder for an otherwise unmatched private contact."""
+    digest = hashlib.sha256(phone.encode("utf-8")).hexdigest()[:20]
+    clean_label = " ".join(str(sender_label or "").split())
+    display = clean_label or f"WhatsApp контакт ·{phone[-4:]}"
+    return crm.upsert_lead(
+        display[:200],
+        f"https://wa-{digest}.contact.invalid/",
+        industry="WhatsApp inbound",
+        source="whatsapp_inbound",
+        phones=[phone],
+    )
+
+
 def sync_whatsapp_inbox(
     crm: SalesCRM,
     workspace_id: str,
@@ -47,6 +66,9 @@ def sync_whatsapp_inbox(
     existing = 0
     matched = 0
     unmatched = 0
+    created_contacts = 0
+    agent_settings = crm.get_conversation_agent_settings(workspace_id)
+    auto_create_contacts = bool(agent_settings["auto_create_inbound_leads"])
 
     for record in records if isinstance(records, list) else []:
         if not isinstance(record, dict):
@@ -73,6 +95,14 @@ def sync_whatsapp_inbox(
         phone = normalize_phone(local_part)
         lead_matches = crm.find_leads_by_phone(phone) if phone else []
         lead_id = str(lead_matches[0]["lead_id"]) if len(lead_matches) == 1 else None
+        if lead_id is None and phone and auto_create_contacts:
+            lead = _create_inbound_contact_lead(
+                crm,
+                phone=phone,
+                sender_label=str(record.get("chat_name") or "").strip() or None,
+            )
+            lead_id = str(lead["id"])
+            created_contacts += 1
         _event, was_created = crm.upsert_agent_inbox_event(
             workspace_id,
             external_id=_external_id(record, chat_jid, content),
@@ -96,6 +126,7 @@ def sync_whatsapp_inbox(
         "existing_events": existing,
         "matched_leads": matched,
         "unmatched_leads": unmatched,
+        "created_inbound_contacts": created_contacts,
         "sent": False,
     }
 
