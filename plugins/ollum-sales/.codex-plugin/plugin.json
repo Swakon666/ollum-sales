@@ -1,0 +1,41 @@
+{
+  "name": "ollum-sales",
+  "version": "0.4.0",
+  "description": "Persistent ChatGPT-powered sales operations, grounded CRM workflows, and operator-controlled WhatsApp outreach.",
+  "author": {
+    "name": "Ollum Group",
+    "url": "https://ollumgroup.ru/"
+  },
+  "homepage": "https://api.ollumgroup.ru/admin",
+  "repository": "https://github.com/Swakon666/ollum-sales",
+  "keywords": [
+    "sales",
+    "crm",
+    "lead-research",
+    "whatsapp",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Ollum Sales",
+    "shortDescription": "Run grounded sales workflows from ChatGPT.",
+    "longDescription": "Turns ChatGPT into Ollum Group's persistent sales operator: onboard a company, maintain CRM memory, research and rank leads, prepare grounded WhatsApp replies, and keep every external send behind exact-recipient approval.",
+    "developerName": "Ollum Group",
+    "category": "Productivity",
+    "capabilities": [
+      "Company onboarding and memory",
+      "Grounded lead research and scoring",
+      "Persistent CRM and follow-ups",
+      "WhatsApp inbox preparation",
+      "Operator-controlled outreach"
+    ],
+    "websiteURL": "https://ollumgroup.ru/",
+    "defaultPrompt": [
+      "Продолжи настройку Ollum Sales и покажи следующий шаг.",
+      "Проверь новые обращения и подготовь безопасные ответы.",
+      "Запусти SAFE-анализ лидов и покажи топ-5."
+    ],
+    "brandColor": "#12D982"
+  },
+  "mcpServers": "./.mcp.json"
+}

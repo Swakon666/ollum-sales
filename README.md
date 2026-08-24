@@ -70,6 +70,19 @@ callback hosts can be dynamically registered.
 Closed-beta OIDC setup and ChatGPT connection instructions are in
 [`docs/CLOSED_BETA.md`](docs/CLOSED_BETA.md).
 
+## Codex plugin package
+
+The versioned Codex plugin source lives in [`plugins/ollum-sales`](plugins/ollum-sales).
+It connects to the same production MCP endpoint with OAuth and intentionally does not
+declare `OLLUM_MCP_BEARER_TOKEN`; this prevents a stale legacy token from overriding the
+OAuth session. Read, analysis, CRM-memory and draft-preparation tools may run autonomously.
+Autopilot start/stop, Google Sheets synchronization, exact-draft approval and every send
+path remain interactive approval gates in the plugin manifest.
+
+The packaged skill is kept byte-for-byte identical to the canonical repository `SKILL.md`
+by regression tests so new onboarding and conversation-agent workflows cannot silently lag
+behind the server release.
+
 The cabinet is served at `https://api.ollumgroup.ru/`. It includes the editable company
 profile and knowledge base, niche/tone/escalation controls for the AI agent, durable dialogue
 sessions, inbound agent queue, CRM, SAFE Autopilot, drafts,
