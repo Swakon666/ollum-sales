@@ -181,6 +181,41 @@ def test_oauth_registration_rejects_unapproved_redirect_hosts(tmp_path) -> None:
     assert asyncio.run(provider.get_client("chatgpt-client")) is None
 
 
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://127.0.0.1:49152/callback/codex-test",
+        "http://[::1]:49152/callback/codex-test",
+    ],
+)
+def test_oauth_registration_accepts_codex_loopback_redirects(
+    tmp_path, redirect_uri: str
+) -> None:
+    provider = _provider(tmp_path)
+    asyncio.run(provider.register_client(_client(redirect_uri=redirect_uri)))
+
+    registered = asyncio.run(provider.get_client("chatgpt-client"))
+    assert registered is not None
+    assert [str(uri) for uri in registered.redirect_uris or []] == [redirect_uri]
+
+
+@pytest.mark.parametrize(
+    "redirect_uri",
+    [
+        "http://localhost:49152/callback/codex-test",
+        "http://evil.example/callback",
+        "http://127.0.0.1:49152/callback#fragment",
+    ],
+)
+def test_oauth_registration_rejects_unsafe_http_redirects(
+    tmp_path, redirect_uri: str
+) -> None:
+    provider = _provider(tmp_path)
+    with pytest.raises(RegistrationError) as error:
+        asyncio.run(provider.register_client(_client(redirect_uri=redirect_uri)))
+    assert error.value.error == "invalid_redirect_uri"
+
+
 def test_oauth_storage_secret_must_be_long_enough(tmp_path) -> None:
     with pytest.raises(ValueError, match="at least 32 bytes"):
         _provider(tmp_path, secret="short")

@@ -35,6 +35,7 @@ from starlette.routing import Route
 POST_LOGIN_REDIRECT_KEY = "post_login_redirect"
 _REQUEST_ID_MAX_LENGTH = 256
 _FORM_BODY_MAX_BYTES = 16_384
+_OAUTH_LOOPBACK_REDIRECT_HOSTS = frozenset({"127.0.0.1", "::1"})
 
 
 class OllumRefreshToken(RefreshToken):
@@ -214,10 +215,22 @@ class PersistentOAuthProvider(
         for uri in uris:
             parsed = urlsplit(str(uri))
             host = (parsed.hostname or "").lower()
-            if parsed.scheme != "https" or host not in self.allowed_redirect_hosts:
+            approved_https = (
+                parsed.scheme == "https" and host in self.allowed_redirect_hosts
+            )
+            approved_loopback = (
+                parsed.scheme == "http" and host in _OAUTH_LOOPBACK_REDIRECT_HOSTS
+            )
+            has_userinfo = parsed.username is not None or parsed.password is not None
+            if (
+                not (approved_https or approved_loopback)
+                or has_userinfo
+                or bool(parsed.fragment)
+            ):
                 raise RegistrationError(
                     "invalid_redirect_uri",
-                    "Only approved HTTPS ChatGPT callback hosts may be registered",
+                    "Only approved HTTPS callbacks or literal HTTP loopback callbacks "
+                    "may be registered",
                 )
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
