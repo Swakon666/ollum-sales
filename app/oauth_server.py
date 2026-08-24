@@ -738,10 +738,46 @@ async def oauth_authorize_complete(request: Request) -> Response:
             outcome="approved" if decision == "allow" else "denied",
             details={"client": "ChatGPT MCP"},
         )
-    return RedirectResponse(
-        redirect_url,
-        status_code=303,
-        headers={"Cache-Control": "no-store"},
+    safe_redirect_url = html.escape(redirect_url, quote=True)
+    approved = decision == "allow"
+    title = "Подключение одобрено" if approved else "Подключение отклонено"
+    copy = (
+        "Разрешение сохранено. Завершите подключение в ChatGPT."
+        if approved
+        else "Подключение не было разрешено. Вернитесь в ChatGPT."
+    )
+    document = f"""<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title} — Ollum Sales</title>
+  <link rel="stylesheet" href="/admin-assets/oauth.css">
+</head>
+<body>
+  <main class="oauth-shell">
+    <section class="oauth-card" aria-labelledby="oauth-handoff-title">
+      <div class="oauth-mark" aria-hidden="true">O</div>
+      <p class="oauth-kicker">OLLUM SALES / OAUTH</p>
+      <h1 id="oauth-handoff-title">{title}</h1>
+      <p class="oauth-copy">{copy}</p>
+      <a class="oauth-action oauth-primary" href="{safe_redirect_url}"
+         rel="noreferrer noopener">Вернуться в ChatGPT</a>
+      <p class="oauth-safety">Переход выполняется только после вашего нажатия.</p>
+    </section>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(
+        document,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'self'; base-uri 'none'; "
+                "frame-ancestors 'none'; form-action 'none'"
+            ),
+            "Referrer-Policy": "no-referrer",
+        },
     )
 
 

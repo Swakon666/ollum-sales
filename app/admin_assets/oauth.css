@@ -80,6 +80,21 @@ h1 {
 
 form { display: grid; gap: 10px; margin-top: 24px; }
 
+.oauth-action {
+  min-height: 48px;
+  display: grid;
+  place-items: center;
+  margin-top: 24px;
+  border: 1px solid var(--ink);
+  border-radius: 14px;
+  padding: 0 18px;
+  color: inherit;
+  font: inherit;
+  font-weight: 700;
+  text-align: center;
+  text-decoration: none;
+}
+
 button {
   min-height: 48px;
   border-radius: 14px;
@@ -94,7 +109,8 @@ button {
 .oauth-primary:hover { background: var(--accent-dark); border-color: var(--accent-dark); }
 .oauth-secondary { background: transparent; color: var(--ink); }
 
-button:focus-visible {
+button:focus-visible,
+.oauth-action:focus-visible {
   outline: 3px solid rgb(18 204 119 / 35%);
   outline-offset: 3px;
 }
