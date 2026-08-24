@@ -13,9 +13,11 @@ from urllib.parse import urlsplit, urlunsplit
 from .data_quality import (
     company_domain_key,
     company_name_key,
+    is_technical_whatsapp_jid,
     location_key,
     normalize_contacts,
     normalize_phone,
+    normalize_whatsapp_jid,
     phone_keys,
 )
 
@@ -1614,9 +1616,14 @@ class SalesCRM:
         return [self._conversation_session_from_row(row) for row in rows]
 
     def claim_next_agent_inbox_event(
-        self, workspace_id: str, *, lease_seconds: int = 180
+        self,
+        workspace_id: str,
+        *,
+        lease_seconds: int = 180,
+        chat_jid: str | None = None,
     ) -> dict[str, Any] | None:
         workspace_id = self._workspace_id(workspace_id)
+        clean_jid = normalize_whatsapp_jid(chat_jid) if chat_jid else None
         now = datetime.now(UTC)
         now_value = now.isoformat(timespec="seconds")
         lock_until = (now + timedelta(seconds=max(30, lease_seconds))).isoformat(
@@ -1624,18 +1631,23 @@ class SalesCRM:
         )
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            where_jid = " AND chat_jid = ?" if clean_jid else ""
+            params: list[Any] = [workspace_id, now_value]
+            if clean_jid:
+                params.append(clean_jid)
             row = connection.execute(
-                """
+                f"""
                 SELECT id FROM agent_inbox_events
                 WHERE workspace_id = ?
                   AND (
                     status = 'new'
                     OR (status = 'processing' AND agent_lock_until <= ?)
                   )
+                  {where_jid}
                 ORDER BY received_at ASC, created_at ASC
                 LIMIT 1
                 """,
-                (workspace_id, now_value),
+                params,
             ).fetchone()
             if row is None:
                 return None
@@ -1745,7 +1757,7 @@ class SalesCRM:
         workspace_id = self._workspace_id(workspace_id)
         self.get_workspace(workspace_id)
         clean_external_id = external_id.strip()
-        clean_jid = chat_jid.strip()
+        clean_jid = normalize_whatsapp_jid(chat_jid)
         clean_message = " ".join(message_text.split())
         clean_source = source.strip().lower()
         if not clean_external_id or len(clean_external_id) > 500:
@@ -1754,6 +1766,8 @@ class SalesCRM:
             )
         if not clean_jid or len(clean_jid) > 500:
             raise ValueError("chat_jid is required and must not exceed 500 characters")
+        if is_technical_whatsapp_jid(clean_jid):
+            raise ValueError("technical WhatsApp JIDs cannot enter the agent inbox")
         if not clean_message:
             raise ValueError("message_text must not be empty")
         if len(clean_message) > 4000:
@@ -1839,6 +1853,7 @@ class SalesCRM:
         workspace_id: str,
         *,
         status: str | None = None,
+        chat_jid: str | None = None,
         limit: int = 100,
     ) -> list[dict[str, Any]]:
         workspace_id = self._workspace_id(workspace_id)
@@ -1850,6 +1865,9 @@ class SalesCRM:
             )
             where += " AND status = ?"
             params.append(clean_status)
+        if chat_jid:
+            where += " AND chat_jid = ?"
+            params.append(normalize_whatsapp_jid(chat_jid))
         params.append(max(1, min(int(limit), 500)))
         with self.connect() as connection:
             rows = connection.execute(

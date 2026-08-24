@@ -1,6 +1,6 @@
 # Ollum Sales MCP — ChatGPT-native Edition
 
-Version **0.11.0** makes ChatGPT the only reasoning engine and adds a persistent,
+Version **0.11.1** makes ChatGPT the only reasoning engine and adds a persistent,
 ChatGPT-compatible OAuth 2.1 authorization server with dynamic client registration. The server uses no OpenAI or
 other LLM API key: it synchronizes WhatsApp every 15 minutes, stores durable work, gives
 ChatGPT a bounded MCP fact packet, validates the returned structured decision, and atomically
@@ -11,6 +11,9 @@ never approve or send. The OAuth/OIDC-protected service keeps
 the role-aware workspace cabinet on `api.ollumgroup.ru`, the ChatGPT MCP connection on
 `mcp.ollumgroup.ru`, and private browser-based WhatsApp pairing. It retains the
 persistent SAFE-first Autopilot, grounded scoring, reports, and Google Sheets panel.
+WhatsApp LID identities are resolved through the bridge's persistent LID→phone map,
+and every inbox/sync/preparation tool accepts an exact phone or JID target without
+falling back to another conversation.
 The full vendored upstream projects remain under `upstream/`; the WhatsApp bridge has
 a small audited pairing-status/PNG adapter while Ollum business logic stays in `app/`.
 

@@ -285,6 +285,77 @@ class TestWhatsAppService(unittest.TestCase):
         )
         self.assertIsInstance(records[0]["content"], str)
 
+    def test_list_messages_resolves_modern_lid_chat_to_phone_jid(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            database_path = root / "messages.db"
+            connection = sqlite3.connect(database_path)
+            connection.executescript(
+                """
+                CREATE TABLE chats (
+                    jid TEXT PRIMARY KEY,
+                    name TEXT,
+                    last_message_time TIMESTAMP
+                );
+                CREATE TABLE messages (
+                    id TEXT,
+                    chat_jid TEXT,
+                    sender TEXT,
+                    content TEXT,
+                    timestamp TIMESTAMP,
+                    is_from_me BOOLEAN,
+                    media_type TEXT,
+                    PRIMARY KEY (id, chat_jid)
+                );
+                """
+            )
+            connection.execute(
+                "INSERT INTO chats VALUES (?, ?, ?)",
+                ("12345678901234@lid", "LID contact", "2026-08-24T16:41:01+00:00"),
+            )
+            connection.execute(
+                "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "lid-in-1",
+                    "12345678901234@lid",
+                    "12345678901234",
+                    "Расскажите подробнее",
+                    "2026-08-24T16:41:01+00:00",
+                    0,
+                    None,
+                ),
+            )
+            connection.commit()
+            connection.close()
+
+            identity = sqlite3.connect(root / "whatsapp.db")
+            identity.execute(
+                "CREATE TABLE whatsmeow_lid_map (lid TEXT PRIMARY KEY, pn TEXT NOT NULL)"
+            )
+            identity.execute(
+                "INSERT INTO whatsmeow_lid_map VALUES (?, ?)",
+                ("12345678901234", "79779335513"),
+            )
+            identity.commit()
+            identity.close()
+
+            with patch.object(
+                whatsapp_service.wa,
+                "MESSAGES_DB_PATH",
+                str(database_path),
+            ):
+                targeted = whatsapp_service.list_messages(
+                    chat_jid="79779335513@s.whatsapp.net",
+                    limit=5,
+                )
+                global_records = whatsapp_service.list_messages(limit=5)
+
+        self.assertEqual(len(targeted), 1)
+        self.assertEqual(targeted[0]["id"], "lid-in-1")
+        self.assertEqual(targeted[0]["chat_jid"], "79779335513@s.whatsapp.net")
+        self.assertEqual(targeted[0]["jid_resolution"], "lid_to_phone")
+        self.assertEqual(global_records[0]["chat_jid"], "79779335513@s.whatsapp.net")
+
     def test_latest_unanswered_inbound_does_not_reuse_an_already_replied_message(
         self,
     ) -> None:

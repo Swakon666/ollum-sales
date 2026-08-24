@@ -350,7 +350,13 @@ class ConversationAgent:
             increment_turn=True,
         )
 
-    def prepare_pending(self, workspace_id: str, *, limit: int = 3) -> dict[str, Any]:
+    def prepare_pending(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 3,
+        chat_jid: str | None = None,
+    ) -> dict[str, Any]:
         """Lease inbound work and return bounded facts for reasoning inside ChatGPT."""
 
         agent_settings = self.crm.get_conversation_agent_settings(workspace_id)
@@ -377,7 +383,9 @@ class ConversationAgent:
         needs_review: list[dict[str, Any]] = []
         for _ in range(max(1, min(int(limit), 5))):
             event = self.crm.claim_next_agent_inbox_event(
-                workspace_id, lease_seconds=900
+                workspace_id,
+                lease_seconds=900,
+                chat_jid=chat_jid,
             )
             if event is None:
                 break
@@ -420,6 +428,7 @@ class ConversationAgent:
             "decision_schema": ConversationDecision.model_json_schema(),
             "submit_tool": "sales_submit_conversation_decision",
             "items": items,
+            "target_chat_jid": chat_jid,
             "safety": {
                 "draft_only": True,
                 "approval_forbidden": True,

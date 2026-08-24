@@ -80,6 +80,81 @@ def test_sync_whatsapp_inbox_queues_only_latest_unanswered_private_chats(
     assert attachment["lead_id"] is not None
 
 
+def test_targeted_sync_and_queue_selection_never_fall_back_to_another_contact(
+    tmp_path, monkeypatch
+) -> None:
+    crm = SalesCRM(tmp_path / "targeted.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    target_jid = "79779335513@s.whatsapp.net"
+    other_jid = "79990000000@s.whatsapp.net"
+    calls: list[tuple[str | None, int]] = []
+
+    def fake_list_messages(
+        *, chat_jid: str | None = None, limit: int
+    ) -> list[dict[str, object]]:
+        calls.append((chat_jid, limit))
+        return [
+            {
+                "id": "target-in-1",
+                "timestamp": "2026-08-24T16:41:01+00:00",
+                "chat_jid": target_jid,
+                "chat_name": "Test contact",
+                "content": "Расскажите подробнее",
+                "is_from_me": False,
+                "media_type": None,
+            }
+        ]
+
+    monkeypatch.setattr(agent_inbox, "list_messages", fake_list_messages)
+    synced = agent_inbox.sync_whatsapp_inbox(
+        crm,
+        "ollum-group",
+        phone="+7 (977) 933-55-13",
+    )
+    crm.upsert_agent_inbox_event(
+        "ollum-group",
+        external_id="other-in-1",
+        chat_jid=other_jid,
+        message_text="Другой диалог",
+        received_at="2026-08-24T16:42:00+00:00",
+    )
+
+    assert calls == [(target_jid, 100)]
+    assert synced["target_chat_jid"] == target_jid
+    assert synced["new_events"] == 1
+    targeted = crm.list_agent_inbox_events(
+        "ollum-group", status="new", chat_jid=target_jid
+    )
+    missing = crm.list_agent_inbox_events(
+        "ollum-group",
+        status="new",
+        chat_jid="78880000000@s.whatsapp.net",
+    )
+    assert [item["external_id"] for item in targeted] == ["target-in-1"]
+    assert missing == []
+    assert (
+        crm.claim_next_agent_inbox_event(
+            "ollum-group", chat_jid="78880000000@s.whatsapp.net"
+        )
+        is None
+    )
+    claimed = crm.claim_next_agent_inbox_event("ollum-group", chat_jid=target_jid)
+    assert claimed is not None
+    assert claimed["external_id"] == "target-in-1"
+
+
+def test_target_resolution_rejects_conflicting_phone_and_jid() -> None:
+    try:
+        agent_inbox.resolve_target_chat_jid(
+            phone="+79779335513",
+            chat_jid="79990000000@s.whatsapp.net",
+        )
+    except ValueError as exc:
+        assert "different WhatsApp contacts" in str(exc)
+    else:
+        raise AssertionError("conflicting target identifiers must be rejected")
+
+
 def test_next_action_moves_from_interview_to_inbound_reply_without_sending(
     tmp_path,
 ) -> None:

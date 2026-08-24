@@ -25,7 +25,11 @@ from .admin import (
     SecurityHeadersMiddleware,
     create_admin_routes,
 )
-from .agent_inbox import next_agent_action, sync_whatsapp_inbox
+from .agent_inbox import (
+    next_agent_action,
+    resolve_target_chat_jid,
+    sync_whatsapp_inbox,
+)
 from .auth import OIDCSessionManager, build_mcp_auth
 from .autopilot import AutopilotService
 from .company_search import search_company_websites
@@ -407,20 +411,37 @@ def sales_complete_company_onboarding(
 
 
 @_write_tool()
-def sales_sync_whatsapp_inbox(scan_limit: int = 100) -> dict[str, Any]:
-    """Read the local WhatsApp store and queue unanswered private inbound events; never send."""
+def sales_sync_whatsapp_inbox(
+    scan_limit: int = 100,
+    phone: str | None = None,
+    chat_jid: str | None = None,
+) -> dict[str, Any]:
+    """Queue unanswered inbound events; pass phone/JID for an exact contact; never send."""
     member = _current_mcp_member(minimum_role="operator")
-    return sync_whatsapp_inbox(crm, str(member["workspace_id"]), scan_limit=scan_limit)
+    return sync_whatsapp_inbox(
+        crm,
+        str(member["workspace_id"]),
+        scan_limit=scan_limit,
+        phone=phone,
+        chat_jid=chat_jid,
+    )
 
 
 @_read_tool()
 def sales_list_agent_inbox(
-    status: str | None = "new", limit: int = 50
+    status: str | None = "new",
+    limit: int = 50,
+    phone: str | None = None,
+    chat_jid: str | None = None,
 ) -> list[dict[str, Any]]:
-    """List the minimal durable inbound queue for the authenticated workspace."""
+    """List durable inbound work; always pass phone/JID when a contact is known."""
     member = _current_mcp_member(minimum_role="viewer")
+    target_chat_jid = resolve_target_chat_jid(phone=phone, chat_jid=chat_jid)
     return crm.list_agent_inbox_events(
-        str(member["workspace_id"]), status=status, limit=limit
+        str(member["workspace_id"]),
+        status=status,
+        chat_jid=target_chat_jid,
+        limit=limit,
     )
 
 
@@ -449,10 +470,18 @@ def sales_update_agent_inbox_status(
 
 
 @_read_tool()
-def sales_agent_next_action() -> dict[str, Any]:
-    """Resume the highest-priority durable task: onboarding, inbound reply, or SAFE lead work."""
+def sales_agent_next_action(
+    phone: str | None = None,
+    chat_jid: str | None = None,
+) -> dict[str, Any]:
+    """Resume work globally or for one exact WhatsApp phone/JID without fallback."""
     member = _current_mcp_member(minimum_role="viewer")
-    return next_agent_action(crm, str(member["workspace_id"]))
+    return next_agent_action(
+        crm,
+        str(member["workspace_id"]),
+        phone=phone,
+        chat_jid=chat_jid,
+    )
 
 
 @_read_tool()
@@ -545,21 +574,27 @@ def sales_prepare_conversation_batch(
     limit: int = 3,
     sync_inbox: bool = True,
     scan_limit: int = 100,
+    phone: str | None = None,
+    chat_jid: str | None = None,
 ) -> dict[str, Any]:
-    """Sync and lease bounded WhatsApp facts for ChatGPT; then submit each decision."""
+    """Sync/lease WhatsApp facts; pass phone/JID to forbid cross-contact fallback."""
     member = _current_mcp_member(minimum_role="operator")
     workspace_id = str(member["workspace_id"])
+    target_chat_jid = resolve_target_chat_jid(phone=phone, chat_jid=chat_jid)
     sync_result = (
         sync_whatsapp_inbox(
             crm,
             workspace_id,
             scan_limit=max(1, min(int(scan_limit), 500)),
+            chat_jid=target_chat_jid,
         )
         if sync_inbox
         else None
     )
     result = conversation_agent.prepare_pending(
-        workspace_id, limit=max(1, min(int(limit), 5))
+        workspace_id,
+        limit=max(1, min(int(limit), 5)),
+        chat_jid=target_chat_jid,
     )
     result["inbox_sync"] = sync_result
     return result

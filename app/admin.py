@@ -21,7 +21,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .agent_inbox import sync_whatsapp_inbox
+from .agent_inbox import resolve_target_chat_jid, sync_whatsapp_inbox
 from .auth import AuthenticationError, OIDCSessionManager
 from .autopilot import AutopilotService
 from .config import Settings
@@ -745,10 +745,15 @@ async def api_archive_company_knowledge(
 async def api_agent_inbox(
     request: Request, context: AdminContext, user: dict[str, Any]
 ) -> Response:
+    target_chat_jid = resolve_target_chat_jid(
+        phone=request.query_params.get("phone") or None,
+        chat_jid=request.query_params.get("chat_jid") or None,
+    )
     return JSONResponse(
         context.crm.list_agent_inbox_events(
             str(user["workspace_id"]),
             status=request.query_params.get("status") or None,
+            chat_jid=target_chat_jid,
             limit=_bounded_int(
                 request.query_params.get("limit", 100),
                 name="limit",
@@ -773,6 +778,8 @@ async def api_sync_agent_inbox(
             minimum=1,
             maximum=100,
         ),
+        phone=body.get("phone") or None,
+        chat_jid=body.get("chat_jid") or None,
     )
     context.crm.record_admin_audit(
         actor=str(user["email"]),

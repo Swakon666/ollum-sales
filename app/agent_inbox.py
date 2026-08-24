@@ -5,8 +5,30 @@ from datetime import UTC, datetime
 from typing import Any
 
 from .crm import SalesCRM, utc_now
-from .data_quality import normalize_phone
+from .data_quality import (
+    is_technical_whatsapp_jid,
+    normalize_phone,
+    normalize_whatsapp_jid,
+)
 from .whatsapp_service import list_messages
+
+
+def resolve_target_chat_jid(
+    *,
+    phone: str | None = None,
+    chat_jid: str | None = None,
+) -> str | None:
+    """Resolve an optional exact private-chat target and reject ambiguous input."""
+    phone_jid = normalize_whatsapp_jid(phone) if phone else None
+    explicit_jid = normalize_whatsapp_jid(chat_jid) if chat_jid else None
+    if phone_jid and explicit_jid and phone_jid != explicit_jid:
+        raise ValueError("phone and chat_jid refer to different WhatsApp contacts")
+    target = explicit_jid or phone_jid
+    if target is None:
+        return None
+    if not target.endswith("@s.whatsapp.net") or is_technical_whatsapp_jid(target):
+        raise ValueError("target must be a private WhatsApp phone-number JID")
+    return target
 
 
 def _received_at(value: Any) -> str:
@@ -58,9 +80,17 @@ def sync_whatsapp_inbox(
     workspace_id: str,
     *,
     scan_limit: int = 100,
+    phone: str | None = None,
+    chat_jid: str | None = None,
 ) -> dict[str, Any]:
     """Persist only the latest unanswered inbound event for each private chat."""
-    records = list_messages(limit=max(1, min(int(scan_limit), 100)))
+    target_chat_jid = resolve_target_chat_jid(phone=phone, chat_jid=chat_jid)
+    bounded_limit = max(1, min(int(scan_limit), 100))
+    records = (
+        list_messages(chat_jid=target_chat_jid, limit=bounded_limit)
+        if target_chat_jid
+        else list_messages(limit=bounded_limit)
+    )
     seen_chats: set[str] = set()
     created = 0
     existing = 0
@@ -127,12 +157,20 @@ def sync_whatsapp_inbox(
         "matched_leads": matched,
         "unmatched_leads": unmatched,
         "created_inbound_contacts": created_contacts,
+        "target_chat_jid": target_chat_jid,
         "sent": False,
     }
 
 
-def next_agent_action(crm: SalesCRM, workspace_id: str) -> dict[str, Any]:
+def next_agent_action(
+    crm: SalesCRM,
+    workspace_id: str,
+    *,
+    phone: str | None = None,
+    chat_jid: str | None = None,
+) -> dict[str, Any]:
     """Build a resumable, side-effect-free instruction for ChatGPT."""
+    target_chat_jid = resolve_target_chat_jid(phone=phone, chat_jid=chat_jid)
     onboarding = crm.get_company_onboarding_state(workspace_id)
     if onboarding["onboarding_status"] != "ready":
         return {
@@ -150,7 +188,12 @@ def next_agent_action(crm: SalesCRM, workspace_id: str) -> dict[str, Any]:
             "external_side_effect": False,
         }
 
-    pending = crm.list_agent_inbox_events(workspace_id, status="new", limit=1)
+    pending = crm.list_agent_inbox_events(
+        workspace_id,
+        status="new",
+        chat_jid=target_chat_jid,
+        limit=1,
+    )
     if pending:
         event = pending[0]
         lead = crm.get_lead(str(event["lead_id"])) if event.get("lead_id") else None
@@ -166,6 +209,7 @@ def next_agent_action(crm: SalesCRM, workspace_id: str) -> dict[str, Any]:
                 "facts only. Saving a draft is allowed; approval and sending remain two separate "
                 "operator actions."
             ),
+            "target_chat_jid": target_chat_jid,
             "external_side_effect": False,
         }
 
@@ -177,6 +221,7 @@ def next_agent_action(crm: SalesCRM, workspace_id: str) -> dict[str, Any]:
         "priority": 3,
         "qualified_leads": qualified,
         "inbox": crm.agent_inbox_summary(workspace_id),
+        "target_chat_jid": target_chat_jid,
         "instruction": (
             "Research, score and draft only. Do not approve or send without the required "
             "separate operator actions."
