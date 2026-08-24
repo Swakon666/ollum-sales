@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import html
+import re
 import time
 from dataclasses import replace
 from typing import Any
@@ -320,6 +322,16 @@ def _pending_oauth_request(provider: PersistentOAuthProvider) -> str:
     return parse_qs(urlsplit(authorization_url).query)["request_id"][0]
 
 
+def _oauth_handoff_url(document: str) -> str:
+    match = re.search(
+        r'<a class="oauth-action oauth-primary" href="([^"]+)"[^>]*>'
+        r"Вернуться в ChatGPT</a>",
+        document,
+    )
+    assert match is not None
+    return html.unescape(match.group(1))
+
+
 def test_admin_requires_session_and_sets_security_headers(admin_client) -> None:
     client, _context, _autopilot, _sheets = admin_client
 
@@ -484,8 +496,14 @@ def test_chatgpt_oauth_consent_requires_csrf_and_issues_single_use_code(
         },
         follow_redirects=False,
     )
-    assert approved.status_code == 303
-    callback = urlsplit(approved.headers["location"])
+    assert approved.status_code == 200
+    assert approved.headers["cache-control"] == "no-store"
+    assert approved.headers["referrer-policy"] == "no-referrer"
+    assert "default-src 'none'" in approved.headers["content-security-policy"]
+    assert "Подключение одобрено" in approved.text
+    assert "Переход выполняется только после вашего нажатия" in approved.text
+    assert "<script" not in approved.text
+    callback = urlsplit(_oauth_handoff_url(approved.text))
     assert callback.scheme == "https"
     assert callback.netloc == "chatgpt.com"
     callback_params = parse_qs(callback.query)
@@ -502,6 +520,34 @@ def test_chatgpt_oauth_consent_requires_csrf_and_issues_single_use_code(
         follow_redirects=False,
     )
     assert replay.status_code == 400
+
+
+def test_chatgpt_oauth_denial_uses_explicit_safe_handoff(admin_client) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+    provider = client.app.app.state.oauth_provider
+    request_id = _pending_oauth_request(provider)
+    _login(client)
+
+    denied = client.post(
+        "/oauth/authorize/complete",
+        data={
+            "request_id": request_id,
+            "csrf": "test-csrf-token",
+            "decision": "deny",
+        },
+        follow_redirects=False,
+    )
+
+    assert denied.status_code == 200
+    assert "Подключение отклонено" in denied.text
+    callback = urlsplit(_oauth_handoff_url(denied.text))
+    callback_params = parse_qs(callback.query)
+    assert callback.scheme == "https"
+    assert callback.netloc == "chatgpt.com"
+    assert callback_params == {
+        "error": ["access_denied"],
+        "state": ["test-state"],
+    }
 
 
 def test_expired_admin_session_is_rejected(admin_client) -> None:

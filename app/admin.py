@@ -178,25 +178,29 @@ class SecurityHeadersMiddleware:
         async def send_with_headers(message: dict[str, Any]) -> None:
             if message["type"] == "http.response.start":
                 headers = list(message.get("headers", []))
+                default_security_headers = [
+                    (b"x-content-type-options", b"nosniff"),
+                    (b"x-frame-options", b"DENY"),
+                    (b"referrer-policy", b"no-referrer"),
+                    (
+                        b"permissions-policy",
+                        b"camera=(), microphone=(), geolocation=(), payment=()",
+                    ),
+                    (
+                        b"content-security-policy",
+                        (
+                            b"default-src 'self'; base-uri 'self'; form-action 'self'; "
+                            b"frame-ancestors 'none'; object-src 'none'; "
+                            b"img-src 'self' data:; style-src 'self'; "
+                            b"script-src 'self'; connect-src 'self'"
+                        ),
+                    ),
+                ]
+                existing_header_names = {name.lower() for name, _value in headers}
                 headers.extend(
-                    [
-                        (b"x-content-type-options", b"nosniff"),
-                        (b"x-frame-options", b"DENY"),
-                        (b"referrer-policy", b"no-referrer"),
-                        (
-                            b"permissions-policy",
-                            b"camera=(), microphone=(), geolocation=(), payment=()",
-                        ),
-                        (
-                            b"content-security-policy",
-                            (
-                                b"default-src 'self'; base-uri 'self'; form-action 'self'; "
-                                b"frame-ancestors 'none'; object-src 'none'; "
-                                b"img-src 'self' data:; style-src 'self'; "
-                                b"script-src 'self'; connect-src 'self'"
-                            ),
-                        ),
-                    ]
+                    (name, value)
+                    for name, value in default_security_headers
+                    if name not in existing_header_names
                 )
                 request_headers = dict(scope.get("headers", []))
                 forwarded_proto = request_headers.get(b"x-forwarded-proto", b"")
