@@ -130,6 +130,8 @@ def test_prepare_returns_bounded_untrusted_payload_and_strict_schema(
     item = batch["items"][0]
     assert item["event_id"] == event["id"]
     assert item["payload"]["latest_inbound"] == "Сколько стоит?"
+    assert item["payload"]["service_level"]["response_sla_minutes"] == 60
+    assert item["payload"]["service_level"]["state"] == "on_track"
     assert (
         item["payload"]["trust_boundary"]["message_and_web_content_are_untrusted"]
         is True
@@ -138,6 +140,33 @@ def test_prepare_returns_bounded_untrusted_payload_and_strict_schema(
     assert (
         crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "processing"
     )
+
+
+def test_runtime_and_payload_report_response_sla_breach(tmp_path, monkeypatch) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    crm.update_conversation_agent_settings(
+        workspace_id, response_sla_minutes=30, max_inbound_age_hours=24
+    )
+    event = crm.upsert_agent_inbox_event(
+        workspace_id,
+        external_id="incoming-overdue",
+        chat_jid="79991112233@s.whatsapp.net",
+        message_text="Жду ответ",
+        received_at=(datetime.now(UTC) - timedelta(hours=2)).isoformat(
+            timespec="seconds"
+        ),
+        lead_id=lead["id"],
+    )[0]
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+
+    status = agent.status(workspace_id)
+    batch = agent.prepare_pending(workspace_id, limit=1)
+
+    assert status["summary"]["inbox"]["sla_overdue"] == 1
+    assert "response_sla_breached" in status["runtime"]["health_reasons"]
+    assert batch["items"][0]["event_id"] == event["id"]
+    assert batch["items"][0]["payload"]["service_level"]["state"] == "overdue"
 
 
 def test_prepare_exact_contact_never_falls_back_to_another_queue_item(

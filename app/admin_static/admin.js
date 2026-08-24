@@ -25,6 +25,12 @@ const STATUS_LABELS = {
   ignored: "Игнор", processing: "Передано ChatGPT", needs_review: "Нужен человек",
   discovery: "Знакомство", qualification: "Квалификация", objection: "Возражение",
   handoff: "Передача менеджеру", closed: "Закрыт", observe: "Наблюдение",
+  on_track: "В SLA", at_risk: "SLA под риском", overdue: "SLA просрочен",
+  event_not_in_review: "Повтор доступен только после проверки",
+  draft_already_exists: "У обращения уже есть черновик",
+  lead_not_linked: "Сначала сопоставьте лид",
+  inbound_expired: "Входящее вышло за окно свежести",
+  invalid_received_at: "Некорректное время входящего",
 };
 
 const VIEW_TITLES = {
@@ -82,14 +88,22 @@ function formatDate(value, fallback = "—") {
   }).format(date);
 }
 
+function formatMinutes(value) {
+  const minutes = Math.max(0, Number(value) || 0);
+  if (minutes < 60) return `${minutes} мин`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours} ч ${rest} мин` : `${hours} ч`;
+}
+
 function label(value) {
   return STATUS_LABELS[value] || String(value || "—").replaceAll("_", " ");
 }
 
 function statusClass(value) {
   if (["completed", "ready", "active", "qualified", "approved", "won", "sent", "resolved"].includes(value)) return "is-good";
-  if (["failed", "lost", "cancelled", "needs_review"].includes(value)) return "is-bad";
-  if (["queued", "running", "paused", "blocked", "draft", "drafted", "acknowledged", "researching", "processing"].includes(value)) return "is-warn";
+  if (["failed", "lost", "cancelled", "needs_review", "overdue"].includes(value)) return "is-bad";
+  if (["queued", "running", "paused", "blocked", "draft", "drafted", "acknowledged", "researching", "processing", "at_risk"].includes(value)) return "is-warn";
   return "";
 }
 
@@ -456,13 +470,13 @@ function renderConversationAgent() {
     ["Ждут ChatGPT", Number(inbox.new || 0) + Number(inbox.processing_active ?? inbox.processing ?? 0)],
     ["Черновики", inbox.drafted || 0],
     ["Нужен человек", inbox.needs_review || 0],
-    ["Активные диалоги", summary.active_sessions || 0],
+    ["SLA просрочено", inbox.sla_overdue || 0],
   ];
   $("#agent-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
 
   const form = $("#conversation-agent-form");
   if (!state.agentDirty && !form.contains(document.activeElement)) {
-    ["niche", "objective", "tone", "instructions", "autonomy_mode", "confidence_threshold", "max_context_messages", "max_reply_chars", "max_inbound_age_hours"].forEach((name) => {
+    ["niche", "objective", "tone", "instructions", "autonomy_mode", "confidence_threshold", "max_context_messages", "max_reply_chars", "max_inbound_age_hours", "response_sla_minutes"].forEach((name) => {
       const field = form.elements.namedItem(name);
       if (field) field.value = settings[name] ?? "";
     });
@@ -481,6 +495,8 @@ function renderConversationAgent() {
     ["Память компании", runtime.company_ready ? "Готова" : "Можно дополнять в чате"],
     ["Синхронизация WhatsApp", "Каждые 15 минут"],
     ["Окно свежести", `${settings.max_inbound_age_hours || 168} ч`],
+    ["SLA ответа", `${settings.response_sla_minutes || 60} мин`],
+    ["Самое долгое открытое", formatMinutes(inbox.oldest_open_minutes || 0)],
     ["Lease очереди", Number(inbox.processing_expired || 0) ? `Просрочено: ${Number(inbox.processing_expired)}` : "Норма"],
     ["LLM API-ключ", "Не используется"],
     ["Отправка", "Только после отдельного одобрения"],
@@ -507,11 +523,11 @@ function renderInbox() {
   const summary = state.data.agent_inbox || {};
   const metrics = [
     ["Новые", summary.new || 0],
-    ["Передано ChatGPT", summary.processing || 0],
-    ["Черновики", summary.drafted || 0],
+    ["SLA просрочено", summary.sla_overdue || 0],
+    ["Самое долгое", formatMinutes(summary.oldest_open_minutes || 0)],
     ["Нужен человек", summary.needs_review || 0],
   ];
-  $("#inbox-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
+  $("#inbox-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${escapeHtml(String(value))}</strong></article>`).join("");
   const filter = $("#inbox-status-filter").value;
   const events = state.inbox.filter((item) => !filter || item.status === filter);
   $("#inbox-table").innerHTML = events.length
@@ -520,14 +536,19 @@ function renderInbox() {
       const leadControl = item.lead_id
         ? `<code>${escapeHtml(String(item.lead_id).slice(0, 8))}</code>`
         : `<select class="inbox-lead-select" data-event-id="${escapeHtml(item.id)}" aria-label="Сопоставить входящее с лидом"><option value="">Выбрать лид…</option>${state.leads.map((lead) => `<option value="${escapeHtml(lead.id)}">${escapeHtml(lead.company_name)}</option>`).join("")}</select>`;
-      const actions = item.status === "new"
-        ? `<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="acknowledged">В работу</button>`
-        : item.status !== "resolved" && item.status !== "ignored"
-          ? `<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="resolved">Закрыть</button>`
-          : "";
+      const actions = [];
+      if (item.status === "new") actions.push(`<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="acknowledged">В работу</button>`);
+      if (item.status === "needs_review") {
+        const retryTitle = item.retryable ? "Вернуть в очередь ChatGPT" : label(item.retry_block_reason);
+        actions.push(`<button class="text-button inbox-retry-action" data-event-id="${escapeHtml(item.id)}" title="${escapeHtml(retryTitle)}" ${item.retryable ? "" : "disabled"}>Повторить</button>`);
+        actions.push(`<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="ignored">Игнор</button>`);
+      }
+      if (!["resolved", "ignored"].includes(item.status)) actions.push(`<button class="text-button inbox-status-action" data-event-id="${escapeHtml(item.id)}" data-status="resolved">Закрыть</button>`);
       const decision = item.decision || {};
       const decisionMeta = decision.intent ? `<small>${escapeHtml(decision.intent)} · ${escapeHtml(decision.confidence ?? "—")}%</small>` : "";
-      return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}${decisionMeta}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие">${actions}</td></tr>`;
+      const errorMeta = item.agent_error ? `<small class="inbox-error">${escapeHtml(String(item.agent_error).slice(0, 240))}</small>` : "";
+      const sla = item.sla_state === "closed" ? "" : `<small>${statusPill(item.sla_state)} · ${escapeHtml(formatMinutes(item.age_minutes))}</small>`;
+      return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}${sla}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}${decisionMeta}${errorMeta}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие"><div class="inbox-actions">${actions.join("")}</div></td></tr>`;
     }).join("")
     : `<tr class="empty-inbox-row"><td colspan="6"><div class="empty-state"><strong>Нет входящих с таким статусом</strong><span>Фоновая синхронизация проверяет личные чаты каждые 15 минут.</span></div></td></tr>`;
 }
@@ -746,6 +767,7 @@ async function saveConversationAgent(event) {
     max_context_messages: Number(form.elements.namedItem("max_context_messages").value),
     max_reply_chars: Number(form.elements.namedItem("max_reply_chars").value),
     max_inbound_age_hours: Number(form.elements.namedItem("max_inbound_age_hours").value),
+    response_sla_minutes: Number(form.elements.namedItem("response_sla_minutes").value),
   };
   try {
     state.data.conversation_agent = await api("/api/v1/conversation-agent/settings", { method: "PATCH", body });
@@ -818,6 +840,17 @@ async function updateInboxStatus(eventId, status) {
   try {
     await api(`/api/v1/agent/inbox/${encodeURIComponent(eventId)}`, { method: "PATCH", body: { status } });
     showToast("Статус обращения обновлён");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function retryInboxEvent(eventId) {
+  if (!window.confirm("Вернуть это обращение в очередь ChatGPT? Попытки будут сброшены, отправка останется выключена.")) return;
+  try {
+    await api(`/api/v1/agent/inbox/${encodeURIComponent(eventId)}/retry`, { method: "POST", body: { confirm_retry: true } });
+    showToast("Обращение возвращено в очередь ChatGPT");
     await refreshAll({ quiet: true, force: true });
   } catch (error) {
     showToast(error.message, true);
@@ -909,6 +942,12 @@ function bindEvents() {
     const inboxAction = event.target.closest(".inbox-status-action");
     if (inboxAction) {
       await updateInboxStatus(inboxAction.dataset.eventId, inboxAction.dataset.status);
+      return;
+    }
+
+    const inboxRetry = event.target.closest(".inbox-retry-action");
+    if (inboxRetry && !inboxRetry.disabled) {
+      await retryInboxEvent(inboxRetry.dataset.eventId);
       return;
     }
 

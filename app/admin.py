@@ -804,6 +804,12 @@ async def api_update_agent_inbox(
     lead_id = str(body.get("lead_id") or "").strip()
     if not status and not lead_id:
         raise ValueError("status or lead_id is required")
+    if status and status not in {"acknowledged", "resolved", "ignored"}:
+        raise ValueError(
+            "status must be acknowledged, resolved or ignored; use the retry endpoint"
+        )
+    if body.get("draft_id") is not None:
+        raise ValueError("draft_id cannot be changed through this endpoint")
     result = context.crm.get_agent_inbox_event(workspace_id, event_id)
     if lead_id:
         result = context.crm.link_agent_inbox_event(workspace_id, event_id, lead_id)
@@ -823,6 +829,32 @@ async def api_update_agent_inbox(
         details={
             "status": result["status"],
             "lead_linked": bool(lead_id),
+        },
+    )
+    return JSONResponse(result)
+
+
+@admin_endpoint(write=True)
+async def api_retry_agent_inbox(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    if body.get("confirm_retry") is not True:
+        raise ValueError("confirm_retry=true is required")
+    workspace_id = str(user["workspace_id"])
+    event_id = str(request.path_params["event_id"])
+    result = context.crm.requeue_agent_inbox_event(workspace_id, event_id)
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="agent.inbox_retry",
+        target_type="agent_inbox_event",
+        target_id=result["id"],
+        outcome="success",
+        details={
+            "previous_status": result["previous_status"],
+            "status": result["status"],
+            "idempotent": result["idempotent"],
+            "sent": False,
         },
     )
     return JSONResponse(result)
@@ -863,6 +895,7 @@ async def api_update_conversation_agent_settings(
         "max_context_messages",
         "max_reply_chars",
         "max_inbound_age_hours",
+        "response_sla_minutes",
         "confidence_threshold",
         "auto_create_inbound_leads",
     }
@@ -1379,6 +1412,11 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             methods=["PATCH"],
         ),
         Route(
+            "/api/admin/agent/inbox/{event_id:str}/retry",
+            api_retry_agent_inbox,
+            methods=["POST"],
+        ),
+        Route(
             "/api/admin/conversation-agent/settings",
             api_conversation_agent_settings,
             methods=["GET"],
@@ -1459,6 +1497,11 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             "/api/v1/agent/inbox/{event_id:str}",
             api_update_agent_inbox,
             methods=["PATCH"],
+        ),
+        Route(
+            "/api/v1/agent/inbox/{event_id:str}/retry",
+            api_retry_agent_inbox,
+            methods=["POST"],
         ),
         Route(
             "/api/v1/conversation-agent/settings",

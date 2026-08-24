@@ -648,6 +648,19 @@ textarea:focus-visible,
 
 .text-button:hover { color: #087e43; }
 
+.inbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+}
+
+.inbox-error {
+  margin-top: 6px;
+  color: var(--red);
+  white-space: normal;
+}
+
 button:disabled,
 select:disabled,
 input:disabled {

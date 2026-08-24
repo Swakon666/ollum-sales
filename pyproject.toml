@@ -1,6 +1,6 @@
 [project]
 name = "ollum-sales-mcp"
-version = "0.11.3"
+version = "0.11.4"
 description = "ChatGPT-native Ollum Group sales agent over MCP with persistent CRM and WhatsApp"
 requires-python = ">=3.12,<4.0"
 dependencies = [

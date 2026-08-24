@@ -166,6 +166,13 @@ MCP не может самостоятельно разбудить закрыт
 `needs_review`. Это исключает запоздалые ответы на старую переписку; отправка при этом
 не выполняется.
 
+Для очереди задаётся `response_sla_minutes` (по умолчанию 60 минут). Кабинет показывает
+возраст открытого обращения и состояния «в норме», «под риском» и «просрочено» без
+раскрытия текста переписки. Повторная обработка `needs_review` выполняется только
+отдельным подтверждённым действием. Она запрещена для устаревшего входящего,
+несвязанного лида или события с уже существующим черновиком и никогда не означает
+одобрение либо отправку сообщения.
+
 ## WhatsApp через кабинет
 
 1. Owner или operator открывает раздел «WhatsApp».
@@ -203,6 +210,7 @@ DELETE /api/v1/company/knowledge/{item_id}
 GET  /api/v1/agent/inbox
 POST /api/v1/agent/inbox/sync
 PATCH /api/v1/agent/inbox/{event_id}
+POST /api/v1/agent/inbox/{event_id}/retry
 GET  /api/v1/workspace/members
 POST /api/v1/workspace/invitations
 PATCH /api/v1/workspace/members/{member_id}

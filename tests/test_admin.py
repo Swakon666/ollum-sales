@@ -5,6 +5,7 @@ import html
 import re
 import time
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
@@ -400,13 +401,34 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     assert "--accent-soft: #e5f8ef" in stylesheet.text
     assert 'href="#agent" data-view="agent"' in page.text
     assert 'id="conversation-agent-form"' in page.text
+    assert 'name="response_sla_minutes"' in page.text
     assert 'id="agent-sessions-table"' in page.text
     assert "function renderConversationAgent(" in script.text
+    assert "function retryInboxEvent(" in script.text
     assert "transition: all" not in stylesheet.text
     assert "background-image: none" in stylesheet.text
     assert "env(safe-area-inset-top)" in stylesheet.text
     assert "overscroll-behavior: contain" in stylesheet.text
     assert "outline: none" not in stylesheet.text
+
+
+def test_local_admin_preview_covers_current_agent_dashboard_contract() -> None:
+    from scripts.preview_admin import app as preview_app
+
+    with TestClient(preview_app) as client:
+        bootstrap = client.get("/api/v1/bootstrap")
+        sessions = client.get("/api/v1/conversation-agent/sessions?limit=200")
+        inbox = client.get("/api/v1/agent/inbox?limit=200")
+
+    assert bootstrap.status_code == 200
+    assert (
+        bootstrap.json()["conversation_agent"]["settings"]["response_sla_minutes"] == 60
+    )
+    assert bootstrap.json()["agent_inbox"]["sla_overdue"] == 1
+    assert sessions.status_code == 200
+    assert len(sessions.json()) == 1
+    assert inbox.status_code == 200
+    assert any(item["retryable"] for item in inbox.json())
 
 
 def test_cross_origin_oauth_handoff_finishes_on_api_and_is_single_use(
@@ -804,6 +826,41 @@ def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) 
     assert bootstrap["company_onboarding"]["profile"]["company_name"] == "Ollum Group"
     assert bootstrap["agent_inbox"]["acknowledged"] == 1
 
+    retry_event, _created = context.crm.upsert_agent_inbox_event(
+        "ollum-group",
+        external_id="admin-inbox-retry",
+        chat_jid="79991234567@s.whatsapp.net",
+        message_text="Повторите обработку",
+        received_at=datetime.now(UTC).isoformat(timespec="seconds"),
+        lead_id=lead["id"],
+    )
+    context.crm.finish_agent_inbox_event(
+        "ollum-group",
+        retry_event["id"],
+        status="needs_review",
+        error="temporary failure",
+    )
+    bypass = client.patch(
+        f"/api/v1/agent/inbox/{retry_event['id']}",
+        headers=_csrf_headers(),
+        json={"status": "new"},
+    )
+    assert bypass.status_code == 400
+    missing_confirmation = client.post(
+        f"/api/v1/agent/inbox/{retry_event['id']}/retry",
+        headers=_csrf_headers(),
+        json={},
+    )
+    assert missing_confirmation.status_code == 400
+    retried = client.post(
+        f"/api/v1/agent/inbox/{retry_event['id']}/retry",
+        headers=_csrf_headers(),
+        json={"confirm_retry": True},
+    )
+    assert retried.status_code == 200
+    assert retried.json()["status"] == "new"
+    assert retried.json()["agent_attempts"] == 0
+
 
 def test_conversation_agent_api_is_configurable_but_cannot_send(
     admin_client, monkeypatch
@@ -838,11 +895,13 @@ def test_conversation_agent_api_is_configurable_but_cannot_send(
             "qualification_questions": ["Какой объём каталога?"],
             "confidence_threshold": 74,
             "max_inbound_age_hours": 96,
+            "response_sla_minutes": 45,
         },
     )
     assert updated.status_code == 200
     assert updated.json()["settings"]["niche"] == "e-commerce"
     assert updated.json()["settings"]["max_inbound_age_hours"] == 96
+    assert updated.json()["settings"]["response_sla_minutes"] == 45
     assert updated.json()["settings"]["send_enabled"] is False
 
     forbidden = client.patch(

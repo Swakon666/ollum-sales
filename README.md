@@ -39,13 +39,13 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 66 tools. Existing tools remain compatible, plus
+The server exposes 67 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding`;
-- durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_agent_next_action`;
+- durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_retry_agent_inbox_event`, `sales_agent_next_action`;
 - ChatGPT conversation loop: `sales_get_conversation_agent_status`, `sales_get_chatgpt_agent_playbook`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_prepare_persisted_conversation`, `sales_prepare_conversation_batch`, `sales_submit_conversation_decision`; `sales_process_pending_conversations` remains a preparation-only compatibility alias;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
 - CRM and outreach: `sales_prepare_whatsapp_reply_brief`, `sales_evaluate_whatsapp_reply`, `sales_compare_whatsapp_replies`, `sales_save_whatsapp_reply_draft`, `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
@@ -230,6 +230,12 @@ requeued until their retry budget is exhausted; inbound messages older than
 `max_inbound_age_hours` (168 hours by default) are quarantined in `needs_review` instead of being
 answered out of context. The admin dashboard exposes expired leases and stale actionable events as
 degraded runtime health without revealing private message text.
+
+Inbox Operations tracks a configurable `response_sla_minutes` target (60 minutes by default).
+The dashboard marks open events as on track, at risk, or overdue and shows the oldest open age.
+An operator may retry a `needs_review` event only through the dedicated confirmed retry action.
+The CRM refuses that retry when the inbound is stale, the lead is not linked, or a draft already
+exists; retry resets the processing lease and attempt counter but never approves or sends anything.
 
 ## Google Sheets panel
 
