@@ -399,13 +399,14 @@ def _plugin_status(settings: Settings) -> dict[str, Any]:
         "brain": "ChatGPT through Ollum Sales MCP",
         "server_llm_enabled": False,
         "server_sync_interval_minutes": 15,
-        "recommended_chatgpt_schedule": "every_15_minutes_in_chat",
+        "recommended_chatgpt_schedule": "hourly_in_chat",
         "scheduled_prompt": (
-            "Используй Ollum Sales. Проверь статус, вызови "
-            "sales_prepare_conversation_batch с sync_inbox=true, рассуждай только "
-            "по возвращённым фактам и для каждого элемента передай один строгий "
-            "ConversationDecision через sales_submit_conversation_decision. Покажи "
-            "созданные черновики и эскалации. Ничего не одобряй и не отправляй."
+            "Используй Ollum Sales. Проверь статус, получи до трёх новых событий через "
+            "sales_list_agent_inbox и для каждого отдельно вызови "
+            "sales_prepare_persisted_conversation с точным chat_jid. Рассуждай только "
+            "по возвращённым фактам и передай один строгий ConversationDecision через "
+            "sales_submit_conversation_decision. Покажи черновики и эскалации без "
+            "цитирования входящих сообщений. Ничего не одобряй и не отправляй."
         ),
         "server_url": resource_url,
         "authentication": "OAuth",

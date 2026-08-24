@@ -1,6 +1,6 @@
 # Ollum Sales MCP — ChatGPT-native Edition
 
-Version **0.11.1** makes ChatGPT the only reasoning engine and adds a persistent,
+Version **0.11.2** makes ChatGPT the only reasoning engine and adds a persistent,
 ChatGPT-compatible OAuth 2.1 authorization server with dynamic client registration. The server uses no OpenAI or
 other LLM API key: it synchronizes WhatsApp every 15 minutes, stores durable work, gives
 ChatGPT a bounded MCP fact packet, validates the returned structured decision, and atomically
@@ -39,14 +39,14 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 65 tools. Existing tools remain compatible, plus
+The server exposes 66 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding`;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_agent_next_action`;
-- ChatGPT conversation loop: `sales_get_conversation_agent_status`, `sales_get_chatgpt_agent_playbook`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_prepare_conversation_batch`, `sales_submit_conversation_decision`; `sales_process_pending_conversations` remains a preparation-only compatibility alias;
+- ChatGPT conversation loop: `sales_get_conversation_agent_status`, `sales_get_chatgpt_agent_playbook`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_prepare_persisted_conversation`, `sales_prepare_conversation_batch`, `sales_submit_conversation_decision`; `sales_process_pending_conversations` remains a preparation-only compatibility alias;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
 - CRM and outreach: `sales_prepare_whatsapp_reply_brief`, `sales_evaluate_whatsapp_reply`, `sales_compare_whatsapp_replies`, `sales_save_whatsapp_reply_draft`, `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
 - WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
@@ -218,11 +218,11 @@ The worker polls WhatsApp every 15 minutes and starts an Autopilot cycle only wh
 interval itself defaults to 60 minutes.
 
 The worker never generates a reply. A ChatGPT turn or scheduled Workspace Agent calls
-`sales_prepare_conversation_batch`, reasons over the returned facts, and submits each structured
+`sales_prepare_persisted_conversation` for an exact phone/JID, reasons over the returned facts, and submits each structured
 decision with `sales_submit_conversation_decision`. The server applies the grounded quality gate
 before storing a `draft`; low-confidence, contractual, sensitive, or unsupported questions move
 to `needs_review`. This path never approves a draft, queues a send request, or records an outbound
-interaction. A normal dormant chat cannot be awakened by MCP; use the 15-minute in-chat schedule returned by
+interaction. A normal dormant chat cannot be awakened by MCP; use the hourly in-chat schedule returned by
 `sales_get_chatgpt_agent_playbook` when Workspace Agents are available.
 
 ## Google Sheets panel

@@ -130,7 +130,8 @@ mcp = FastMCP(
         "sales_save_company_knowledge. Never invent prices, clients, cases or guarantees. "
         "After onboarding, configure the durable dialogue policy with "
         "sales_update_conversation_agent_settings. ChatGPT is the only reasoning engine: call "
-        "sales_prepare_conversation_batch, reason strictly over each bounded payload, then call "
+        "sales_prepare_persisted_conversation for already-synced inbox work, reason strictly "
+        "over each bounded payload, then call "
         "sales_submit_conversation_decision for every item. The server only synchronizes WhatsApp, "
         "leases durable work, validates decisions and saves drafts; it never calls an LLM API. "
         "Use sales_get_conversation_agent_status and sales_agent_next_action to resume durable work "
@@ -501,15 +502,17 @@ def sales_get_chatgpt_agent_playbook() -> dict[str, Any]:
         "server_llm_enabled": False,
         "api_key_required": False,
         "server_whatsapp_sync": "every 15 minutes",
-        "recommended_chatgpt_schedule": "every_15_minutes_in_chat",
+        "recommended_chatgpt_schedule": "hourly_in_chat",
         "scheduled_prompt": (
-            "Use Ollum Sales. Check status, call sales_prepare_conversation_batch "
-            "with sync_inbox=true, reason only from returned facts, submit one "
-            "ConversationDecision per item, and report drafts or escalations. Never "
-            "approve or send WhatsApp messages."
+            "Use Ollum Sales. Check status, list up to three new inbox events with "
+            "sales_list_agent_inbox, then call sales_prepare_persisted_conversation "
+            "separately for each exact chat_jid. Reason only from returned facts and "
+            "submit one ConversationDecision per item. Report drafts or escalations "
+            "without quoting inbound messages. Never approve or send WhatsApp messages."
         ),
         "tools": [
             "sales_get_conversation_agent_status",
+            "sales_prepare_persisted_conversation",
             "sales_prepare_conversation_batch",
             "sales_submit_conversation_decision",
         ],
@@ -597,6 +600,25 @@ def sales_prepare_conversation_batch(
         chat_jid=target_chat_jid,
     )
     result["inbox_sync"] = sync_result
+    return result
+
+
+@_write_tool()
+def sales_prepare_persisted_conversation(
+    phone: str | None = None,
+    chat_jid: str | None = None,
+) -> dict[str, Any]:
+    """Lease one already-synced exact-contact event; no external I/O or sending."""
+    member = _current_mcp_member(minimum_role="operator")
+    workspace_id = str(member["workspace_id"])
+    target_chat_jid = resolve_target_chat_jid(phone=phone, chat_jid=chat_jid)
+    result = conversation_agent.prepare_pending(
+        workspace_id,
+        limit=1,
+        chat_jid=target_chat_jid,
+    )
+    result["inbox_sync"] = None
+    result["source"] = "persisted_inbox"
     return result
 
 
