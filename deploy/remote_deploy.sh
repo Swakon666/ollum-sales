@@ -477,6 +477,13 @@ case "$auth_mode" in
       "$deploy_root/shared/.env" | tail -1)
     expected_issuer=$(sed -n 's/^OLLUM_OIDC_ISSUER_URL=//p' \
       "$deploy_root/shared/.env" | tail -1)
+    oauth_dcr_enabled=$(sed -n 's/^OLLUM_OAUTH_DCR_ENABLED=//p' \
+      "$deploy_root/shared/.env" | tail -1)
+    if [[ $oauth_dcr_enabled == true ]]; then
+      expected_issuer=$(sed -n 's/^OLLUM_PUBLIC_BASE_URL=//p' \
+        "$deploy_root/shared/.env" | tail -1)
+      expected_issuer="${expected_issuer%/}/"
+    fi
     [[ -n $expected_resource && -n $expected_issuer ]] \
       || die 'OIDC resource or issuer is missing from production environment'
 
@@ -509,6 +516,39 @@ PY
       die 'OAuth protected-resource metadata is inconsistent with production settings'
     fi
     rm -f "$metadata_response"
+
+    if [[ $oauth_dcr_enabled == true ]]; then
+      authorization_response=$(mktemp)
+      authorization_status=$(curl -sS --max-time 20 \
+        --resolve "$domain:443:127.0.0.1" \
+        -o "$authorization_response" \
+        -w '%{http_code}' \
+        "https://$domain/.well-known/oauth-authorization-server")
+      [[ $authorization_status == 200 ]] \
+        || die "OAuth authorization-server metadata returned HTTP $authorization_status"
+      if ! python3 - "$authorization_response" "https://$domain" <<'PY'
+import json
+import sys
+
+path, base = sys.argv[1:]
+with open(path, encoding="utf-8") as handle:
+    metadata = json.load(handle)
+base = base.rstrip("/")
+expected = {
+    "authorization_endpoint": f"{base}/authorize",
+    "token_endpoint": f"{base}/token",
+    "registration_endpoint": f"{base}/register",
+}
+for key, value in expected.items():
+    if metadata.get(key) != value:
+        raise SystemExit(1)
+PY
+      then
+        rm -f "$authorization_response"
+        die 'OAuth authorization-server metadata is inconsistent with production settings'
+      fi
+      rm -f "$authorization_response"
+    fi
 
     challenge_headers=$(mktemp)
     challenge_status=$(curl -sS --max-time 20 \

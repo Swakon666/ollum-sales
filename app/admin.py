@@ -28,6 +28,7 @@ from .config import Settings
 from .conversation_agent import ConversationAgent
 from .crm import SalesCRM, utc_now
 from .google_sheets import GoogleSheetsSync
+from .oauth_server import POST_LOGIN_REDIRECT_KEY, safe_post_login_redirect
 from .whatsapp_service import (
     bridge_pairing_qr,
     bridge_pairing_status,
@@ -208,7 +209,7 @@ class SecurityHeadersMiddleware:
                     )
                 path = str(scope.get("path") or "")
                 if path == "/admin" or path.startswith(
-                    ("/api/admin", "/api/v1", "/auth/")
+                    ("/api/admin", "/api/v1", "/auth/", "/oauth/")
                 ):
                     existing_cache_control = [
                         value
@@ -428,6 +429,9 @@ async def auth_login(request: Request) -> Response:
 
 async def auth_callback(request: Request) -> Response:
     context: AdminContext = request.app.state.admin_context
+    post_login_redirect = safe_post_login_redirect(
+        request.session.get(POST_LOGIN_REDIRECT_KEY)
+    )
     try:
         user = await context.sessions.complete_login(request)
     except AuthenticationError as exc:
@@ -450,14 +454,18 @@ async def auth_callback(request: Request) -> Response:
             status_code=303,
             headers={"Cache-Control": "no-store"},
         )
+    destination = post_login_redirect or "/admin"
     return RedirectResponse(
-        context.sessions.dashboard_url("/admin"),
+        context.sessions.dashboard_url(destination),
         status_code=303,
     )
 
 
 async def auth_handoff(request: Request) -> Response:
     context: AdminContext = request.app.state.admin_context
+    post_login_redirect = safe_post_login_redirect(
+        request.session.get(POST_LOGIN_REDIRECT_KEY)
+    )
     user = context.sessions.consume_login_handoff(
         str(request.query_params.get("code") or "")
     )
@@ -479,8 +487,9 @@ async def auth_handoff(request: Request) -> Response:
         action="admin.login_handoff",
         outcome="success",
     )
+    destination = post_login_redirect or "/admin"
     return RedirectResponse(
-        context.sessions.dashboard_url("/admin"),
+        context.sessions.dashboard_url(destination),
         status_code=303,
         headers={"Cache-Control": "no-store"},
     )

@@ -95,6 +95,9 @@ jobs:
       OIDC_REDIRECT_BASE_URL: ${{ vars.OLLUM_OIDC_REDIRECT_BASE_URL }}
       MCP_RESOURCE_URL: ${{ vars.OLLUM_MCP_RESOURCE_URL }}
       MCP_REQUIRED_SCOPES: ${{ vars.OLLUM_MCP_REQUIRED_SCOPES }}
+      OAUTH_DCR_ENABLED: ${{ vars.OLLUM_OAUTH_DCR_ENABLED }}
+      OAUTH_STORAGE_SECRET: ${{ secrets.OLLUM_OAUTH_STORAGE_SECRET }}
+      OAUTH_ALLOWED_REDIRECT_HOSTS: ${{ vars.OLLUM_OAUTH_ALLOWED_REDIRECT_HOSTS }}
       OIDC_ISSUER_URL: ${{ vars.OLLUM_OIDC_ISSUER_URL }}
       OIDC_AUDIENCE: ${{ vars.OLLUM_OIDC_AUDIENCE }}
       OIDC_JWKS_URL: ${{ vars.OLLUM_OIDC_JWKS_URL }}
@@ -163,6 +166,16 @@ jobs:
                 fi
               done
             fi
+            if [ "${OAUTH_DCR_ENABLED:-false}" = true ]; then
+              if [ "${ADMIN_ENABLED:-false}" != true ]; then
+                echo "OAUTH_DCR_ENABLED requires ADMIN_ENABLED=true" >&2
+                exit 1
+              fi
+              if [ "${#OAUTH_STORAGE_SECRET}" -lt 32 ]; then
+                echo "OAUTH_STORAGE_SECRET must contain at least 32 bytes" >&2
+                exit 1
+              fi
+            fi
           fi
           if [[ "$DEPLOY_MODE" =~ ^deploy(-prebuilt)?$ ]] && [ -z "${GOOGLE_SHEETS_ID:-}" ]; then
             echo 'OLLUM_GOOGLE_SHEETS_ID repository variable is required for deployment' >&2
@@ -201,7 +214,8 @@ jobs:
           echo "::add-mask::$SSH_USER"
           echo "::add-mask::$MCP_BEARER_TOKEN"
           for value in "${ADMIN_OIDC_CLIENT_SECRET:-}" "${ADMIN_ALLOWED_EMAILS:-}" \
-            "${ADMIN_SESSION_SECRET:-}" "${OIDC_ALLOWED_SUBJECTS:-}"; do
+            "${ADMIN_SESSION_SECRET:-}" "${OAUTH_STORAGE_SECRET:-}" \
+            "${OIDC_ALLOWED_SUBJECTS:-}"; do
             if [ -n "$value" ]; then
               echo "::add-mask::$value"
             fi
@@ -392,6 +406,9 @@ jobs:
             printf 'OLLUM_OIDC_REDIRECT_BASE_URL=%s\n' "$oidc_redirect_base_url"
             printf 'OLLUM_MCP_RESOURCE_URL=%s\n' "$mcp_resource_url"
             printf 'OLLUM_MCP_REQUIRED_SCOPES=%s\n' "$mcp_required_scopes"
+            printf 'OLLUM_OAUTH_DCR_ENABLED=%s\n' "${OAUTH_DCR_ENABLED:-false}"
+            printf 'OLLUM_OAUTH_STORAGE_SECRET=%s\n' "${OAUTH_STORAGE_SECRET:-}"
+            printf 'OLLUM_OAUTH_ALLOWED_REDIRECT_HOSTS=%s\n' "${OAUTH_ALLOWED_REDIRECT_HOSTS:-chatgpt.com}"
             printf 'OLLUM_OIDC_ISSUER_URL=%s\n' "${OIDC_ISSUER_URL:-}"
             printf 'OLLUM_OIDC_AUDIENCE=%s\n' "${OIDC_AUDIENCE:-}"
             printf 'OLLUM_OIDC_JWKS_URL=%s\n' "${OIDC_JWKS_URL:-}"
@@ -686,12 +703,17 @@ jobs:
               metadata_file=$(mktemp)
               headers_file=$(mktemp)
               expected_resource=${MCP_RESOURCE_URL:-https://$OLLUM_DOMAIN/mcp}
+              expected_issuer=$OIDC_ISSUER_URL
+              if [ "${OAUTH_DCR_ENABLED:-false}" = true ]; then
+                expected_issuer="${PUBLIC_BASE_URL:-https://$OLLUM_DOMAIN}"
+                expected_issuer="${expected_issuer%/}/"
+              fi
               trap 'rm -f -- "$metadata_file" "$headers_file"' EXIT
               curl --fail --silent --show-error --max-time 20 \
                 --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
                 "https://$OLLUM_DOMAIN/.well-known/oauth-protected-resource/mcp" \
                 > "$metadata_file"
-              python3 - "$metadata_file" "$OIDC_ISSUER_URL" "$expected_resource" <<'PY'
+              python3 - "$metadata_file" "$expected_issuer" "$expected_resource" <<'PY'
           import json
           import sys
 
@@ -706,6 +728,30 @@ jobs:
           ):
               raise SystemExit("required OAuth scopes are missing")
           PY
+              if [ "${OAUTH_DCR_ENABLED:-false}" = true ]; then
+                authorization_file=$(mktemp)
+                curl --fail --silent --show-error --max-time 20 \
+                  --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
+                  "https://$OLLUM_DOMAIN/.well-known/oauth-authorization-server" \
+                  > "$authorization_file"
+                python3 - "$authorization_file" "${PUBLIC_BASE_URL:-https://$OLLUM_DOMAIN}" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as handle:
+              metadata = json.load(handle)
+          base = sys.argv[2].rstrip("/")
+          expected = {
+              "authorization_endpoint": f"{base}/authorize",
+              "token_endpoint": f"{base}/token",
+              "registration_endpoint": f"{base}/register",
+          }
+          for key, value in expected.items():
+              if metadata.get(key) != value:
+                  raise SystemExit(f"unexpected {key}")
+          PY
+                rm -f -- "$authorization_file"
+              fi
               curl --silent --show-error --max-time 20 \
                 --resolve "$OLLUM_DOMAIN:443:127.0.0.1" \
                 --dump-header "$headers_file" --output /dev/null \
@@ -904,11 +950,16 @@ jobs:
               metadata_file=$(mktemp)
               headers_file=$(mktemp)
               expected_resource=${MCP_RESOURCE_URL:-https://$OLLUM_DOMAIN/mcp}
+              expected_issuer=$OIDC_ISSUER_URL
+              if [ "${OAUTH_DCR_ENABLED:-false}" = true ]; then
+                expected_issuer="${PUBLIC_BASE_URL:-https://$OLLUM_DOMAIN}"
+                expected_issuer="${expected_issuer%/}/"
+              fi
               trap 'rm -f -- "$metadata_file" "$headers_file"' EXIT
               curl --fail --silent --show-error --max-time 20 \
                 "https://$OLLUM_DOMAIN/.well-known/oauth-protected-resource/mcp" \
                 > "$metadata_file"
-              python3 - "$metadata_file" "$OIDC_ISSUER_URL" "$expected_resource" <<'PY'
+              python3 - "$metadata_file" "$expected_issuer" "$expected_resource" <<'PY'
           import json
           import sys
 

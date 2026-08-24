@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import replace
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from mcp.server.auth.provider import AuthorizationParams
+from mcp.shared.auth import OAuthClientInformationFull
+from pydantic import AnyUrl
 from starlette.applications import Starlette
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
@@ -21,6 +26,7 @@ from app.admin import (
 )
 from app.config import settings
 from app.crm import SalesCRM
+from app.oauth_server import PersistentOAuthProvider, create_oauth_consent_routes
 
 
 class FakeAutopilot:
@@ -181,6 +187,13 @@ def admin_client(tmp_path, monkeypatch):
         jobs=AdminJobRegistry(),
         conversation_agent=FakeConversationAgent(crm),  # type: ignore[arg-type]
     )
+    oauth_provider = PersistentOAuthProvider(
+        db_path=tmp_path / "admin.db",
+        dashboard_base_url="https://api.sales.example",
+        resource_url="https://sales.example/mcp",
+        storage_secret="test-oauth-storage-secret-with-more-than-32-bytes",
+        allowed_redirect_hosts=("chatgpt.com",),
+    )
 
     async def test_login(request: Request) -> JSONResponse:
         request.session["user"] = {
@@ -233,9 +246,11 @@ def admin_client(tmp_path, monkeypatch):
             Route("/__test/login-expired", test_expired_login),
             Route("/__test/login-viewer", test_viewer_login),
             *create_admin_routes(context),
+            *create_oauth_consent_routes(),
         ]
     )
     app.state.admin_context = context
+    app.state.oauth_provider = oauth_provider
     app.add_middleware(
         SessionMiddleware,
         secret_key="test-session-secret-with-32-bytes",
@@ -275,6 +290,34 @@ def _login(client: TestClient) -> None:
 
 def _csrf_headers() -> dict[str, str]:
     return {"X-CSRF-Token": "test-csrf-token"}
+
+
+def _pending_oauth_request(provider: PersistentOAuthProvider) -> str:
+    client = OAuthClientInformationFull(
+        client_id="chatgpt-test-client",
+        client_secret="chatgpt-test-secret",
+        redirect_uris=[AnyUrl("https://chatgpt.com/connector/oauth/test")],
+        token_endpoint_auth_method="client_secret_post",
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        scope="sales:read sales:write",
+        client_name="Ollum Sales Test",
+    )
+    asyncio.run(provider.register_client(client))
+    authorization_url = asyncio.run(
+        provider.authorize(
+            client,
+            AuthorizationParams(
+                state="test-state",
+                scopes=["sales:read", "sales:write"],
+                code_challenge="pkce-challenge",
+                redirect_uri=AnyUrl("https://chatgpt.com/connector/oauth/test"),
+                redirect_uri_provided_explicitly=True,
+                resource="https://sales.example/mcp",
+            ),
+        )
+    )
+    return parse_qs(urlsplit(authorization_url).query)["request_id"][0]
 
 
 def test_admin_requires_session_and_sets_security_headers(admin_client) -> None:
@@ -380,6 +423,85 @@ def test_cross_origin_oauth_handoff_finishes_on_api_and_is_single_use(
 
     replay = client.get(handoff_url, follow_redirects=False)
     assert replay.status_code == 403
+
+
+def test_chatgpt_oauth_consent_survives_cross_origin_dashboard_login(
+    admin_client,
+) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+    provider = client.app.app.state.oauth_provider
+    request_id = _pending_oauth_request(provider)
+    consent_path = f"/oauth/authorize?request_id={request_id}"
+
+    consent = client.get(
+        f"https://api.sales.example{consent_path}", follow_redirects=False
+    )
+    assert consent.status_code == 303
+    assert consent.headers["location"] == "/auth/login"
+
+    login = client.get("https://api.sales.example/auth/login", follow_redirects=False)
+    assert login.headers["location"] == "https://mcp.sales.example/auth/login"
+    callback = client.get(
+        "https://mcp.sales.example/auth/callback", follow_redirects=False
+    )
+    handoff = client.get(callback.headers["location"], follow_redirects=False)
+    assert handoff.status_code == 303
+    assert handoff.headers["location"] == (f"https://api.sales.example{consent_path}")
+
+    page = client.get(handoff.headers["location"])
+    assert page.status_code == 200
+    assert "Подключить Ollum Sales Test" in page.text
+    assert "sales:read" in page.text
+    assert "автоматическую отправку WhatsApp" in page.text
+    assert page.headers["cache-control"] == "no-store"
+
+
+def test_chatgpt_oauth_consent_requires_csrf_and_issues_single_use_code(
+    admin_client,
+) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+    provider = client.app.app.state.oauth_provider
+    request_id = _pending_oauth_request(provider)
+    _login(client)
+
+    rejected = client.post(
+        "/oauth/authorize/complete",
+        data={
+            "request_id": request_id,
+            "csrf": "wrong",
+            "decision": "allow",
+        },
+        follow_redirects=False,
+    )
+    assert rejected.status_code == 403
+
+    approved = client.post(
+        "/oauth/authorize/complete",
+        data={
+            "request_id": request_id,
+            "csrf": "test-csrf-token",
+            "decision": "allow",
+        },
+        follow_redirects=False,
+    )
+    assert approved.status_code == 303
+    callback = urlsplit(approved.headers["location"])
+    assert callback.scheme == "https"
+    assert callback.netloc == "chatgpt.com"
+    callback_params = parse_qs(callback.query)
+    assert callback_params["state"] == ["test-state"]
+    assert callback_params["code"]
+
+    replay = client.post(
+        "/oauth/authorize/complete",
+        data={
+            "request_id": request_id,
+            "csrf": "test-csrf-token",
+            "decision": "allow",
+        },
+        follow_redirects=False,
+    )
+    assert replay.status_code == 400
 
 
 def test_expired_admin_session_is_rejected(admin_client) -> None:

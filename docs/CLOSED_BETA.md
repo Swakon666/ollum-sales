@@ -62,8 +62,9 @@ Ollum Sales и запрашивает сертификат сразу на об�
 4. Allowed Callback URL: `https://api.ollumgroup.ru/auth/callback`.
 5. Allowed Logout URL и Web Origin: `https://api.ollumgroup.ru`.
 6. RS256 access tokens с корректными `iss`, `aud`, `sub`.
-7. Поддерживаемый ChatGPT OAuth client flow: CIMD, Dynamic Client Registration или
-   зарегистрированный client; для публичных clients — PKCE `S256`.
+7. Ollum Sales публикует собственный ChatGPT-совместимый Dynamic Client Registration;
+   внешний OIDC provider обслуживает только вход человека в закрытый кабинет.
+   Authorization code flow всегда использует PKCE `S256`.
 
 Первый вход разрешён только email из deployment bootstrap allowlist. Первый член
 workspace становится owner. Затем owner приглашает остальных через кабинет. Email
@@ -82,6 +83,8 @@ OLLUM_DASHBOARD_BASE_URL=https://api.ollumgroup.ru
 OLLUM_OIDC_REDIRECT_BASE_URL=https://mcp.ollumgroup.ru
 OLLUM_MCP_RESOURCE_URL=https://mcp.ollumgroup.ru/mcp
 OLLUM_MCP_REQUIRED_SCOPES=sales:read,sales:write
+OLLUM_OAUTH_DCR_ENABLED=true
+OLLUM_OAUTH_ALLOWED_REDIRECT_HOSTS=chatgpt.com
 OLLUM_OIDC_ISSUER_URL=https://<tenant>/
 OLLUM_OIDC_AUDIENCE=<exact access-token audience>
 OLLUM_OIDC_ALGORITHMS=RS256
@@ -99,6 +102,7 @@ OLLUM_ADMIN_OIDC_CLIENT_SECRET=<web application client secret>
 OLLUM_ADMIN_ALLOWED_EMAILS=<bootstrap emails, comma-separated>
 OLLUM_WORKSPACE_OWNER_EMAILS=<owner emails, comma-separated>
 OLLUM_ADMIN_SESSION_SECRET=<at least 32 random bytes>
+OLLUM_OAUTH_STORAGE_SECRET=<at least 32 random bytes>
 OLLUM_OIDC_ALLOWED_SUBJECTS=<optional immutable sub allowlist>
 ```
 
@@ -112,6 +116,12 @@ environment. Никогда не добавляйте их в repository или 
 - название: `Ollum Sales`;
 - server URL: `https://mcp.ollumgroup.ru/mcp`;
 - authentication: `OAuth`.
+
+ChatGPT обнаружит `registration_endpoint` у Ollum Sales и зарегистрирует отдельный
+клиент автоматически. После создания откроется страница согласия Ollum на домене
+кабинета. Она допускает только приглашённого участника workspace и показывает точные
+scopes. Секреты зарегистрированных клиентов зашифрованы в CRM; коды и bearer-токены
+хранятся только как digest и переживают restart контейнера.
 
 Перед подключением войдите в `https://api.ollumgroup.ru/` тем же OIDC-аккаунтом,
 чтобы создать или принять workspace membership. Первый smoke-запрос должен быть
