@@ -1,0 +1,212 @@
+{
+  "mcpServers": {
+    "ollum-sales": {
+      "type": "http",
+      "url": "https://mcp.ollumgroup.ru/mcp",
+      "default_tools_approval_mode": "prompt",
+      "tools": {
+        "analyze_website": {
+          "approval_mode": "approve"
+        },
+        "autopilot_run_cycle": {
+          "approval_mode": "approve"
+        },
+        "autopilot_start": {
+          "approval_mode": "prompt"
+        },
+        "autopilot_status": {
+          "approval_mode": "approve"
+        },
+        "autopilot_stop": {
+          "approval_mode": "prompt"
+        },
+        "google_sheets_status": {
+          "approval_mode": "approve"
+        },
+        "google_sheets_sync": {
+          "approval_mode": "prompt"
+        },
+        "ollum_status": {
+          "approval_mode": "approve"
+        },
+        "ollum_whoami": {
+          "approval_mode": "approve"
+        },
+        "sales_agent_next_action": {
+          "approval_mode": "approve"
+        },
+        "sales_analyze_lead": {
+          "approval_mode": "approve"
+        },
+        "sales_approve_outreach_draft": {
+          "approval_mode": "prompt"
+        },
+        "sales_archive_company_knowledge": {
+          "approval_mode": "approve"
+        },
+        "sales_compare_whatsapp_replies": {
+          "approval_mode": "approve"
+        },
+        "sales_complete_company_onboarding": {
+          "approval_mode": "approve"
+        },
+        "sales_complete_followup": {
+          "approval_mode": "approve"
+        },
+        "sales_conversion_report": {
+          "approval_mode": "approve"
+        },
+        "sales_create_campaign": {
+          "approval_mode": "approve"
+        },
+        "sales_daily_report": {
+          "approval_mode": "approve"
+        },
+        "sales_evaluate_whatsapp_reply": {
+          "approval_mode": "approve"
+        },
+        "sales_get_campaign": {
+          "approval_mode": "approve"
+        },
+        "sales_get_chatgpt_agent_playbook": {
+          "approval_mode": "approve"
+        },
+        "sales_get_company_onboarding": {
+          "approval_mode": "approve"
+        },
+        "sales_get_conversation_agent_status": {
+          "approval_mode": "approve"
+        },
+        "sales_get_lead": {
+          "approval_mode": "approve"
+        },
+        "sales_import_leads": {
+          "approval_mode": "approve"
+        },
+        "sales_inspect_website": {
+          "approval_mode": "approve"
+        },
+        "sales_link_agent_inbox_lead": {
+          "approval_mode": "approve"
+        },
+        "sales_list_agent_inbox": {
+          "approval_mode": "approve"
+        },
+        "sales_list_campaigns": {
+          "approval_mode": "approve"
+        },
+        "sales_list_company_knowledge": {
+          "approval_mode": "approve"
+        },
+        "sales_list_conversation_sessions": {
+          "approval_mode": "approve"
+        },
+        "sales_list_due_followups": {
+          "approval_mode": "approve"
+        },
+        "sales_list_interactions": {
+          "approval_mode": "approve"
+        },
+        "sales_list_leads": {
+          "approval_mode": "approve"
+        },
+        "sales_list_outreach_drafts": {
+          "approval_mode": "approve"
+        },
+        "sales_overview": {
+          "approval_mode": "approve"
+        },
+        "sales_prepare_conversation_batch": {
+          "approval_mode": "approve"
+        },
+        "sales_prepare_persisted_conversation": {
+          "approval_mode": "approve"
+        },
+        "sales_prepare_whatsapp_reply_brief": {
+          "approval_mode": "approve"
+        },
+        "sales_process_pending_conversations": {
+          "approval_mode": "approve"
+        },
+        "sales_rank_leads": {
+          "approval_mode": "approve"
+        },
+        "sales_record_interaction": {
+          "approval_mode": "approve"
+        },
+        "sales_retry_agent_inbox_event": {
+          "approval_mode": "approve"
+        },
+        "sales_save_analysis": {
+          "approval_mode": "approve"
+        },
+        "sales_save_company_knowledge": {
+          "approval_mode": "approve"
+        },
+        "sales_save_outreach_draft": {
+          "approval_mode": "approve"
+        },
+        "sales_save_whatsapp_reply_draft": {
+          "approval_mode": "approve"
+        },
+        "sales_schedule_followup": {
+          "approval_mode": "approve"
+        },
+        "sales_score_lead": {
+          "approval_mode": "approve"
+        },
+        "sales_search_companies": {
+          "approval_mode": "approve"
+        },
+        "sales_send_whatsapp_draft": {
+          "approval_mode": "prompt"
+        },
+        "sales_submit_conversation_decision": {
+          "approval_mode": "approve"
+        },
+        "sales_sync_whatsapp_inbox": {
+          "approval_mode": "approve"
+        },
+        "sales_update_agent_inbox_status": {
+          "approval_mode": "approve"
+        },
+        "sales_update_company_profile": {
+          "approval_mode": "approve"
+        },
+        "sales_update_conversation_agent_settings": {
+          "approval_mode": "approve"
+        },
+        "sales_update_lead_status": {
+          "approval_mode": "approve"
+        },
+        "sales_vertical_performance": {
+          "approval_mode": "approve"
+        },
+        "vertical_create": {
+          "approval_mode": "approve"
+        },
+        "vertical_list": {
+          "approval_mode": "approve"
+        },
+        "vertical_update": {
+          "approval_mode": "approve"
+        },
+        "whatsapp_get_last_interaction": {
+          "approval_mode": "approve"
+        },
+        "whatsapp_list_chats": {
+          "approval_mode": "approve"
+        },
+        "whatsapp_list_messages": {
+          "approval_mode": "approve"
+        },
+        "whatsapp_search_contacts": {
+          "approval_mode": "approve"
+        },
+        "whatsapp_send_message": {
+          "approval_mode": "prompt"
+        }
+      }
+    }
+  }
+}
