@@ -114,12 +114,22 @@ class ConversationAgent:
         onboarding = self.crm.get_company_onboarding_state(workspace_id)
         runtime_enabled = bool(self.settings.conversation_agent_enabled)
         workspace_enabled = bool(agent_settings["enabled"])
+        inbox = summary.get("inbox", {})
+        health_reasons: list[str] = []
+        if int(inbox.get("processing_expired") or 0):
+            health_reasons.append("expired_conversation_leases")
+        if int(inbox.get("stale_actionable") or 0):
+            health_reasons.append("stale_inbound_requires_review")
+        if onboarding["onboarding_status"] != "ready":
+            health_reasons.append("company_onboarding_incomplete")
         return {
             "settings": agent_settings,
             "summary": summary,
             "runtime": {
                 "enabled": runtime_enabled,
                 "ready": runtime_enabled and workspace_enabled,
+                "health": "degraded" if health_reasons else "healthy",
+                "health_reasons": health_reasons,
                 "execution_mode": "chatgpt_mcp",
                 "brain": "ChatGPT through Ollum Sales MCP",
                 "server_llm_enabled": False,
@@ -379,6 +389,11 @@ class ConversationAgent:
                 "sent": False,
             }
 
+        maintenance = self.crm.recover_expired_agent_inbox_leases(
+            workspace_id,
+            max_inbound_age_hours=int(agent_settings["max_inbound_age_hours"]),
+        )
+
         items: list[dict[str, Any]] = []
         needs_review: list[dict[str, Any]] = []
         for _ in range(max(1, min(int(limit), 5))):
@@ -429,6 +444,7 @@ class ConversationAgent:
             "submit_tool": "sales_submit_conversation_decision",
             "items": items,
             "target_chat_jid": chat_jid,
+            "queue_maintenance": maintenance,
             "safety": {
                 "draft_only": True,
                 "approval_forbidden": True,

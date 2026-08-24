@@ -46,6 +46,22 @@ def main() -> None:
     )
     while not stopping:
         try:
+            agent_settings = service.crm.get_conversation_agent_settings(
+                settings.default_workspace_id
+            )
+            recovery = service.crm.recover_expired_agent_inbox_leases(
+                settings.default_workspace_id,
+                max_inbound_age_hours=int(agent_settings["max_inbound_age_hours"]),
+            )
+            if recovery["changed"]:
+                logger.info(
+                    "conversation queue maintenance changed %s event(s): "
+                    "%s requeued, %s stale, %s exhausted",
+                    recovery["changed"],
+                    recovery["leases_requeued"],
+                    recovery["stale_quarantined"],
+                    recovery["leases_exhausted"],
+                )
             inbox = sync_whatsapp_inbox(
                 service.crm,
                 settings.default_workspace_id,
