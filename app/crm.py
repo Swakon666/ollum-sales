@@ -76,6 +76,13 @@ AGENT_INBOX_STATUSES = {
     "resolved",
     "ignored",
 }
+AGENT_INBOX_OPEN_STATUSES = {
+    "new",
+    "acknowledged",
+    "processing",
+    "drafted",
+    "needs_review",
+}
 CONVERSATION_AUTONOMY_MODES = {"observe", "draft"}
 CONVERSATION_STAGES = {
     "new",
@@ -443,6 +450,7 @@ class SalesCRM:
                     max_context_messages INTEGER NOT NULL DEFAULT 12,
                     max_reply_chars INTEGER NOT NULL DEFAULT 700,
                     max_inbound_age_hours INTEGER NOT NULL DEFAULT 168,
+                    response_sla_minutes INTEGER NOT NULL DEFAULT 60,
                     confidence_threshold INTEGER NOT NULL DEFAULT 65,
                     auto_create_inbound_leads INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -546,6 +554,11 @@ class SalesCRM:
                     "ALTER TABLE conversation_agent_settings "
                     "ADD COLUMN max_inbound_age_hours INTEGER NOT NULL DEFAULT 168"
                 )
+            if "response_sla_minutes" not in conversation_settings_columns:
+                connection.execute(
+                    "ALTER TABLE conversation_agent_settings "
+                    "ADD COLUMN response_sla_minutes INTEGER NOT NULL DEFAULT 60"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_claim
@@ -574,7 +587,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 11")
+            connection.execute("PRAGMA user_version = 12")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -1393,9 +1406,9 @@ class SalesCRM:
                 INSERT OR IGNORE INTO conversation_agent_settings (
                     workspace_id, enabled, autonomy_mode, niche,
                     max_context_messages, max_reply_chars, max_inbound_age_hours,
-                    confidence_threshold,
+                    response_sla_minutes, confidence_threshold,
                     auto_create_inbound_leads, created_at, updated_at
-                ) VALUES (?, 1, 'draft', 'auto', 12, 700, 168, 65, 1, ?, ?)
+                ) VALUES (?, 1, 'draft', 'auto', 12, 700, 168, 60, 65, 1, ?, ?)
                 """,
                 (workspace_id, timestamp, timestamp),
             )
@@ -1424,6 +1437,7 @@ class SalesCRM:
             "max_context_messages",
             "max_reply_chars",
             "max_inbound_age_hours",
+            "response_sla_minutes",
             "confidence_threshold",
             "auto_create_inbound_leads",
         }
@@ -1482,6 +1496,9 @@ class SalesCRM:
             elif name == "max_inbound_age_hours":
                 assignments.append("max_inbound_age_hours = ?")
                 values.append(max(1, min(int(value), 720)))
+            elif name == "response_sla_minutes":
+                assignments.append("response_sla_minutes = ?")
+                values.append(max(5, min(int(value), 10_080)))
             elif name == "confidence_threshold":
                 assignments.append("confidence_threshold = ?")
                 values.append(max(40, min(int(value), 95)))
@@ -1931,6 +1948,73 @@ class SalesCRM:
             raise ValueError("agent inbox event not found")
         return self._agent_inbox_from_row(row)
 
+    def _agent_inbox_operational_view(
+        self,
+        event: dict[str, Any],
+        *,
+        agent_settings: dict[str, Any],
+        now: datetime,
+    ) -> dict[str, Any]:
+        result = dict(event)
+        try:
+            received_at = datetime.fromisoformat(str(event["received_at"]))
+            if received_at.tzinfo is None:
+                received_at = received_at.replace(tzinfo=UTC)
+            received_at = received_at.astimezone(UTC)
+            age_minutes: int | None = max(
+                0, int((now - received_at).total_seconds() // 60)
+            )
+        except (TypeError, ValueError):
+            received_at = None
+            age_minutes = None
+
+        sla_minutes = int(agent_settings["response_sla_minutes"])
+        max_age_minutes = int(agent_settings["max_inbound_age_hours"]) * 60
+        is_open = str(event["status"]) in AGENT_INBOX_OPEN_STATUSES
+        if not is_open:
+            sla_state = "closed"
+        elif age_minutes is None:
+            sla_state = "unknown"
+        elif age_minutes >= sla_minutes:
+            sla_state = "overdue"
+        elif age_minutes >= max(1, round(sla_minutes * 0.75)):
+            sla_state = "at_risk"
+        else:
+            sla_state = "on_track"
+
+        retry_block_reason: str | None = None
+        if event["status"] != "needs_review":
+            retry_block_reason = "event_not_in_review"
+        elif event.get("draft_id"):
+            retry_block_reason = "draft_already_exists"
+        elif not event.get("lead_id"):
+            retry_block_reason = "lead_not_linked"
+        elif received_at is None:
+            retry_block_reason = "invalid_received_at"
+        elif age_minutes is not None and age_minutes > max_age_minutes:
+            retry_block_reason = "inbound_expired"
+
+        result.update(
+            {
+                "age_minutes": age_minutes,
+                "response_sla_minutes": sla_minutes,
+                "sla_state": sla_state,
+                "retryable": retry_block_reason is None,
+                "retry_block_reason": retry_block_reason,
+            }
+        )
+        return result
+
+    def inspect_agent_inbox_event(
+        self, workspace_id: str, event_id: str
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        settings = self.get_conversation_agent_settings(workspace_id)
+        event = self.get_agent_inbox_event(workspace_id, event_id)
+        return self._agent_inbox_operational_view(
+            event, agent_settings=settings, now=datetime.now(UTC)
+        )
+
     def list_agent_inbox_events(
         self,
         workspace_id: str,
@@ -1961,7 +2045,14 @@ class SalesCRM:
                 """,
                 params,
             ).fetchall()
-        return [self._agent_inbox_from_row(row) for row in rows]
+        settings = self.get_conversation_agent_settings(workspace_id)
+        now = datetime.now(UTC)
+        return [
+            self._agent_inbox_operational_view(
+                self._agent_inbox_from_row(row), agent_settings=settings, now=now
+            )
+            for row in rows
+        ]
 
     def update_agent_inbox_event(
         self,
@@ -2004,6 +2095,84 @@ class SalesCRM:
         assert row is not None
         return self._agent_inbox_from_row(row)
 
+    def requeue_agent_inbox_event(
+        self, workspace_id: str, event_id: str
+    ) -> dict[str, Any]:
+        """Safely return one reviewed, fresh event to the ChatGPT work queue."""
+
+        workspace_id = self._workspace_id(workspace_id)
+        agent_settings = self.get_conversation_agent_settings(workspace_id)
+        now = datetime.now(UTC)
+        timestamp = now.isoformat(timespec="seconds")
+        stale_before = now - timedelta(
+            hours=int(agent_settings["max_inbound_age_hours"])
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM agent_inbox_events
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (event_id, workspace_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("agent inbox event not found")
+            event = self._agent_inbox_from_row(row)
+            if event["status"] == "new":
+                return {
+                    **self._agent_inbox_operational_view(
+                        event, agent_settings=agent_settings, now=now
+                    ),
+                    "requeued": False,
+                    "idempotent": True,
+                    "previous_status": "new",
+                }
+            if event["status"] != "needs_review":
+                raise ValueError("only needs_review events can be retried")
+            if event.get("draft_id"):
+                raise ValueError("event already has a draft and cannot be retried")
+            if not event.get("lead_id"):
+                raise ValueError("link the event to a CRM lead before retrying")
+            try:
+                received_at = datetime.fromisoformat(str(event["received_at"]))
+                if received_at.tzinfo is None:
+                    received_at = received_at.replace(tzinfo=UTC)
+                received_at = received_at.astimezone(UTC)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("event received_at is invalid") from exc
+            if received_at < stale_before:
+                raise ValueError(
+                    "event is outside max_inbound_age_hours and cannot be retried"
+                )
+
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'new', agent_attempts = 0, agent_lock_until = NULL,
+                    agent_error = NULL, decision_json = NULL, updated_at = ?
+                WHERE id = ? AND workspace_id = ? AND status = 'needs_review'
+                  AND draft_id IS NULL AND lead_id IS NOT NULL
+                """,
+                (timestamp, event_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError("agent inbox event changed during retry")
+            updated = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+        assert updated is not None
+        return {
+            **self._agent_inbox_operational_view(
+                self._agent_inbox_from_row(updated),
+                agent_settings=agent_settings,
+                now=now,
+            ),
+            "requeued": True,
+            "idempotent": False,
+            "previous_status": "needs_review",
+        }
+
     def link_agent_inbox_event(
         self,
         workspace_id: str,
@@ -2031,13 +2200,16 @@ class SalesCRM:
         assert row is not None
         return self._agent_inbox_from_row(row)
 
-    def agent_inbox_summary(self, workspace_id: str) -> dict[str, int]:
+    def agent_inbox_summary(self, workspace_id: str) -> dict[str, Any]:
         workspace_id = self._workspace_id(workspace_id)
         agent_settings = self.get_conversation_agent_settings(workspace_id)
         now = datetime.now(UTC)
         now_value = now.isoformat(timespec="seconds")
         stale_before = (
             now - timedelta(hours=int(agent_settings["max_inbound_age_hours"]))
+        ).isoformat(timespec="seconds")
+        sla_before = (
+            now - timedelta(minutes=int(agent_settings["response_sla_minutes"]))
         ).isoformat(timespec="seconds")
         with self.connect() as connection:
             rows = connection.execute(
@@ -2056,10 +2228,16 @@ class SalesCRM:
                         AND (agent_lock_until IS NULL OR agent_lock_until <= ?)
                         THEN 1 ELSE 0 END) AS processing_expired,
                     SUM(CASE WHEN status IN ('new', 'processing')
-                        AND received_at < ? THEN 1 ELSE 0 END) AS stale_actionable
+                        AND received_at < ? THEN 1 ELSE 0 END) AS stale_actionable,
+                    SUM(CASE WHEN status IN (
+                            'new', 'acknowledged', 'processing', 'drafted', 'needs_review'
+                        ) AND received_at < ? THEN 1 ELSE 0 END) AS sla_overdue,
+                    MIN(CASE WHEN status IN (
+                            'new', 'acknowledged', 'processing', 'drafted', 'needs_review'
+                        ) THEN received_at END) AS oldest_open_at
                 FROM agent_inbox_events WHERE workspace_id = ?
                 """,
-                (now_value, now_value, stale_before, workspace_id),
+                (now_value, now_value, stale_before, sla_before, workspace_id),
             ).fetchone()
         counts = {status: 0 for status in AGENT_INBOX_STATUSES}
         counts.update({str(row["status"]): int(row["event_count"]) for row in rows})
@@ -2067,6 +2245,18 @@ class SalesCRM:
         counts["processing_active"] = int(health["processing_active"] or 0)
         counts["processing_expired"] = int(health["processing_expired"] or 0)
         counts["stale_actionable"] = int(health["stale_actionable"] or 0)
+        counts["sla_overdue"] = int(health["sla_overdue"] or 0)
+        counts["response_sla_minutes"] = int(agent_settings["response_sla_minutes"])
+        oldest_open_at = health["oldest_open_at"]
+        if oldest_open_at:
+            oldest = datetime.fromisoformat(str(oldest_open_at))
+            if oldest.tzinfo is None:
+                oldest = oldest.replace(tzinfo=UTC)
+            counts["oldest_open_minutes"] = max(
+                0, int((now - oldest.astimezone(UTC)).total_seconds() // 60)
+            )
+        else:
+            counts["oldest_open_minutes"] = 0
         return counts
 
     def resolve_agent_inbox_for_draft(self, workspace_id: str, draft_id: str) -> int:

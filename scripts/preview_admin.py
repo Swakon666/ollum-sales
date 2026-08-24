@@ -7,6 +7,7 @@ intentionally unsuitable for production and rejects every mutation.
 from __future__ import annotations
 
 import argparse
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -127,25 +128,119 @@ COMPANY_KNOWLEDGE = [
     },
 ]
 
+
+def preview_time(*, minutes_ago: int) -> str:
+    return (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat(
+        timespec="seconds"
+    )
+
+
 AGENT_INBOX = [
     {
         "id": "inbox-1",
         "chat_jid": "79990000001@s.whatsapp.net",
         "sender_label": "Тестовый клиент",
         "message_text": "Подскажите, с чего начинается работа и как оценивается проект?",
-        "received_at": "2026-08-23T10:25:00+00:00",
+        "received_at": preview_time(minutes_ago=18),
         "status": "new",
         "lead_id": "lead-1",
+        "age_minutes": 18,
+        "response_sla_minutes": 60,
+        "sla_state": "on_track",
+        "retryable": False,
+        "retry_block_reason": "event_not_in_review",
     },
     {
         "id": "inbox-2",
         "chat_jid": "79990000002@s.whatsapp.net",
-        "sender_label": "Новый контакт",
+        "sender_label": "Клиент на проверке",
         "message_text": "Можно получить примеры похожих проектов?",
-        "received_at": "2026-08-23T10:28:00+00:00",
-        "status": "new",
-        "lead_id": None,
+        "received_at": preview_time(minutes_ago=75),
+        "status": "needs_review",
+        "lead_id": "lead-2",
+        "age_minutes": 75,
+        "response_sla_minutes": 60,
+        "sla_state": "overdue",
+        "retryable": True,
+        "retry_block_reason": None,
+        "agent_attempts": 3,
+        "agent_error": "Ответ требует повторной проверки подтверждённых фактов",
     },
+    {
+        "id": "inbox-3",
+        "chat_jid": "79990000003@s.whatsapp.net",
+        "sender_label": "Новый контакт",
+        "message_text": "Сможете оценить задачу по короткому описанию?",
+        "received_at": preview_time(minutes_ago=12),
+        "status": "needs_review",
+        "lead_id": None,
+        "age_minutes": 12,
+        "response_sla_minutes": 60,
+        "sla_state": "on_track",
+        "retryable": False,
+        "retry_block_reason": "lead_not_linked",
+    },
+]
+
+AGENT_INBOX_SUMMARY = {
+    "new": 1,
+    "acknowledged": 0,
+    "processing": 0,
+    "drafted": 0,
+    "needs_review": 2,
+    "resolved": 0,
+    "ignored": 0,
+    "total": 3,
+    "processing_active": 0,
+    "processing_expired": 0,
+    "stale_actionable": 0,
+    "sla_overdue": 1,
+    "response_sla_minutes": 60,
+    "oldest_open_minutes": 75,
+}
+
+CONVERSATION_AGENT = {
+    "settings": {
+        "enabled": True,
+        "autonomy_mode": "draft",
+        "niche": "auto",
+        "objective": "Квалифицировать запрос и подготовить следующий полезный ответ",
+        "tone": "Коротко, конкретно и доброжелательно",
+        "instructions": "Опирайся только на память компании и подтверждённый контекст",
+        "qualification_questions": ["Какая задача?", "Какой ориентир по срокам?"],
+        "forbidden_topics": ["Неподтверждённые гарантии"],
+        "escalation_rules": ["Передать человеку договорные и платёжные вопросы"],
+        "max_context_messages": 12,
+        "max_reply_chars": 700,
+        "max_inbound_age_hours": 168,
+        "response_sla_minutes": 60,
+        "confidence_threshold": 65,
+        "auto_create_inbound_leads": True,
+        "send_enabled": False,
+    },
+    "summary": {"inbox": AGENT_INBOX_SUMMARY, "active_sessions": 1},
+    "runtime": {
+        "ready": True,
+        "health": "degraded",
+        "health_reasons": ["response_sla_breached"],
+        "company_ready": True,
+    },
+    "safety": {"safe_mode": True, "send_enabled": False},
+}
+
+CONVERSATION_SESSIONS = [
+    {
+        "id": "session-1",
+        "lead_id": "lead-1",
+        "external_chat_id": "79990000001@s.whatsapp.net",
+        "stage": "qualification",
+        "intent": "website_project",
+        "summary": "Клиент уточняет процесс оценки проекта.",
+        "next_action": "Уточнить задачу и желаемый срок запуска",
+        "turn_count": 2,
+        "escalation_status": "none",
+        "updated_at": preview_time(minutes_ago=8),
+    }
 ]
 
 
@@ -168,14 +263,8 @@ def bootstrap() -> dict[str, Any]:
             "pending_invitations": 1,
         },
         "company_onboarding": COMPANY_ONBOARDING,
-        "agent_inbox": {
-            "new": 2,
-            "acknowledged": 0,
-            "drafted": 0,
-            "resolved": 0,
-            "ignored": 0,
-            "total": 2,
-        },
+        "agent_inbox": AGENT_INBOX_SUMMARY,
+        "conversation_agent": CONVERSATION_AGENT,
         "overview": {
             "lead_count": 24,
             "average_score": 68.4,
@@ -320,6 +409,8 @@ async def preview_api(request) -> Response:
         return JSONResponse(COMPANY_KNOWLEDGE)
     if path == "/api/v1/agent/inbox":
         return JSONResponse(AGENT_INBOX)
+    if path == "/api/v1/conversation-agent/sessions":
+        return JSONResponse(CONVERSATION_SESSIONS)
     if path == "/api/v1/whatsapp/status":
         return JSONResponse(
             {

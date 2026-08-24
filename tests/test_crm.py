@@ -156,7 +156,7 @@ class SalesCRMTests(unittest.TestCase):
         )
         with self.crm.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 11
+                connection.execute("PRAGMA user_version").fetchone()[0], 12
             )
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
@@ -546,11 +546,13 @@ class SalesCRMTests(unittest.TestCase):
             escalation_rules=["Передать менеджеру вопросы по договору"],
             max_context_messages=999,
             max_reply_chars=20,
+            response_sla_minutes=1,
             confidence_threshold=99,
         )
         self.assertEqual(updated["niche"], "e-commerce")
         self.assertEqual(updated["max_context_messages"], 30)
         self.assertEqual(updated["max_reply_chars"], 120)
+        self.assertEqual(updated["response_sla_minutes"], 5)
         self.assertEqual(updated["confidence_threshold"], 95)
         self.assertEqual(len(updated["qualification_questions"]), 2)
 
@@ -635,6 +637,10 @@ class SalesCRMTests(unittest.TestCase):
                 "ALTER TABLE conversation_agent_settings "
                 "DROP COLUMN max_inbound_age_hours"
             )
+            connection.execute(
+                "ALTER TABLE conversation_agent_settings "
+                "DROP COLUMN response_sla_minutes"
+            )
             connection.execute("PRAGMA user_version = 10")
 
         migrated = SalesCRM(self.crm.db_path)
@@ -645,9 +651,15 @@ class SalesCRMTests(unittest.TestCase):
             ],
             168,
         )
+        self.assertEqual(
+            migrated.get_conversation_agent_settings(workspace_id)[
+                "response_sla_minutes"
+            ],
+            60,
+        )
         with migrated.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 11
+                connection.execute("PRAGMA user_version").fetchone()[0], 12
             )
 
     def test_conversation_queue_watchdog_recovers_and_quarantines_safely(
@@ -730,6 +742,94 @@ class SalesCRMTests(unittest.TestCase):
         self.assertEqual(summary["processing_active"], 1)
         self.assertEqual(summary["processing_expired"], 0)
         self.assertEqual(summary["stale_actionable"], 1)
+
+    def test_inbox_operations_report_sla_and_retry_only_fresh_reviewed_events(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        self.crm.update_conversation_agent_settings(
+            workspace_id,
+            response_sla_minutes=30,
+            max_inbound_age_hours=24,
+        )
+        lead = self.crm.upsert_lead(
+            "Inbox Operations Lead",
+            "https://inbox-operations.test",
+            phones=["+79990000003"],
+        )
+        now = datetime.now(UTC)
+
+        fresh = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="retry-fresh",
+            chat_jid="79990000003@s.whatsapp.net",
+            message_text="Fresh inbound",
+            received_at=(now - timedelta(minutes=45)).isoformat(timespec="seconds"),
+            lead_id=lead["id"],
+        )[0]
+        stale = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="retry-stale",
+            chat_jid="79990000004@s.whatsapp.net",
+            message_text="Stale inbound",
+            received_at=(now - timedelta(days=2)).isoformat(timespec="seconds"),
+            lead_id=lead["id"],
+        )[0]
+        unlinked = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="retry-unlinked",
+            chat_jid="79990000005@s.whatsapp.net",
+            message_text="Unlinked inbound",
+            received_at=(now - timedelta(minutes=5)).isoformat(timespec="seconds"),
+        )[0]
+        for event in (fresh, stale, unlinked):
+            self.crm.finish_agent_inbox_event(
+                workspace_id,
+                event["id"],
+                status="needs_review",
+                decision={"action": "escalate"},
+                error="requires operator",
+            )
+            with self.crm.connect() as connection:
+                connection.execute(
+                    "UPDATE agent_inbox_events SET agent_attempts = 3 WHERE id = ?",
+                    (event["id"],),
+                )
+
+        operational = {
+            item["id"]: item for item in self.crm.list_agent_inbox_events(workspace_id)
+        }
+        self.assertTrue(operational[fresh["id"]]["retryable"])
+        self.assertEqual(operational[fresh["id"]]["sla_state"], "overdue")
+        self.assertEqual(
+            operational[stale["id"]]["retry_block_reason"], "inbound_expired"
+        )
+        self.assertEqual(
+            operational[unlinked["id"]]["retry_block_reason"], "lead_not_linked"
+        )
+
+        summary = self.crm.agent_inbox_summary(workspace_id)
+        self.assertEqual(summary["response_sla_minutes"], 30)
+        self.assertEqual(summary["sla_overdue"], 2)
+        self.assertGreaterEqual(summary["oldest_open_minutes"], 2 * 24 * 60)
+
+        retried = self.crm.requeue_agent_inbox_event(workspace_id, fresh["id"])
+        self.assertTrue(retried["requeued"])
+        self.assertEqual(retried["status"], "new")
+        self.assertEqual(retried["agent_attempts"], 0)
+        self.assertIsNone(retried["agent_error"])
+        self.assertEqual(retried["decision"], {})
+        self.assertEqual(retried["previous_status"], "needs_review")
+        duplicate = self.crm.requeue_agent_inbox_event(workspace_id, fresh["id"])
+        self.assertTrue(duplicate["idempotent"])
+        self.assertFalse(duplicate["requeued"])
+        self.assertEqual(duplicate["previous_status"], "new")
+
+        with self.assertRaisesRegex(ValueError, "outside max_inbound_age_hours"):
+            self.crm.requeue_agent_inbox_event(workspace_id, stale["id"])
+        with self.assertRaisesRegex(ValueError, "link the event"):
+            self.crm.requeue_agent_inbox_event(workspace_id, unlinked["id"])
 
 
 if __name__ == "__main__":

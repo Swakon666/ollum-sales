@@ -32,6 +32,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     update_profile_tool = server.mcp._tool_manager._tools["sales_update_company_profile"]
     archive_knowledge_tool = server.mcp._tool_manager._tools["sales_archive_company_knowledge"]
     link_inbox_tool = server.mcp._tool_manager._tools["sales_link_agent_inbox_lead"]
+    retry_inbox_tool = server.mcp._tool_manager._tools["sales_retry_agent_inbox_event"]
     next_action_tool = server.mcp._tool_manager._tools["sales_agent_next_action"]
     playbook_tool = server.mcp._tool_manager._tools["sales_get_chatgpt_agent_playbook"]
     prepare_batch_tool = server.mcp._tool_manager._tools["sales_prepare_conversation_batch"]
@@ -59,6 +60,8 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "update_profile_annotations": update_profile_tool.annotations.model_dump(by_alias=True),
         "archive_knowledge_annotations": archive_knowledge_tool.annotations.model_dump(by_alias=True),
         "link_inbox_annotations": link_inbox_tool.annotations.model_dump(by_alias=True),
+        "retry_inbox_annotations": retry_inbox_tool.annotations.model_dump(by_alias=True),
+        "retry_inbox_meta": retry_inbox_tool.meta,
         "next_action_annotations": next_action_tool.annotations.model_dump(by_alias=True),
         "playbook_annotations": playbook_tool.annotations.model_dump(by_alias=True),
         "prepare_batch_annotations": prepare_batch_tool.annotations.model_dump(by_alias=True),
@@ -103,7 +106,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 66
+    assert payload["tool_count"] == 67
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
@@ -130,6 +133,11 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["archive_knowledge_annotations"]["destructiveHint"] is True
     assert payload["link_inbox_annotations"]["readOnlyHint"] is False
     assert payload["link_inbox_annotations"]["destructiveHint"] is False
+    assert payload["retry_inbox_annotations"]["readOnlyHint"] is False
+    assert payload["retry_inbox_annotations"]["destructiveHint"] is False
+    assert payload["retry_inbox_meta"]["securitySchemes"][0]["scopes"] == [
+        "sales:write"
+    ]
     assert payload["next_action_annotations"]["readOnlyHint"] is True
     assert payload["playbook_annotations"]["readOnlyHint"] is True
     assert payload["prepare_batch_annotations"]["readOnlyHint"] is False

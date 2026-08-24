@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import UTC, datetime, timedelta
 from threading import RLock
 from typing import Any, Literal
 
@@ -100,6 +101,22 @@ def _bounded_json(value: Any, *, limit: int = 1200) -> Any:
     return raw[:limit] + "…"
 
 
+def _service_level(received_at: str, response_sla_minutes: int) -> dict[str, Any]:
+    received = datetime.fromisoformat(received_at)
+    if received.tzinfo is None:
+        received = received.replace(tzinfo=UTC)
+    received = received.astimezone(UTC)
+    now = datetime.now(UTC)
+    deadline = received + timedelta(minutes=response_sla_minutes)
+    age_minutes = max(0, int((now - received).total_seconds() // 60))
+    return {
+        "response_sla_minutes": response_sla_minutes,
+        "deadline_at": deadline.isoformat(timespec="seconds"),
+        "age_minutes": age_minutes,
+        "state": "overdue" if now >= deadline else "on_track",
+    }
+
+
 class ConversationAgent:
     """MCP queue coordinator; ChatGPT reasons, while the server only validates state."""
 
@@ -120,6 +137,8 @@ class ConversationAgent:
             health_reasons.append("expired_conversation_leases")
         if int(inbox.get("stale_actionable") or 0):
             health_reasons.append("stale_inbound_requires_review")
+        if int(inbox.get("sla_overdue") or 0):
+            health_reasons.append("response_sla_breached")
         if onboarding["onboarding_status"] != "ready":
             health_reasons.append("company_onboarding_incomplete")
         return {
@@ -285,6 +304,7 @@ class ConversationAgent:
                     "forbidden_topics",
                     "escalation_rules",
                     "max_reply_chars",
+                    "response_sla_minutes",
                     "confidence_threshold",
                 )
             },
@@ -297,6 +317,10 @@ class ConversationAgent:
                 str(event["chat_jid"]), int(agent_settings["max_context_messages"])
             ),
             "latest_inbound": str(event["message_text"]),
+            "service_level": _service_level(
+                str(event["received_at"]),
+                int(agent_settings["response_sla_minutes"]),
+            ),
             "output_contract": {
                 "reply_is_only_a_draft": True,
                 "approval_or_send_forbidden": True,
