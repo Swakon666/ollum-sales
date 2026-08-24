@@ -574,10 +574,10 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     assert payload["plugin"]["brain"] == "ChatGPT through Ollum Sales MCP"
     assert payload["plugin"]["server_llm_enabled"] is False
     assert payload["plugin"]["server_sync_interval_minutes"] == 15
+    assert payload["plugin"]["recommended_chatgpt_schedule"] == "hourly_in_chat"
     assert (
-        payload["plugin"]["recommended_chatgpt_schedule"] == "every_15_minutes_in_chat"
+        "sales_prepare_persisted_conversation" in payload["plugin"]["scheduled_prompt"]
     )
-    assert "sales_prepare_conversation_batch" in payload["plugin"]["scheduled_prompt"]
 
 
 def test_write_routes_require_scope_and_csrf(admin_client) -> None:

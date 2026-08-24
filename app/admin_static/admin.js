@@ -581,7 +581,7 @@ function renderPlugin() {
     ["Название", plugin.name], ["Описание", plugin.description],
     ["Мозг агента", plugin.brain],
     ["Синхронизация входящих", `Каждые ${plugin.server_sync_interval_minutes} минут`],
-    ["Расписание ChatGPT", plugin.recommended_chatgpt_schedule === "every_15_minutes_in_chat" ? "Каждые 15 минут в этом чате" : plugin.recommended_chatgpt_schedule],
+    ["Расписание ChatGPT", plugin.recommended_chatgpt_schedule === "hourly_in_chat" ? "Каждый час в этом чате" : plugin.recommended_chatgpt_schedule],
     ["Промпт для расписания", plugin.scheduled_prompt],
     ["URL-адрес сервера", plugin.server_url], ["Аутентификация", plugin.authentication],
     ["Личный кабинет", plugin.dashboard_url],
