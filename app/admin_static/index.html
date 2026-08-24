@@ -142,8 +142,8 @@
 
         <section class="view" data-panel="agent" data-section="03">
           <div class="section-heading agent-heading">
-            <div><p class="eyebrow">Conversation intelligence</p><h2>AI-агент продаж</h2><p class="muted">Сам понимает входящие, ведёт контекст по каждому диалогу и готовит grounded-ответ. Одобрение и отправка всегда остаются за человеком.</p></div>
-            <div class="hero-actions"><span class="readiness-badge" id="agent-runtime-state">Проверка…</span><button class="primary-button" id="process-conversations-button" type="button">Обработать очередь</button></div>
+            <div><p class="eyebrow">ChatGPT workspace agent</p><h2>Агент продаж в чате</h2><p class="muted">ChatGPT думает через Ollum Sales MCP, а сервер хранит память, синхронизирует WhatsApp и проверяет каждый черновик. Отдельный LLM API не используется.</p></div>
+            <div class="hero-actions"><span class="readiness-badge" id="agent-runtime-state">Проверка…</span><button class="primary-button" id="process-conversations-button" type="button">Синхронизировать очередь</button></div>
           </div>
 
           <div class="metric-grid compact-metrics" id="agent-metrics" aria-live="polite"></div>
@@ -153,7 +153,7 @@
               <div class="card-header"><div><p class="eyebrow">Playbook</p><h3>Логика диалога</h3></div><span class="safety-chip">Draft only</span></div>
               <form id="conversation-agent-form" class="stack-form agent-form">
                 <div class="agent-switches">
-                  <label class="switch-row"><span><strong>AI-обработка включена</strong><small>Worker проверяет очередь и создаёт черновики</small></span><input name="enabled" type="checkbox" role="switch"></label>
+                  <label class="switch-row"><span><strong>ChatGPT-агент включён</strong><small>Worker только собирает входящие; решение принимает ChatGPT через MCP</small></span><input name="enabled" type="checkbox" role="switch"></label>
                   <label class="switch-row"><span><strong>Создавать входящие контакты</strong><small>Неизвестный номер получит безопасную CRM-карточку</small></span><input name="auto_create_inbound_leads" type="checkbox" role="switch"></label>
                 </div>
                 <div class="two-columns">
@@ -180,10 +180,10 @@
             <article class="card agent-insight-card">
               <div class="card-header"><div><p class="eyebrow">Runtime</p><h3>Как он работает сейчас</h3></div></div>
               <dl class="detail-list" id="agent-runtime-details"></dl>
-              <div class="agent-flow" aria-label="Цикл AI-агента">
-                <div><span>01</span><strong>Понимает</strong><small>намерение и этап</small></div>
-                <div><span>02</span><strong>Проверяет</strong><small>факты и ограничения</small></div>
-                <div><span>03</span><strong>Готовит</strong><small>черновик или эскалацию</small></div>
+              <div class="agent-flow" aria-label="Цикл ChatGPT-агента">
+                <div><span>01</span><strong>Синхронизирует</strong><small>новые входящие</small></div>
+                <div><span>02</span><strong>Решает в ChatGPT</strong><small>только по фактам</small></div>
+                <div><span>03</span><strong>Проверяет</strong><small>черновик или эскалацию</small></div>
               </div>
             </article>
           </div>
@@ -197,7 +197,7 @@
         <section class="view" data-panel="inbox" data-section="04">
           <div class="section-heading">
             <div><p class="eyebrow">Agent queue</p><h2>Входящие обращения</h2><p class="muted">Последние неотвеченные сообщения. Текст используется как недоверенный контекст, отправка отсюда невозможна.</p></div>
-            <div class="hero-actions"><select id="inbox-status-filter" aria-label="Статус входящего"><option value="">Все</option><option value="new">Новые</option><option value="processing">AI обрабатывает</option><option value="needs_review">Нужен человек</option><option value="acknowledged">В работе</option><option value="drafted">Черновик готов</option><option value="resolved">Закрытые</option><option value="ignored">Игнор</option></select><button class="secondary-button" id="sync-inbox-button">Проверить WhatsApp</button></div>
+            <div class="hero-actions"><select id="inbox-status-filter" aria-label="Статус входящего"><option value="">Все</option><option value="new">Новые</option><option value="processing">Передано ChatGPT</option><option value="needs_review">Нужен человек</option><option value="acknowledged">В работе</option><option value="drafted">Черновик готов</option><option value="resolved">Закрытые</option><option value="ignored">Игнор</option></select><button class="secondary-button" id="sync-inbox-button">Проверить WhatsApp</button></div>
           </div>
           <div class="metric-grid compact-metrics" id="inbox-metrics"></div>
           <article class="table-card inbox-table-card"><div class="table-wrap"><table class="inbox-table"><thead><tr><th>Получено</th><th>Контакт</th><th>Сообщение</th><th>Лид</th><th>Статус</th><th></th></tr></thead><tbody id="inbox-table"></tbody></table></div></article>

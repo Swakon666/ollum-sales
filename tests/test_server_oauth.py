@@ -12,19 +12,8 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 def test_real_server_exposes_oauth_metadata_and_challenges_mcp(tmp_path) -> None:
     code = r"""
 import json
-import sys
-import types
 
 from starlette.testclient import TestClient
-
-package = types.ModuleType("scrapegraphai")
-graphs = types.ModuleType("scrapegraphai.graphs")
-class SmartScraperGraph:
-    pass
-graphs.SmartScraperGraph = SmartScraperGraph
-package.graphs = graphs
-sys.modules["scrapegraphai"] = package
-sys.modules["scrapegraphai.graphs"] = graphs
 
 import app.server as server
 
@@ -44,6 +33,9 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     archive_knowledge_tool = server.mcp._tool_manager._tools["sales_archive_company_knowledge"]
     link_inbox_tool = server.mcp._tool_manager._tools["sales_link_agent_inbox_lead"]
     next_action_tool = server.mcp._tool_manager._tools["sales_agent_next_action"]
+    playbook_tool = server.mcp._tool_manager._tools["sales_get_chatgpt_agent_playbook"]
+    prepare_batch_tool = server.mcp._tool_manager._tools["sales_prepare_conversation_batch"]
+    submit_decision_tool = server.mcp._tool_manager._tools["sales_submit_conversation_decision"]
     print(json.dumps({
         "metadata_status": metadata.status_code,
         "metadata": metadata.json(),
@@ -65,6 +57,9 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "archive_knowledge_annotations": archive_knowledge_tool.annotations.model_dump(by_alias=True),
         "link_inbox_annotations": link_inbox_tool.annotations.model_dump(by_alias=True),
         "next_action_annotations": next_action_tool.annotations.model_dump(by_alias=True),
+        "playbook_annotations": playbook_tool.annotations.model_dump(by_alias=True),
+        "prepare_batch_annotations": prepare_batch_tool.annotations.model_dump(by_alias=True),
+        "submit_decision_annotations": submit_decision_tool.annotations.model_dump(by_alias=True),
     }))
 """
     env = os.environ.copy()
@@ -77,6 +72,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
             "OLLUM_OIDC_AUDIENCE": "https://api.example",
             "OLLUM_ADMIN_ENABLED": "false",
             "OLLUM_CRM_DB_PATH": str(tmp_path / "oauth.db"),
+            "PYTHONWARNINGS": "error",
         }
     )
 
@@ -100,7 +96,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 62
+    assert payload["tool_count"] == 65
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
@@ -128,3 +124,8 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["link_inbox_annotations"]["readOnlyHint"] is False
     assert payload["link_inbox_annotations"]["destructiveHint"] is False
     assert payload["next_action_annotations"]["readOnlyHint"] is True
+    assert payload["playbook_annotations"]["readOnlyHint"] is True
+    assert payload["prepare_batch_annotations"]["readOnlyHint"] is False
+    assert payload["prepare_batch_annotations"]["openWorldHint"] is True
+    assert payload["submit_decision_annotations"]["readOnlyHint"] is False
+    assert payload["submit_decision_annotations"]["destructiveHint"] is False

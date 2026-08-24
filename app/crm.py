@@ -2650,6 +2650,113 @@ class SalesCRM:
             )
         return self.get_lead(lead_id)
 
+    def save_agent_reply_draft(
+        self,
+        workspace_id: str,
+        event_id: str,
+        *,
+        lead_id: str,
+        recipient: str,
+        message: str,
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Atomically finalize one leased inbox event with exactly one reply draft."""
+
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_lead(lead_id)
+        clean_message = message.strip()
+        if not clean_message:
+            raise ValueError("message must not be empty")
+        if len(clean_message) > 4000:
+            raise ValueError("message must be at most 4000 characters")
+        clean_recipient = recipient.strip()
+        if not clean_recipient:
+            raise ValueError("recipient must not be empty")
+
+        timestamp = utc_now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            event_row = connection.execute(
+                """
+                SELECT * FROM agent_inbox_events
+                WHERE id = ? AND workspace_id = ?
+                """,
+                (event_id, workspace_id),
+            ).fetchone()
+            if event_row is None:
+                raise ValueError("agent inbox event not found")
+            if event_row["lead_id"] != lead_id:
+                raise ValueError("inbox event belongs to a different lead")
+
+            existing_draft_id = event_row["draft_id"]
+            if existing_draft_id:
+                draft_row = connection.execute(
+                    "SELECT * FROM outreach_drafts WHERE id = ?",
+                    (existing_draft_id,),
+                ).fetchone()
+                assert draft_row is not None
+                return {
+                    "event": self._agent_inbox_from_row(event_row),
+                    "draft": self._draft_from_row(draft_row),
+                    "idempotent": True,
+                }
+            if event_row["status"] != "processing":
+                raise ValueError("agent inbox event is not leased for processing")
+
+            draft_id = str(uuid.uuid4())
+            connection.execute(
+                """
+                INSERT INTO outreach_drafts (
+                    id, lead_id, channel, recipient, message, status, created_at, updated_at
+                ) VALUES (?, ?, 'whatsapp', ?, ?, 'draft', ?, ?)
+                """,
+                (
+                    draft_id,
+                    lead_id,
+                    clean_recipient,
+                    clean_message,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            cursor = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'drafted', draft_id = ?, decision_json = ?,
+                    agent_error = NULL, agent_lock_until = NULL, updated_at = ?
+                WHERE id = ? AND workspace_id = ?
+                  AND status = 'processing' AND draft_id IS NULL
+                """,
+                (draft_id, _json(decision), timestamp, event_id, workspace_id),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "agent inbox event changed during draft finalization"
+                )
+            connection.execute(
+                """
+                UPDATE leads
+                SET status = CASE
+                    WHEN status IN ('new','researching','analyzed','qualified')
+                    THEN 'drafted' ELSE status END,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (timestamp, lead_id),
+            )
+            saved_event = connection.execute(
+                "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
+            ).fetchone()
+            saved_draft = connection.execute(
+                "SELECT * FROM outreach_drafts WHERE id = ?", (draft_id,)
+            ).fetchone()
+        assert saved_event is not None and saved_draft is not None
+        return {
+            "event": self._agent_inbox_from_row(saved_event),
+            "draft": self._draft_from_row(saved_draft),
+            "idempotent": False,
+        }
+
     def save_outreach_draft(
         self,
         lead_id: str,

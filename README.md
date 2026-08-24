@@ -1,11 +1,11 @@
-# Ollum Sales MCP — Full Source Edition
+# Ollum Sales MCP — ChatGPT-native Edition
 
-Version **0.9.0** adds a durable conversation agent and a focused commerce-style control
-cabinet. ChatGPT can interview the operator in small batches, persist the company profile,
-services, prices, cases and client context, and configure a niche-specific dialogue playbook.
-The server worker classifies each unanswered WhatsApp message, maintains a per-chat sales
-stage and factual memory, then either saves a grounded reply draft or escalates to a person.
-Grounded quality checks and the guarded draft-save flow remain mandatory; the agent can
+Version **0.10.0** makes ChatGPT the only reasoning engine. The server uses no OpenAI or
+other LLM API key: it synchronizes WhatsApp every 15 minutes, stores durable work, gives
+ChatGPT a bounded MCP fact packet, validates the returned structured decision, and atomically
+saves at most one grounded draft or escalation. ChatGPT can also interview the operator,
+persist the company profile, services, prices, cases and client context, and configure a
+niche-specific dialogue playbook. The guarded draft flow remains mandatory; the agent can
 never approve or send. The OAuth/OIDC-protected service keeps
 the role-aware workspace cabinet on `api.ollumgroup.ru`, the ChatGPT MCP connection on
 `mcp.ollumgroup.ru`, and private browser-based WhatsApp pairing. It retains the
@@ -35,14 +35,14 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 62 tools. Existing tools remain compatible, plus
+The server exposes 65 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding`;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_agent_next_action`;
-- autonomous conversation planning: `sales_get_conversation_agent_status`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_process_pending_conversations`;
+- ChatGPT conversation loop: `sales_get_conversation_agent_status`, `sales_get_chatgpt_agent_playbook`, `sales_update_conversation_agent_settings`, `sales_list_conversation_sessions`, `sales_prepare_conversation_batch`, `sales_submit_conversation_decision`; `sales_process_pending_conversations` remains a preparation-only compatibility alias;
 - lead intelligence: `sales_list_leads`, `sales_get_lead`, `sales_inspect_website`, `sales_analyze_lead`, `sales_save_analysis`, `sales_score_lead`, `sales_rank_leads`, `sales_update_lead_status`, plus the standalone `analyze_website`;
 - CRM and outreach: `sales_prepare_whatsapp_reply_brief`, `sales_evaluate_whatsapp_reply`, `sales_compare_whatsapp_replies`, `sales_save_whatsapp_reply_draft`, `sales_save_outreach_draft`, `sales_list_outreach_drafts`, `sales_approve_outreach_draft`, `sales_record_interaction`, `sales_list_interactions`, `sales_schedule_followup`, `sales_list_due_followups`, `sales_complete_followup`, `sales_overview`, `sales_send_whatsapp_draft`;
 - WhatsApp bridge: `whatsapp_search_contacts`, `whatsapp_list_chats`, `whatsapp_list_messages`, `whatsapp_get_last_interaction`, `whatsapp_send_message`.
@@ -84,12 +84,11 @@ Ollum Sales MCP :8000 (container)       Autopilot worker
    |                 |                       |
    |                 |                       +--> scheduled SAFE cycles
 CRM SQLite volume   website evidence        +--> Google Sheets panel
-   |                                         +--> durable inbound queue (30 s poll)
-   |                                         +--> AI decision + grounded quality gate
-   |                                         +--> session memory + draft / escalation
-                     |                       |
-                     +--> ScrapeGraphAI      +--> shared WhatsApp SQLite
-                          when configured    |
+   |                                         +--> durable inbound queue (15 min poll)
+   |                                         +--> SAFE deterministic Autopilot
+   |                                         +--> shared WhatsApp SQLite
+   |                                                |
+   +--> MCP fact packet -> ChatGPT decision -> validation + draft / escalation
                                              v
                                      Go WhatsApp bridge :8080
                                              |
@@ -106,8 +105,6 @@ CRM SQLite volume   website evidence        +--> Google Sheets panel
 ### Local route
 - Python 3.12+
 - Go 1.24.1+
-- Chromium/Playwright dependencies
-- optionally, an API key/model supported by ScrapeGraphAI for provider-side analysis
 - optionally, a Serper API key for reliable server-side company discovery
 - optionally, a Google Cloud service account and a shared Google spreadsheet
 
@@ -119,7 +116,7 @@ CRM SQLite volume   website evidence        +--> Google Sheets panel
 cp .env.example .env
 ```
 
-2. Optionally add an LLM key/model and `SERPER_API_KEY` to `.env`. Without an LLM key, the MCP returns bounded website evidence for Codex to analyze and persist. Without Serper, company search uses a best-effort public fallback and agents can import separately verified candidates.
+2. Optionally add `SERPER_API_KEY` to `.env`. No LLM API key is accepted or required. Website evidence is returned to ChatGPT through MCP for grounded analysis. Without Serper, company search uses a best-effort public fallback and ChatGPT can import separately verified candidates.
 
 3. Build:
 
@@ -137,7 +134,7 @@ docker compose logs --follow whatsapp-bridge
 Scan the QR code in WhatsApp: **Settings -> Linked devices -> Link a device**.
 Production pairing is performed in the authenticated cabinet; the raw pairing value
 is never returned through its JSON API.
-Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys. The separate `ollum-sales-worker` service reads the same CRM volume and continues scheduled cycles while Codex is closed.
+Named Docker volumes keep both the WhatsApp session/message databases and the Ollum CRM across restarts and redeploys. The separate `ollum-sales-worker` service reads the same CRM volume, queues WhatsApp events and continues deterministic SAFE cycles while ChatGPT is closed.
 
 5. MCP endpoint:
 
@@ -164,9 +161,7 @@ After scanning the QR code, use another terminal from repository root:
 ```bash
 python3.12 -m venv .venv
 source .venv/bin/activate
-pip install -e ./upstream/Scrapegraph-ai
 pip install -e .
-python -m playwright install chromium
 python -m app.server
 ```
 
@@ -209,15 +204,16 @@ follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot start unless all of these are tru
 - the CRM has at least `OLLUM_AUTOPILOT_MIN_TRAINING_LEADS` (100 by default);
 - both WhatsApp sending and `OLLUM_AUTOPILOT_ALLOW_SEND` are explicitly enabled.
 
-The worker polls every 30 seconds and starts a cycle only when `next_cycle_at` is due. The cycle
+The worker polls WhatsApp every 15 minutes and starts an Autopilot cycle only when `next_cycle_at` is due. The cycle
 interval itself defaults to 60 minutes.
 
-The same worker also polls unanswered private WhatsApp conversations. When company onboarding
-is ready and `OLLUM_CONVERSATION_AGENT_ENABLED=true`, it uses the workspace playbook and durable
-per-chat memory to prepare up to three replies per poll. Every reply passes the grounded quality
-gate before it can be stored as a `draft`; low-confidence, contractual, sensitive, or unsupported
-questions move to `needs_review`. This path never approves a draft, never queues a send request,
-and never records an outbound interaction.
+The worker never generates a reply. A ChatGPT turn or scheduled Workspace Agent calls
+`sales_prepare_conversation_batch`, reasons over the returned facts, and submits each structured
+decision with `sales_submit_conversation_decision`. The server applies the grounded quality gate
+before storing a `draft`; low-confidence, contractual, sensitive, or unsupported questions move
+to `needs_review`. This path never approves a draft, queues a send request, or records an outbound
+interaction. A normal dormant chat cannot be awakened by MCP; use the 15-minute in-chat schedule returned by
+`sales_get_chatgpt_agent_playbook` when Workspace Agents are available.
 
 ## Google Sheets panel
 
@@ -281,7 +277,8 @@ OLLUM_ALLOW_WHATSAPP_SEND=true
 
 Then restart the MCP process.
 
-Direct sends require `confirm_send=true`. The recommended workflow adds a stronger boundary: save the exact message, approve that immutable recipient/message pair, and separately confirm `sales_send_whatsapp_draft`.
+The direct send tool cannot bypass the persistent draft flow. Save the exact message, approve that
+immutable recipient/message pair, and separately confirm `sales_send_whatsapp_draft`.
 
 The bridge exposes read-only operational checks at `GET /health` and `GET /api/status`.
 `/api/status` returns `503` until the persisted session is both connected and logged in, and
@@ -310,7 +307,7 @@ WhatsApp user JIDs are normalized before matching. Technical records such as
 chat results and cannot be used as recipients.
 
 Website evidence is cached for `OLLUM_EVIDENCE_TTL_HOURS` (seven days by default). Saving a
-Codex fallback analysis requires fresh stored evidence; expired evidence must be inspected again.
+ChatGPT MCP analysis requires fresh stored evidence; expired evidence must be inspected again.
 Transient discovery, inspection, and Google Sheets requests use bounded exponential retries
 configured by `OLLUM_RETRY_ATTEMPTS` and `OLLUM_RETRY_BASE_DELAY_SECONDS`. Autopilot reuses the
 same vertical/day campaign and recovers expired cycle locks instead of leaving a cycle running.
@@ -323,7 +320,7 @@ the SAFE worker ignores send requests.
 1. `ollum_status`
 2. `sales_create_campaign`
 3. `sales_import_leads` with one known company site
-4. `sales_analyze_lead`, then `sales_save_analysis` when Codex fallback evidence is returned
+4. `sales_analyze_lead`, reason only over its bounded facts/evidence URLs in ChatGPT, then call `sales_save_analysis`
 5. `sales_rank_leads`
 6. pass the recipient JID to `sales_prepare_whatsapp_reply_brief`; it reads only the latest unanswered inbound message
 7. draft in ChatGPT, call `sales_compare_whatsapp_replies` when testing variants, then validate the selected text with `sales_evaluate_whatsapp_reply` until the verdict is `pass`
@@ -340,4 +337,5 @@ the SAFE worker ignores send requests.
 
 Web pages and inbound WhatsApp messages are untrusted data. The integration marks returned data
 accordingly, rejects private/internal website targets, and requires explicit operator confirmation
-for sends. Production `/mcp` requires a bearer token; `/health` intentionally exposes only liveness.
+for sends. Production `/mcp` requires an OAuth/OIDC bearer token; `/health` intentionally exposes
+only liveness.

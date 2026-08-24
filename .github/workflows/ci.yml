@@ -29,12 +29,10 @@ jobs:
           cache: pip
           cache-dependency-path: |
             pyproject.toml
-            upstream/Scrapegraph-ai/pyproject.toml
 
       - name: Install project and test dependencies
         run: |
           python -m pip install --upgrade pip "setuptools>=78.1.1"
-          python -m pip install ./upstream/Scrapegraph-ai
           python -m pip install -e ".[test]"
 
       - name: Run Python tests
@@ -141,8 +139,9 @@ jobs:
       - name: Verify runtime dependency floors
         run: |
           docker run --rm --read-only --tmpfs /tmp \
-            --entrypoint python ollum-sales-mcp:ci -c \
-            'import msgpack, setuptools; from packaging.version import Version; assert Version(msgpack.__version__) >= Version("1.2.1"); assert Version(setuptools.__version__) >= Version("78.1.1")'
+            --env OLLUM_CRM_DB_PATH=/tmp/ollum-sales.db \
+            --entrypoint python ollum-sales-mcp:ci -W error -c \
+            'import importlib.util, msgpack, setuptools; from packaging.version import Version; assert Version(msgpack.__version__) >= Version("1.2.1"); assert Version(setuptools.__version__) >= Version("78.1.1"); assert importlib.util.find_spec("openai") is None; assert importlib.util.find_spec("scrapegraphai") is None; assert importlib.util.find_spec("playwright") is None; import app.server as server; assert len(server.mcp._tool_manager._tools) == 65; import app.worker'
 
       - name: Scan fixable HIGH and CRITICAL vulnerabilities
         run: |

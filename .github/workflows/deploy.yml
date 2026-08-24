@@ -109,10 +109,7 @@ jobs:
       DEFAULT_WORKSPACE_ID: ${{ vars.OLLUM_DEFAULT_WORKSPACE_ID }}
       DEFAULT_WORKSPACE_NAME: ${{ vars.OLLUM_DEFAULT_WORKSPACE_NAME }}
       WORKSPACE_OWNER_EMAILS: ${{ secrets.OLLUM_WORKSPACE_OWNER_EMAILS }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
-      SCRAPEGRAPH_MODEL: ${{ secrets.SCRAPEGRAPH_MODEL }}
       GOOGLE_SHEETS_ID: ${{ vars.OLLUM_GOOGLE_SHEETS_ID }}
       GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON }}
       WHATSAPP_PROXY_URL: ${{ secrets.OLLUM_WHATSAPP_PROXY_URL }}
@@ -357,7 +354,6 @@ jobs:
             --exclude=outputs \
             -czf "$RUNNER_TEMP/release.tgz" .
 
-          model=${SCRAPEGRAPH_MODEL:-openai/gpt-4o-mini}
           auth_mode=${AUTH_MODE:-bearer}
           public_base_url=${PUBLIC_BASE_URL:-https://$OLLUM_DOMAIN}
           api_domain=${OLLUM_API_DOMAIN:-$OLLUM_DOMAIN}
@@ -412,15 +408,9 @@ jobs:
             printf 'OLLUM_DEFAULT_WORKSPACE_ID=%s\n' "${DEFAULT_WORKSPACE_ID:-ollum-group}"
             printf 'OLLUM_DEFAULT_WORKSPACE_NAME=%s\n' "${DEFAULT_WORKSPACE_NAME:-Ollum Group}"
             printf 'OLLUM_WORKSPACE_OWNER_EMAILS=%s\n' "${WORKSPACE_OWNER_EMAILS:-${ADMIN_ALLOWED_EMAILS:-}}"
-            printf 'SCRAPEGRAPH_MODEL=%s\n' "$model"
-            printf 'OPENAI_API_KEY=%s\n' "${OPENAI_API_KEY:-}"
             printf 'OLLUM_CONVERSATION_AGENT_ENABLED=true\n'
-            printf 'OLLUM_CONVERSATION_AGENT_MODEL=gpt-5.6-luna\n'
-            printf 'OLLUM_CONVERSATION_AGENT_POLL_SECONDS=30\n'
+            printf 'OLLUM_CONVERSATION_AGENT_POLL_SECONDS=900\n'
             printf 'OLLUM_CONVERSATION_AGENT_BATCH_SIZE=3\n'
-            printf 'OLLUM_CONVERSATION_AGENT_TIMEOUT_SECONDS=90\n'
-            printf 'OLLUM_CONVERSATION_AGENT_MAX_REVISIONS=2\n'
-            printf 'LLM_API_KEY=%s\n' "${LLM_API_KEY:-}"
             printf 'SERPER_API_KEY=%s\n' "${SERPER_API_KEY:-}"
             printf 'WHATSAPP_API_BASE_URL=http://whatsapp-bridge:8080/api\n'
             printf 'WHATSAPP_MESSAGES_DB_PATH=/data/whatsapp/messages.db\n'

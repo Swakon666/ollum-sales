@@ -5,20 +5,17 @@ WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     HOME=/home/ollum \
     XDG_CACHE_HOME=/tmp/.cache \
     XDG_CONFIG_HOME=/tmp/.config
 
-# Keep the complete upstream trees in the image. Install ScrapeGraphAI from its local source.
-COPY upstream /app/upstream
-RUN python -m pip install --upgrade pip==26.2.1 "setuptools>=78.1.1" \
-    && pip install /app/upstream/Scrapegraph-ai
+RUN python -m pip install --upgrade pip==26.2.1 "setuptools>=78.1.1"
 
+COPY upstream/whatsapp-mcp/whatsapp-mcp-server \
+    /app/upstream/whatsapp-mcp/whatsapp-mcp-server
 COPY pyproject.toml /app/pyproject.toml
 COPY app /app/app
 RUN pip install . \
-    && python -m playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/* /root/.cache/pip
 
 RUN groupadd --gid 10001 ollum \

@@ -6,7 +6,7 @@ from pathlib import Path
 root = Path(__file__).resolve().parents[1]
 required = [
     root / "app" / "server.py",
-    root / "app" / "scraping.py",
+    root / "app" / "conversation_agent.py",
     root / "app" / "whatsapp_service.py",
     root / "upstream" / "Scrapegraph-ai" / "scrapegraphai" / "__init__.py",
     root / "upstream" / "whatsapp-mcp" / "whatsapp-bridge" / "main.go",
