@@ -545,6 +545,9 @@ async def api_bootstrap(
                 workspace_id
             ),
             "agent_inbox": context.crm.agent_inbox_summary(workspace_id),
+            "agent_coordination": context.crm.agent_coordination_summary(
+                workspace_id, include_leads=True, limit=12
+            ),
             "conversation_agent": (
                 context.conversation_agent.status(workspace_id)
                 if context.conversation_agent is not None

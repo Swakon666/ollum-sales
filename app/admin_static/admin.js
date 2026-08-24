@@ -456,6 +456,11 @@ function renderCompany() {
 
 function renderConversationAgent() {
   const status = state.data.conversation_agent || {};
+  const coordination = state.data.agent_coordination || {};
+  const lanes = coordination.lanes || {};
+  const inboxLane = lanes.inbox || {};
+  const prospectingLane = lanes.prospecting || {};
+  const responses = coordination.responses || {};
   const settings = status.settings || {};
   const summary = status.summary || {};
   const inbox = summary.inbox || {};
@@ -467,12 +472,31 @@ function renderConversationAgent() {
   badge.classList.toggle("is-ready", Boolean(runtime.ready));
 
   const metrics = [
-    ["Ждут ChatGPT", Number(inbox.new || 0) + Number(inbox.processing_active ?? inbox.processing ?? 0)],
-    ["Черновики", inbox.drafted || 0],
-    ["Нужен человек", inbox.needs_review || 0],
-    ["SLA просрочено", inbox.sla_overdue || 0],
+    ["Новые входящие", inboxLane.new || 0],
+    ["Qualified", prospectingLane.qualified || 0],
+    ["Ответили", responses.replied || 0],
+    ["Ждём ответа", responses.awaiting_reply || 0],
   ];
   $("#agent-metrics").innerHTML = metrics.map(([name, value]) => `<article class="metric-card"><span>${escapeHtml(name)}</span><strong>${Number(value)}</strong></article>`).join("");
+
+  $("#agent-lane-inbox-waiting").textContent = String(Number(inboxLane.new || 0) + Number(inboxLane.processing_active ?? inboxLane.processing ?? 0));
+  $("#agent-lane-inbox-review").textContent = String(Number(inboxLane.needs_review || 0));
+  $("#agent-lane-inbox-sla").textContent = String(Number(inboxLane.sla_overdue || 0));
+  $("#agent-lane-prospecting-new").textContent = String(Number(prospectingLane.unreviewed || 0));
+  $("#agent-lane-prospecting-qualified").textContent = String(Number(prospectingLane.qualified || 0));
+  $("#agent-lane-prospecting-drafts").textContent = String(Number(prospectingLane.drafts_waiting_review || 0));
+  $("#agent-replied-count").textContent = String(Number(responses.replied || 0));
+  $("#agent-never-replied-count").textContent = String(Number(responses.never_replied || 0));
+
+  const renderResponseList = (items, emptyText) => {
+    if (!Array.isArray(items) || !items.length) return `<p class="muted response-empty">${escapeHtml(emptyText)}</p>`;
+    return items.slice(0, 6).map((item) => {
+      const activityAt = item.last_inbound_at || item.last_outbound_at;
+      return `<div class="response-row"><div><strong>${escapeHtml(item.company_name || "Компания")}</strong><small>${escapeHtml(label(item.status))}</small></div><time>${escapeHtml(formatDate(activityAt))}</time></div>`;
+    }).join("");
+  };
+  $("#agent-replied-list").innerHTML = renderResponseList(responses.replied_leads, "Ответов на отправленные обращения пока нет");
+  $("#agent-never-replied-list").innerHTML = renderResponseList(responses.never_replied_leads, "Нет компаний без ответа");
 
   const form = $("#conversation-agent-form");
   if (!state.agentDirty && !form.contains(document.activeElement)) {
@@ -490,10 +514,12 @@ function renderConversationAgent() {
 
   const runtimeRows = [
     ["Мозг", "ChatGPT через MCP"],
+    ["Рабочие зоны", "2 изолированных чата · 1 общая CRM"],
     ["Режим", label(settings.autonomy_mode || "draft")],
     ["Ниша", settings.niche === "auto" ? "Определяется по контексту" : (settings.niche || "—")],
     ["Память компании", runtime.company_ready ? "Готова" : "Можно дополнять в чате"],
-    ["Синхронизация WhatsApp", "Каждые 15 минут"],
+    ["Синхронизация WhatsApp", "Worker каждые 15 минут"],
+    ["Запуск ChatGPT", "Ежечасно или вручную"],
     ["Окно свежести", `${settings.max_inbound_age_hours || 168} ч`],
     ["SLA ответа", `${settings.response_sla_minutes || 60} мин`],
     ["Самое долгое открытое", formatMinutes(inbox.oldest_open_minutes || 0)],

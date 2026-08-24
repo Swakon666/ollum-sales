@@ -1,7 +1,7 @@
 {
   "name": "ollum-sales",
-  "version": "0.4.0",
-  "description": "Persistent ChatGPT-powered sales operations, grounded CRM workflows, and operator-controlled WhatsApp outreach.",
+  "version": "0.5.0",
+  "description": "Two coordinated ChatGPT sales chats, persistent grounded CRM memory, and operator-controlled WhatsApp outreach.",
   "author": {
     "name": "Ollum Group",
     "url": "https://ollumgroup.ru/"
@@ -18,22 +18,24 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Ollum Sales",
-    "shortDescription": "Run grounded sales workflows from ChatGPT.",
-    "longDescription": "Turns ChatGPT into Ollum Group's persistent sales operator: onboard a company, maintain CRM memory, research and rank leads, prepare grounded WhatsApp replies, and keep every external send behind exact-recipient approval.",
+    "shortDescription": "Coordinate inbound and prospecting chats from ChatGPT.",
+    "longDescription": "Turns two isolated ChatGPT chats into one coordinated Ollum sales operation: complete company onboarding once, share persistent CRM memory, handle inbound WhatsApp events separately from prospecting, track replies, and keep every external send behind exact-recipient approval.",
     "developerName": "Ollum Group",
     "category": "Productivity",
     "capabilities": [
       "Company onboarding and memory",
+      "Two-chat responsibility isolation",
       "Grounded lead research and scoring",
       "Persistent CRM and follow-ups",
       "WhatsApp inbox preparation",
+      "Reply and no-reply statistics",
       "Operator-controlled outreach"
     ],
     "websiteURL": "https://ollumgroup.ru/",
     "defaultPrompt": [
-      "Продолжи настройку Ollum Sales и покажи следующий шаг.",
-      "Проверь новые обращения и подготовь безопасные ответы.",
-      "Запусти SAFE-анализ лидов и покажи топ-5."
+      "Настрой Ollum Sales и покажи инструкции для двух рабочих чатов.",
+      "Работай как чат входящих: проверь новые обращения и подготовь безопасные ответы.",
+      "Работай как чат новых компаний: проведи SAFE-анализ и покажи топ-5."
     ],
     "brandColor": "#12D982"
   },

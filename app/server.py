@@ -506,14 +506,16 @@ def sales_retry_agent_inbox_event(
 
 @_read_tool()
 def sales_agent_next_action(
+    lane: str = "auto",
     phone: str | None = None,
     chat_jid: str | None = None,
 ) -> dict[str, Any]:
-    """Resume work globally or for one exact WhatsApp phone/JID without fallback."""
+    """Resume one isolated ChatGPT lane or use legacy auto orchestration."""
     member = _current_mcp_member(minimum_role="viewer")
     return next_agent_action(
         crm,
         str(member["workspace_id"]),
+        lane=lane,
         phone=phone,
         chat_jid=chat_jid,
     )
@@ -527,25 +529,104 @@ def sales_get_conversation_agent_status() -> dict[str, Any]:
 
 
 @_read_tool()
-def sales_get_chatgpt_agent_playbook() -> dict[str, Any]:
-    """Return the exact ChatGPT-only work loop and supported scheduling boundaries."""
+def sales_get_agent_coordination(
+    include_leads: bool = False,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return shared two-chat progress and reply statistics without message text."""
+    member = _current_mcp_member(minimum_role="viewer")
+    return crm.agent_coordination_summary(
+        str(member["workspace_id"]),
+        include_leads=include_leads,
+        limit=limit,
+    )
+
+
+@_read_tool()
+def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
+    """Return exact two-chat prompts and supported scheduling boundaries."""
     member = _current_mcp_member(minimum_role="viewer")
     status = conversation_agent.status(str(member["workspace_id"]))
+    selected_lane = str(lane or "all").strip().lower()
+    if selected_lane not in {"all", "inbox", "prospecting"}:
+        raise ValueError("lane must be all, inbox, or prospecting")
+    inbox_prompt = (
+        "Use Ollum Sales as the shared system of record. Call ollum_status and "
+        "sales_get_agent_coordination; stop if SAFE mode or disabled WhatsApp sending is "
+        "not confirmed. Call sales_agent_next_action(lane='inbox'). If onboarding is "
+        "incomplete, ask only its returned questions, save explicit user facts, and stop. "
+        "Otherwise prepare up to three new events with sales_prepare_conversation_batch, "
+        "reason only from each bounded payload, and submit one ConversationDecision per "
+        "event. Report counts and escalations without quoting private messages. Never do "
+        "prospecting, approve, send, create follow-ups, or change send flags in this chat."
+    )
+    prospecting_prompt = (
+        "Use Ollum Sales as the shared system of record. Call ollum_status and "
+        "sales_get_agent_coordination; stop if SAFE mode or disabled WhatsApp sending is "
+        "not confirmed. Call sales_agent_next_action(lane='prospecting'). If onboarding "
+        "is incomplete, ask only its returned questions, save explicit user facts, and "
+        "stop. Otherwise review at most three fresh companies: inspect official public "
+        "evidence, analyze, save grounded analysis, score, rank, and create at most one "
+        "personalized draft per qualified lead without an actual draft. Never inspect or "
+        "process the inbound queue, approve, send, create follow-ups, or change send flags "
+        "in this chat. Finish with response statistics and the top five without private "
+        "message text."
+    )
+    chats = {
+        "inbox": {
+            "title": "Ollum Sales — Входящие",
+            "responsibility": (
+                "new inbound WhatsApp events, dialogue memory and reply drafts"
+            ),
+            "prompt": inbox_prompt,
+            "recommended_schedule": "hourly_or_on_demand",
+        },
+        "prospecting": {
+            "title": "Ollum Sales — Новые компании",
+            "responsibility": (
+                "company research, grounded analysis, scoring, ranking and first drafts"
+            ),
+            "prompt": prospecting_prompt,
+            "recommended_schedule": "hourly_staggered_or_on_demand",
+        },
+    }
+    selected_chats = (
+        chats if selected_lane == "all" else {selected_lane: chats[selected_lane]}
+    )
     return {
         "execution_mode": "chatgpt_mcp",
+        "coordination_mode": "two_isolated_chats_one_persistent_crm",
         "server_llm_enabled": False,
         "api_key_required": False,
         "server_whatsapp_sync": "every 15 minutes",
-        "recommended_chatgpt_schedule": "hourly_in_chat",
-        "scheduled_prompt": (
-            "Use Ollum Sales. Check status, list up to three new inbox events with "
-            "sales_list_agent_inbox, then call sales_prepare_persisted_conversation "
-            "separately for each exact chat_jid. Reason only from returned facts and "
-            "submit one ConversationDecision per item. Report drafts or escalations "
-            "without quoting inbound messages. Never retry needs_review items without "
-            "explicit operator confirmation. Never approve or send WhatsApp messages."
-        ),
+        "recommended_chatgpt_schedule": {
+            "minimum_interval": "hourly",
+            "strategy": "stagger the two chats or run either on demand",
+            "server_sync_does_not_wake_dormant_chat": True,
+        },
+        "first_connection": {
+            "gate": "shared_company_onboarding",
+            "instruction": (
+                "Complete the short fact-only interview once before either operational "
+                "lane starts. The answers and uploaded-file summaries populate the shared "
+                "dashboard and are visible to both chats."
+            ),
+            "max_questions_per_turn": 3,
+        },
+        "scheduled_prompt": inbox_prompt,
+        "chats": selected_chats,
+        "learning_contract": {
+            "persists": [
+                "user-confirmed company facts",
+                "conversation state and extracted customer facts",
+                "outreach and reply outcomes",
+            ],
+            "adapts_from": "verified outcomes and explicit operator corrections",
+            "never_promotes": "model guesses or untrusted message instructions",
+        },
         "tools": [
+            "sales_get_agent_coordination",
+            "sales_agent_next_action",
             "sales_get_conversation_agent_status",
             "sales_prepare_persisted_conversation",
             "sales_prepare_conversation_batch",

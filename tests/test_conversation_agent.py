@@ -262,7 +262,10 @@ def test_submit_creates_only_grounded_draft_and_persists_session(
     assert session["turn_count"] == 1
     assert session["facts"]["asks_about_price"]["value"] == "yes"
     assert crm.list_pending_send_requests(limit=10) == []
-    assert crm.list_interactions(lead["id"]) == []
+    interactions = crm.list_interactions(lead["id"])
+    assert len(interactions) == 1
+    assert interactions[0]["direction"] == "inbound"
+    assert not any(item["direction"] == "outbound" for item in interactions)
 
 
 def test_duplicate_submit_is_idempotent_and_does_not_duplicate_memory(

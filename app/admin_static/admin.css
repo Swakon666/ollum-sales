@@ -2024,6 +2024,70 @@ select:focus,
 textarea:focus { background: #fff; box-shadow: 0 0 0 3px rgba(18, 204, 119, 0.16); }
 
 .agent-heading .muted { max-width: 760px; }
+.agent-lanes-grid,
+.agent-response-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 14px;
+}
+.agent-lane-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 18px;
+  padding: 22px;
+}
+.agent-lane-card > div:nth-child(2) p:last-child {
+  max-width: 62ch;
+  margin: 8px 0 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.lane-number {
+  height: fit-content;
+  padding: 7px 9px;
+  border-radius: 999px;
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.agent-lane-card dl {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.agent-lane-card dl div {
+  padding: 12px;
+  border-radius: 12px;
+  background: #f6f8f6;
+}
+.agent-lane-card dt { color: var(--ink-muted); font-size: 9px; }
+.agent-lane-card dd { margin: 5px 0 0; font-size: 22px; font-weight: 700; }
+.response-card { padding: 20px; }
+.response-card .card-header { margin-bottom: 8px; }
+.response-card .card-header > strong { font-size: 28px; }
+.response-list { display: grid; }
+.response-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+}
+.response-row:last-child { border-bottom: 0; }
+.response-row strong,
+.response-row small { display: block; }
+.response-row strong { font-size: 12px; }
+.response-row small,
+.response-row time { color: var(--ink-muted); font-size: 10px; }
+.response-empty { margin: 14px 0 4px; font-size: 11px; }
 .agent-layout {
   display: grid;
   grid-template-columns: minmax(0, 2fr) minmax(290px, 0.82fr);
@@ -2144,6 +2208,10 @@ textarea:focus { background: #fff; box-shadow: 0 0 0 3px rgba(18, 204, 119, 0.16
 }
 
 @media (max-width: 700px) {
+  .agent-lanes-grid,
+  .agent-response-grid { grid-template-columns: 1fr; }
+  .agent-lane-card { grid-template-columns: 1fr; gap: 12px; }
+  .agent-lane-card dl { grid-column: auto; }
   .agent-switches,
   .three-columns { grid-template-columns: 1fr; }
   .agent-insight-card { display: block; }

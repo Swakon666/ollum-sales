@@ -32,7 +32,7 @@ def test_codex_plugin_manifest_is_release_ready() -> None:
     manifest = _load_json(".codex-plugin/plugin.json")
 
     assert manifest["name"] == "ollum-sales"
-    assert manifest["version"] == "0.4.0"
+    assert manifest["version"] == "0.5.0"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert manifest["interface"]["developerName"] == "Ollum Group"
@@ -74,6 +74,11 @@ def test_codex_plugin_skill_preserves_chatgpt_brain_and_two_step_send() -> None:
     assert skill == canonical_skill
     assert "sales_prepare_conversation_batch" in skill
     assert "sales_submit_conversation_decision" in skill
+    assert 'sales_agent_next_action(lane="inbox")' in skill
+    assert 'sales_agent_next_action(lane="prospecting")' in skill
+    assert "two separate ChatGPT chats" in skill
+    assert "server synchronizes WhatsApp every 15 minutes" in skill
+    assert "run each ChatGPT task hourly" in skill
     assert "The server never calls an LLM API" in skill
     assert "sales_approve_outreach_draft" in skill
     assert "sales_send_whatsapp_draft" in skill

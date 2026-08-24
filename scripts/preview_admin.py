@@ -243,6 +243,82 @@ CONVERSATION_SESSIONS = [
     }
 ]
 
+AGENT_COORDINATION = {
+    "execution_mode": "chatgpt_mcp_two_chat",
+    "onboarding": {
+        "status": "in_progress",
+        "ready_for_sales": True,
+        "next_questions": COMPANY_ONBOARDING["next_questions"],
+    },
+    "lanes": {
+        "inbox": {
+            "responsibility": "new inbound WhatsApp messages only",
+            **AGENT_INBOX_SUMMARY,
+        },
+        "prospecting": {
+            "responsibility": "new companies, analysis, scoring and drafts only",
+            "total_leads": 24,
+            "unreviewed": 9,
+            "analyzed": 8,
+            "qualified": 5,
+            "drafts_waiting_review": 2,
+            "top_score": 82,
+        },
+    },
+    "responses": {
+        "contacted": 8,
+        "replied": 3,
+        "never_replied": 5,
+        "awaiting_reply": 4,
+        "reply_rate_percent": 37.5,
+        "replied_leads": [
+            {
+                "id": "lead-1",
+                "company_name": "Northstar Logistics",
+                "status": "replied",
+                "last_inbound_at": preview_time(minutes_ago=18),
+                "last_outbound_at": preview_time(minutes_ago=52),
+            },
+            {
+                "id": "lead-2",
+                "company_name": "Meridian Clinic",
+                "status": "replied",
+                "last_inbound_at": preview_time(minutes_ago=95),
+                "last_outbound_at": preview_time(minutes_ago=140),
+            },
+        ],
+        "never_replied_leads": [
+            {
+                "id": "lead-3",
+                "company_name": "Atlas Commerce",
+                "status": "contacted",
+                "last_inbound_at": None,
+                "last_outbound_at": preview_time(minutes_ago=180),
+            },
+            {
+                "id": "lead-4",
+                "company_name": "Volga Systems",
+                "status": "contacted",
+                "last_inbound_at": None,
+                "last_outbound_at": preview_time(minutes_ago=420),
+            },
+        ],
+        "awaiting_reply_leads": [],
+    },
+    "shared_memory": {
+        "company_knowledge_items": 4,
+        "active_conversation_sessions": 1,
+        "storage": "persistent_server_crm",
+        "guesses_promoted_to_company_facts": False,
+    },
+    "safety": {
+        "external_send": False,
+        "approves": False,
+        "sends": False,
+        "private_message_text_included": False,
+    },
+}
+
 
 def bootstrap() -> dict[str, Any]:
     whatsapp = {
@@ -263,6 +339,7 @@ def bootstrap() -> dict[str, Any]:
             "pending_invitations": 1,
         },
         "company_onboarding": COMPANY_ONBOARDING,
+        "agent_coordination": AGENT_COORDINATION,
         "agent_inbox": AGENT_INBOX_SUMMARY,
         "conversation_agent": CONVERSATION_AGENT,
         "overview": {

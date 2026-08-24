@@ -148,6 +148,24 @@
 
           <div class="metric-grid compact-metrics" id="agent-metrics" aria-live="polite"></div>
 
+          <div class="agent-lanes-grid" aria-label="Два рабочих чата ChatGPT">
+            <article class="card agent-lane-card">
+              <div class="lane-number">Чат 01</div>
+              <div><p class="eyebrow">Inbound lane</p><h3>Входящие</h3><p>Читает только новые обращения, ведёт память диалога и готовит ответы. Поиск компаний сюда не попадает.</p></div>
+              <dl><div><dt>Ждут ChatGPT</dt><dd id="agent-lane-inbox-waiting">0</dd></div><div><dt>Эскалации</dt><dd id="agent-lane-inbox-review">0</dd></div><div><dt>SLA</dt><dd id="agent-lane-inbox-sla">0</dd></div></dl>
+            </article>
+            <article class="card agent-lane-card">
+              <div class="lane-number">Чат 02</div>
+              <div><p class="eyebrow">Prospecting lane</p><h3>Новые компании</h3><p>Проверяет сайты, анализирует, оценивает и создаёт первые черновики. Входящие сообщения не забирает.</p></div>
+              <dl><div><dt>Не проверены</dt><dd id="agent-lane-prospecting-new">0</dd></div><div><dt>Qualified</dt><dd id="agent-lane-prospecting-qualified">0</dd></div><div><dt>Черновики</dt><dd id="agent-lane-prospecting-drafts">0</dd></div></dl>
+            </article>
+          </div>
+
+          <div class="agent-response-grid">
+            <article class="card response-card"><div class="card-header"><div><p class="eyebrow">Outcomes</p><h3>Ответили</h3></div><strong id="agent-replied-count">0</strong></div><div class="response-list" id="agent-replied-list"></div></article>
+            <article class="card response-card"><div class="card-header"><div><p class="eyebrow">Follow-up view</p><h3>Ещё не ответили</h3></div><strong id="agent-never-replied-count">0</strong></div><div class="response-list" id="agent-never-replied-list"></div></article>
+          </div>
+
           <div class="agent-layout">
             <article class="card agent-settings-card">
               <div class="card-header"><div><p class="eyebrow">Playbook</p><h3>Логика диалога</h3></div><span class="safety-chip">Draft only</span></div>
