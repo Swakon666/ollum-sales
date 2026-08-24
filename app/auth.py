@@ -14,12 +14,17 @@ import jwt
 from authlib.common.errors import AuthlibBaseError
 from authlib.integrations.starlette_client import OAuth
 from jwt import InvalidTokenError, PyJWKClient, PyJWKClientError
-from mcp.server.auth.provider import AccessToken, TokenVerifier
-from mcp.server.auth.settings import AuthSettings
+from mcp.server.auth.provider import (
+    AccessToken,
+    OAuthAuthorizationServerProvider,
+    TokenVerifier,
+)
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from pydantic import AnyHttpUrl
 from starlette.requests import Request
 
 from .config import Settings
+from .oauth_server import PersistentOAuthProvider
 
 logger = logging.getLogger("ollum-sales-auth")
 
@@ -125,6 +130,7 @@ class OIDCAccessTokenVerifier(TokenVerifier):
 class MCPAuthBundle:
     verifier: OIDCAccessTokenVerifier
     settings: AuthSettings
+    provider: OAuthAuthorizationServerProvider[Any, Any, Any] | None = None
 
 
 def build_mcp_auth(settings: Settings) -> MCPAuthBundle | None:
@@ -164,12 +170,61 @@ def build_mcp_auth(settings: Settings) -> MCPAuthBundle | None:
         algorithms=settings.oidc_algorithms,
         allowed_subjects=settings.oidc_allowed_subjects,
     )
+    provider: OAuthAuthorizationServerProvider[Any, Any, Any] | None = None
+    issuer_url = settings.oidc_issuer_url
+    registration_options = None
+    if settings.oauth_dcr_enabled:
+        dashboard_base_url = settings.dashboard_base_url or settings.public_base_url
+        dcr_missing = [
+            name
+            for name, value in (
+                ("OLLUM_ADMIN_ENABLED=true", settings.admin_enabled),
+                (
+                    "OLLUM_DASHBOARD_BASE_URL or OLLUM_PUBLIC_BASE_URL",
+                    dashboard_base_url,
+                ),
+                ("OLLUM_PUBLIC_BASE_URL", settings.public_base_url),
+                ("OLLUM_OAUTH_STORAGE_SECRET", settings.oauth_storage_secret),
+            )
+            if not value
+        ]
+        if dcr_missing:
+            raise AuthConfigurationError(
+                f"ChatGPT OAuth DCR is missing: {', '.join(dcr_missing)}"
+            )
+        assert dashboard_base_url is not None
+        assert settings.public_base_url is not None
+        assert settings.oauth_storage_secret is not None
+        provider = PersistentOAuthProvider(
+            db_path=settings.crm_db_path,
+            dashboard_base_url=dashboard_base_url,
+            resource_url=resource_url,
+            storage_secret=settings.oauth_storage_secret,
+            allowed_redirect_hosts=settings.oauth_allowed_redirect_hosts,
+            access_token_ttl_seconds=settings.oauth_access_token_ttl_seconds,
+            refresh_token_ttl_seconds=settings.oauth_refresh_token_ttl_seconds,
+            authorization_code_ttl_seconds=(
+                settings.oauth_authorization_code_ttl_seconds
+            ),
+        )
+        issuer_url = settings.public_base_url
+        scopes = list(settings.mcp_required_scopes)
+        registration_options = ClientRegistrationOptions(
+            enabled=True,
+            valid_scopes=scopes,
+            default_scopes=scopes,
+        )
     auth_settings = AuthSettings(
-        issuer_url=AnyHttpUrl(settings.oidc_issuer_url),
+        issuer_url=AnyHttpUrl(issuer_url),
         resource_server_url=AnyHttpUrl(resource_url),
         required_scopes=list(settings.mcp_required_scopes),
+        client_registration_options=registration_options,
     )
-    return MCPAuthBundle(verifier=verifier, settings=auth_settings)
+    return MCPAuthBundle(
+        verifier=verifier,
+        settings=auth_settings,
+        provider=provider,
+    )
 
 
 class OIDCSessionManager:

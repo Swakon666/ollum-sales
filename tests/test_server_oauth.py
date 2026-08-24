@@ -129,3 +129,191 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["prepare_batch_annotations"]["openWorldHint"] is True
     assert payload["submit_decision_annotations"]["readOnlyHint"] is False
     assert payload["submit_decision_annotations"]["destructiveHint"] is False
+
+
+def test_real_server_hosts_chatgpt_dynamic_client_registration(tmp_path) -> None:
+    code = r"""
+import base64
+import hashlib
+import json
+from urllib.parse import parse_qs, urlsplit
+
+from starlette.testclient import TestClient
+
+import app.server as server
+
+with TestClient(server.app, base_url="https://mcp.sales.example") as client:
+    code_verifier = "v" * 64
+    code_challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(code_verifier.encode()).digest()
+    ).decode().rstrip("=")
+    protected = client.get("/.well-known/oauth-protected-resource/mcp")
+    authorization_server = client.get("/.well-known/oauth-authorization-server")
+    registration = client.post(
+        "/register",
+        json={
+            "redirect_uris": ["https://chatgpt.com/connector/oauth/integration"],
+            "token_endpoint_auth_method": "client_secret_post",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+            "scope": "sales:read sales:write",
+            "client_name": "Ollum Sales Integration",
+        },
+    )
+    registered = registration.json()
+    authorize = client.get(
+        "/authorize",
+        params={
+            "response_type": "code",
+            "client_id": registered.get("client_id"),
+            "redirect_uri": "https://chatgpt.com/connector/oauth/integration",
+            "scope": "sales:read sales:write",
+            "state": "integration-state",
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+            "resource": "https://mcp.sales.example/mcp",
+        },
+        follow_redirects=False,
+    )
+    consent = client.get(authorize.headers.get("location", ""), follow_redirects=False)
+    request_id = parse_qs(urlsplit(authorize.headers["location"]).query)["request_id"][0]
+    callback_url = server._mcp_auth.provider.complete_authorization(
+        request_id,
+        subject="auth0|integration-user",
+        approved=True,
+    )
+    authorization_code = parse_qs(urlsplit(callback_url).query)["code"][0]
+    server.crm.authorize_workspace_identity(
+        workspace_id="ollum-group",
+        workspace_name="Ollum Group",
+        subject="auth0|integration-user",
+        email="owner@example.com",
+        display_name="Integration Owner",
+        bootstrap_allowed=True,
+        owner_emails=("owner@example.com",),
+    )
+    token_response = client.post(
+        "/token",
+        data={
+            "grant_type": "authorization_code",
+            "client_id": registered["client_id"],
+            "client_secret": registered["client_secret"],
+            "code": authorization_code,
+            "redirect_uri": "https://chatgpt.com/connector/oauth/integration",
+            "code_verifier": code_verifier,
+            "resource": "https://mcp.sales.example/mcp",
+        },
+    )
+    tokens = token_response.json()
+    initialize = client.post(
+        "/mcp",
+        headers={
+            "Authorization": f"Bearer {tokens.get('access_token', '')}",
+            "Accept": "application/json, text/event-stream",
+            "Host": "127.0.0.1:8000",
+        },
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": {"name": "integration", "version": "1"},
+            },
+        },
+    )
+    refreshed = client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "client_id": registered["client_id"],
+            "client_secret": registered["client_secret"],
+            "refresh_token": tokens.get("refresh_token", ""),
+            "scope": "sales:read",
+        },
+    )
+    print(json.dumps({
+        "protected_status": protected.status_code,
+        "protected": protected.json(),
+        "authorization_status": authorization_server.status_code,
+        "authorization": authorization_server.json(),
+        "registration_status": registration.status_code,
+        "registered": registered,
+        "authorize_status": authorize.status_code,
+        "authorize_location": authorize.headers.get("location"),
+        "consent_status": consent.status_code,
+        "consent_location": consent.headers.get("location"),
+        "token_status": token_response.status_code,
+        "token_type": tokens.get("token_type"),
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+        "initialize_status": initialize.status_code,
+        "refresh_status": refreshed.status_code,
+        "refresh_scope": refreshed.json().get("scope"),
+    }))
+"""
+    env = os.environ.copy()
+    env.update(
+        {
+            "OLLUM_AUTH_MODE": "oidc",
+            "OLLUM_PUBLIC_BASE_URL": "https://mcp.sales.example",
+            "OLLUM_DASHBOARD_BASE_URL": "https://api.sales.example",
+            "OLLUM_OIDC_REDIRECT_BASE_URL": "https://mcp.sales.example",
+            "OLLUM_MCP_RESOURCE_URL": "https://mcp.sales.example/mcp",
+            "OLLUM_OIDC_ISSUER_URL": "https://identity.example/",
+            "OLLUM_OIDC_AUDIENCE": "https://identity-api.example",
+            "OLLUM_OAUTH_DCR_ENABLED": "true",
+            "OLLUM_OAUTH_STORAGE_SECRET": "integration-oauth-storage-secret-48-characters-long",
+            "OLLUM_OAUTH_ALLOWED_REDIRECT_HOSTS": "chatgpt.com",
+            "OLLUM_ADMIN_ENABLED": "true",
+            "OLLUM_ADMIN_OIDC_CLIENT_ID": "admin-client",
+            "OLLUM_ADMIN_OIDC_CLIENT_SECRET": "admin-client-secret",
+            "OLLUM_ADMIN_ALLOWED_EMAILS": "owner@example.com",
+            "OLLUM_ADMIN_SESSION_SECRET": "integration-session-secret-with-32-bytes",
+            "OLLUM_DEFAULT_WORKSPACE_ID": "ollum-group",
+            "OLLUM_DEFAULT_WORKSPACE_NAME": "Ollum Group",
+            "OLLUM_CRM_DB_PATH": str(tmp_path / "oauth-dcr.db"),
+            "PYTHONWARNINGS": "error",
+        }
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=REPOSITORY_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    payload = json.loads(completed.stdout.strip().splitlines()[-1])
+
+    assert payload["protected_status"] == 200
+    assert payload["protected"]["authorization_servers"] == [
+        "https://mcp.sales.example/"
+    ]
+    assert payload["authorization_status"] == 200
+    assert payload["authorization"]["registration_endpoint"] == (
+        "https://mcp.sales.example/register"
+    )
+    assert payload["authorization"]["authorization_endpoint"] == (
+        "https://mcp.sales.example/authorize"
+    )
+    assert payload["authorization"]["token_endpoint"] == (
+        "https://mcp.sales.example/token"
+    )
+    assert payload["registration_status"] == 201
+    assert payload["registered"]["client_id"]
+    assert payload["registered"]["client_secret"]
+    assert payload["authorize_status"] == 302
+    assert payload["authorize_location"].startswith(
+        "https://api.sales.example/oauth/authorize?request_id="
+    )
+    assert payload["consent_status"] == 303
+    assert payload["consent_location"] == "/auth/login"
+    assert payload["token_status"] == 200
+    assert payload["token_type"] == "Bearer"
+    assert payload["has_refresh_token"] is True
+    assert payload["initialize_status"] == 200
+    assert payload["refresh_status"] == 200
+    assert payload["refresh_scope"] == "sales:read"

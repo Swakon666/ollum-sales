@@ -1,6 +1,7 @@
 # Ollum Sales MCP — ChatGPT-native Edition
 
-Version **0.10.0** makes ChatGPT the only reasoning engine. The server uses no OpenAI or
+Version **0.11.0** makes ChatGPT the only reasoning engine and adds a persistent,
+ChatGPT-compatible OAuth 2.1 authorization server with dynamic client registration. The server uses no OpenAI or
 other LLM API key: it synchronizes WhatsApp every 15 minutes, stores durable work, gives
 ChatGPT a bounded MCP fact packet, validates the returned structured decision, and atomically
 saves at most one grounded draft or escalation. ChatGPT can also interview the operator,
@@ -56,6 +57,12 @@ tokens or private conversation data:
 The MCP endpoint uses Streamable HTTP at `/mcp`. Production serves it as
 `https://mcp.ollumgroup.ru/mcp` behind the host Nginx proxy. Legacy deployments may use a
 static bearer token; the closed beta uses OAuth/OIDC.
+
+In the closed beta, Ollum Sales itself supplies ChatGPT-facing DCR, authorization,
+token, refresh and revocation endpoints. Human identity still comes from the configured
+OIDC provider through the closed-beta cabinet. OAuth client credentials are encrypted at
+rest; codes and bearer tokens are stored only as digests. Only approved HTTPS ChatGPT
+callback hosts can be dynamically registered.
 
 Closed-beta OIDC setup and ChatGPT connection instructions are in
 [`docs/CLOSED_BETA.md`](docs/CLOSED_BETA.md).

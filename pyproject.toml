@@ -1,11 +1,12 @@
 [project]
 name = "ollum-sales-mcp"
-version = "0.10.0"
+version = "0.11.0"
 description = "ChatGPT-native Ollum Group sales agent over MCP with persistent CRM and WhatsApp"
 requires-python = ">=3.12,<4.0"
 dependencies = [
   "authlib>=1.7,<2",
   "beautifulsoup4>=4.12,<5",
+  "cryptography>=46,<51",
   "google-api-python-client>=2,<3",
   "google-auth>=2,<3",
   "httpx>=0.28,<1",

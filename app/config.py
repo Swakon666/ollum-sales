@@ -53,6 +53,21 @@ class Settings:
     mcp_required_scopes: tuple[str, ...] = _env_csv(
         "OLLUM_MCP_REQUIRED_SCOPES", "sales:read,sales:write"
     )
+    oauth_dcr_enabled: bool = _env_bool("OLLUM_OAUTH_DCR_ENABLED", False)
+    oauth_storage_secret: str | None = os.getenv("OLLUM_OAUTH_STORAGE_SECRET")
+    oauth_allowed_redirect_hosts: tuple[str, ...] = tuple(
+        host.lower()
+        for host in _env_csv("OLLUM_OAUTH_ALLOWED_REDIRECT_HOSTS", "chatgpt.com")
+    )
+    oauth_access_token_ttl_seconds: int = int(
+        os.getenv("OLLUM_OAUTH_ACCESS_TOKEN_TTL_SECONDS", "3600")
+    )
+    oauth_refresh_token_ttl_seconds: int = int(
+        os.getenv("OLLUM_OAUTH_REFRESH_TOKEN_TTL_SECONDS", "2592000")
+    )
+    oauth_authorization_code_ttl_seconds: int = int(
+        os.getenv("OLLUM_OAUTH_AUTHORIZATION_CODE_TTL_SECONDS", "300")
+    )
     oidc_issuer_url: str | None = os.getenv("OLLUM_OIDC_ISSUER_URL")
     oidc_audience: str | None = os.getenv("OLLUM_OIDC_AUDIENCE")
     oidc_jwks_url: str | None = os.getenv("OLLUM_OIDC_JWKS_URL")

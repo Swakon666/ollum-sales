@@ -34,6 +34,7 @@ from .conversation_agent import ConversationAgent
 from .crm import SalesCRM
 from .data_quality import candidate_phones, normalize_phone, retry_call
 from .google_sheets import GoogleSheetsSync
+from .oauth_server import PersistentOAuthProvider, create_oauth_consent_routes
 from .outreach_quality import (
     build_whatsapp_reply_brief,
     compare_whatsapp_messages,
@@ -103,10 +104,11 @@ def _attach_lead_matches(records: Any) -> Any:
 
 _mcp_auth_kwargs: dict[str, Any] = {}
 if _mcp_auth is not None:
-    _mcp_auth_kwargs = {
-        "token_verifier": _mcp_auth.verifier,
-        "auth": _mcp_auth.settings,
-    }
+    _mcp_auth_kwargs = {"auth": _mcp_auth.settings}
+    if _mcp_auth.provider is not None:
+        _mcp_auth_kwargs["auth_server_provider"] = _mcp_auth.provider
+    else:
+        _mcp_auth_kwargs["token_verifier"] = _mcp_auth.verifier
 
 # MCP 1.29 declares the generic lifespan annotation as a forward reference.
 # Rebuilding after the module is imported keeps pydantic-settings resolution complete.
@@ -1531,6 +1533,8 @@ def create_app() -> ASGIApp:
             conversation_agent=conversation_agent,
         )
         routes.extend(create_admin_routes(admin_context))
+        if isinstance(_mcp_auth.provider, PersistentOAuthProvider):
+            routes.extend(create_oauth_consent_routes())
     routes.append(Mount("/", app=mcp.streamable_http_app()))
 
     application = Starlette(
@@ -1539,6 +1543,8 @@ def create_app() -> ASGIApp:
     )
     if admin_context is not None:
         application.state.admin_context = admin_context
+        if isinstance(_mcp_auth.provider, PersistentOAuthProvider):
+            application.state.oauth_provider = _mcp_auth.provider
         assert settings.admin_session_secret is not None
         dashboard_base_url = settings.dashboard_base_url or settings.public_base_url
         application.add_middleware(

@@ -99,6 +99,11 @@ Authentication: OAuth
 ```
 
 Legacy bearer deployments remain supported, but the browser cabinet intentionally requires OIDC.
+For ChatGPT, enable `OLLUM_OAUTH_DCR_ENABLED=true`: Ollum Sales then publishes its own
+OAuth authorization-server metadata and DCR endpoint while using the existing OIDC cabinet
+login as the human identity proof. `OLLUM_OAUTH_STORAGE_SECRET` must contain at least 32
+random bytes and remain stable across deploys. Registered client secrets are encrypted;
+authorization codes and access/refresh tokens are persisted only as SHA-256 digests.
 The OIDC provider must allow `<OLLUM_OIDC_REDIRECT_BASE_URL>/auth/callback`.
 When the callback and dashboard origins differ, Ollum uses a short-lived opaque,
 single-use handoff and finishes the browser session on `OLLUM_DASHBOARD_BASE_URL`.
@@ -130,7 +135,8 @@ The deployment performs these operations:
 6. waits for the local MCP health endpoint;
 7. installs a dedicated Nginx vhost and validates the entire Nginx configuration before reload;
 8. obtains or reuses one Let's Encrypt certificate for MCP and API hostnames;
-9. checks both `/health` endpoints, OAuth metadata/challenge, the cabinet redirect, and
+9. checks both `/health` endpoints, protected-resource and authorization-server OAuth
+   metadata/challenge, the cabinet redirect, and
    unauthenticated `/api/v1/session` rejection.
 
 Releases are stored below:

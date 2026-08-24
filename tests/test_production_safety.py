@@ -85,6 +85,8 @@ def test_nginx_template_hides_version_and_sets_security_headers() -> None:
     assert "Content-Security-Policy" in nginx
     assert "proxy_hide_header Strict-Transport-Security;" in nginx
     assert "location ^~ /.well-known/" in nginx
+    assert "location ~ ^/(authorize|token|register|revoke)$" in nginx
+    assert "location ^~ /oauth/" in nginx
     assert "location ^~ /api/admin/" in nginx
     assert "location ^~ /api/v1/" in nginx
     assert "server_name __OLLUM_DOMAIN__ __OLLUM_API_DOMAIN__;" in nginx
