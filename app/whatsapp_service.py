@@ -54,6 +54,81 @@ def _load_upstream_whatsapp():
 wa = _load_upstream_whatsapp()
 
 
+def _load_lid_phone_map(database_path: Path | None = None) -> dict[str, str]:
+    """Read whatsmeow's LID -> phone mapping without exposing opaque LIDs."""
+    messages_path = Path(str(database_path or wa.MESSAGES_DB_PATH)).resolve()
+    identity_path = messages_path.with_name("whatsapp.db")
+    if not identity_path.is_file():
+        return {}
+
+    try:
+        connection = sqlite3.connect(
+            f"{identity_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=2.0,
+        )
+        connection.row_factory = sqlite3.Row
+        rows = connection.execute("SELECT lid, pn FROM whatsmeow_lid_map").fetchall()
+    except sqlite3.Error:
+        return {}
+    finally:
+        if "connection" in locals():
+            connection.close()
+
+    mapping: dict[str, str] = {}
+    for row in rows:
+        lid = str(row["lid"] or "").split("@", 1)[0].split(":", 1)[0].strip()
+        pn = normalize_phone(str(row["pn"] or "").split("@", 1)[0])
+        if lid and pn:
+            mapping[lid] = pn
+    return mapping
+
+
+def _canonical_chat_jid(raw_jid: str, lid_phone_map: dict[str, str]) -> str | None:
+    """Resolve modern WhatsApp LIDs to the stable phone-number JID used by CRM."""
+    try:
+        jid = normalize_whatsapp_jid(raw_jid)
+    except ValueError:
+        return None
+    if is_technical_whatsapp_jid(jid):
+        return None
+    local, server = jid.rsplit("@", 1)
+    if server not in {"lid", "hosted.lid"}:
+        return jid
+    phone = lid_phone_map.get(local.split(":", 1)[0])
+    return f"{phone}@s.whatsapp.net" if phone else None
+
+
+def _mapped_lid_jids(phone: str, lid_phone_map: dict[str, str]) -> list[str]:
+    aliases: list[str] = []
+    for lid, mapped_phone in lid_phone_map.items():
+        if mapped_phone == phone:
+            aliases.extend((f"{lid}@lid", f"{lid}@hosted.lid"))
+    return aliases
+
+
+def _normalize_bridge_records(records: Any) -> list[dict[str, Any]]:
+    serialized = _serialize(records)
+    if not isinstance(serialized, list):
+        return []
+    lid_phone_map = _load_lid_phone_map()
+    canonical: list[dict[str, Any]] = []
+    for item in serialized:
+        if not isinstance(item, dict):
+            continue
+        raw_jid = str(item.get("jid") or item.get("chat_jid") or "").strip()
+        jid = _canonical_chat_jid(raw_jid, lid_phone_map)
+        if not jid:
+            continue
+        clean = dict(item)
+        if "jid" in clean:
+            clean["jid"] = jid
+        if "chat_jid" in clean:
+            clean["chat_jid"] = jid
+        canonical.append(clean)
+    return normalize_whatsapp_records(canonical)
+
+
 def bridge_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
     """Return a whitelisted bridge status without exposing session data."""
     status_url = f"{settings.whatsapp_api_base_url.rstrip('/')}/status"
@@ -201,14 +276,12 @@ def whatsapp_test_recipient_allowlist() -> tuple[str, ...]:
 
 
 def search_contacts(query: str) -> list[dict[str, Any]]:
-    return normalize_whatsapp_records(_serialize(wa.search_contacts(query)))
+    return _normalize_bridge_records(wa.search_contacts(query))
 
 
 def list_chats(query: str | None = None, limit: int = 20) -> Any:
-    return normalize_whatsapp_records(
-        _serialize(
-            wa.list_chats(query=query, limit=limit, page=0, include_last_message=True)
-        )
+    return _normalize_bridge_records(
+        wa.list_chats(query=query, limit=limit, page=0, include_last_message=True)
     )
 
 
@@ -227,6 +300,7 @@ def list_messages(
     database_path = Path(str(wa.MESSAGES_DB_PATH)).resolve()
     if not database_path.is_file():
         return []
+    lid_phone_map = _load_lid_phone_map(database_path)
 
     query_parts = [
         """
@@ -247,19 +321,29 @@ def list_messages(
     params: list[Any] = []
 
     if normalized_phone:
-        where_clauses.append("(m.sender = ? OR m.sender = ? OR m.sender LIKE ?)")
-        params.extend(
-            [
-                normalized_phone,
-                f"{normalized_phone}@s.whatsapp.net",
-                f"{normalized_phone}:%@s.whatsapp.net",
-            ]
-        )
+        sender_values = [
+            normalized_phone,
+            f"{normalized_phone}@s.whatsapp.net",
+        ]
+        for alias in _mapped_lid_jids(normalized_phone, lid_phone_map):
+            sender_values.extend((alias, alias.split("@", 1)[0]))
+        placeholders = ", ".join("?" for _ in sender_values)
+        where_clauses.append(f"(m.sender IN ({placeholders}) OR m.sender LIKE ?)")
+        params.extend(sender_values)
+        params.append(f"{normalized_phone}:%@s.whatsapp.net")
     if normalized_jid:
         if normalized_jid.endswith("@s.whatsapp.net"):
             local = normalized_jid.split("@", 1)[0]
-            where_clauses.append("(m.chat_jid = ? OR m.chat_jid LIKE ?)")
-            params.extend([normalized_jid, f"{local}:%@s.whatsapp.net"])
+            jid_values = [
+                normalized_jid,
+                *_mapped_lid_jids(local, lid_phone_map),
+            ]
+            placeholders = ", ".join("?" for _ in jid_values)
+            where_clauses.append(
+                f"(m.chat_jid IN ({placeholders}) OR m.chat_jid LIKE ?)"
+            )
+            params.extend(jid_values)
+            params.append(f"{local}:%@s.whatsapp.net")
         else:
             where_clauses.append("m.chat_jid = ?")
             params.append(normalized_jid)
@@ -289,7 +373,8 @@ def list_messages(
     records: list[dict[str, Any]] = []
     for row in rows:
         raw_jid = str(row["chat_jid"] or "")
-        if is_technical_whatsapp_jid(raw_jid):
+        canonical_jid = _canonical_chat_jid(raw_jid, lid_phone_map)
+        if not canonical_jid:
             continue
         records.append(
             {
@@ -298,7 +383,12 @@ def list_messages(
                 "chat_name": row["chat_name"],
                 "content": str(row["content"] or ""),
                 "is_from_me": bool(row["is_from_me"]),
-                "chat_jid": normalize_whatsapp_jid(raw_jid),
+                "chat_jid": canonical_jid,
+                "jid_resolution": (
+                    "lid_to_phone"
+                    if canonical_jid != normalize_whatsapp_jid(raw_jid)
+                    else "direct"
+                ),
                 "id": str(row["id"] or ""),
                 "media_type": row["media_type"],
             }

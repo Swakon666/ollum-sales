@@ -48,11 +48,19 @@ def _ready_crm(tmp_path) -> tuple[SalesCRM, dict, str]:
     return crm, lead, workspace_id
 
 
-def _queue(crm: SalesCRM, workspace_id: str, lead: dict, external_id: str, text: str):
+def _queue(
+    crm: SalesCRM,
+    workspace_id: str,
+    lead: dict,
+    external_id: str,
+    text: str,
+    *,
+    chat_jid: str = "79991112233@s.whatsapp.net",
+):
     return crm.upsert_agent_inbox_event(
         workspace_id,
         external_id=external_id,
-        chat_jid="79991112233@s.whatsapp.net",
+        chat_jid=chat_jid,
         message_text=text,
         received_at="2026-08-23T11:00:00+00:00",
         lead_id=lead["id"],
@@ -129,6 +137,54 @@ def test_prepare_returns_bounded_untrusted_payload_and_strict_schema(
     assert (
         crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "processing"
     )
+
+
+def test_prepare_exact_contact_never_falls_back_to_another_queue_item(
+    tmp_path, monkeypatch
+) -> None:
+    crm, first_lead, workspace_id = _ready_crm(tmp_path)
+    second_lead = crm.upsert_lead(
+        "Target prospect",
+        "https://target-prospect.test",
+        phones=["+7 977 933-55-13"],
+    )
+    other_event = _queue(
+        crm,
+        workspace_id,
+        first_lead,
+        "incoming-other",
+        "Сообщение другого контакта",
+    )
+    target_event = _queue(
+        crm,
+        workspace_id,
+        second_lead,
+        "incoming-target",
+        "Сообщение тестового контакта",
+        chat_jid="79779335513@s.whatsapp.net",
+    )
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+
+    batch = agent.prepare_pending(
+        workspace_id,
+        limit=1,
+        chat_jid="79779335513@s.whatsapp.net",
+    )
+
+    assert batch["prepared"] == 1
+    assert batch["target_chat_jid"] == "79779335513@s.whatsapp.net"
+    assert batch["items"][0]["event_id"] == target_event["id"]
+    assert crm.get_agent_inbox_event(workspace_id, other_event["id"])["status"] == "new"
+
+    empty = agent.prepare_pending(
+        workspace_id,
+        limit=1,
+        chat_jid="79770000000@s.whatsapp.net",
+    )
+    assert empty["prepared"] == 0
+    assert empty["queue_empty"] is True
+    assert crm.get_agent_inbox_event(workspace_id, other_event["id"])["status"] == "new"
 
 
 def test_partial_company_profile_does_not_block_chatgpt_reasoning(
