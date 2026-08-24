@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app import agent_inbox
 from app.crm import SalesCRM
 
@@ -210,3 +212,67 @@ def test_next_action_moves_from_interview_to_inbound_reply_without_sending(
     idle = agent_inbox.next_agent_action(crm, "ollum-group")
     assert idle["action"] == "continue_safe_lead_work"
     assert idle["external_side_effect"] is False
+
+
+def test_two_chat_lanes_never_cross_responsibilities(tmp_path) -> None:
+    crm = SalesCRM(tmp_path / "two-chat.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    onboarding = agent_inbox.next_agent_action(crm, "ollum-group", lane="prospecting")
+    assert onboarding["action"] == "continue_company_onboarding"
+    assert onboarding["lane"] == "prospecting"
+
+    crm.update_company_profile(
+        "ollum-group",
+        company_name="Example Studio",
+        industry="Digital services",
+        target_customer="B2B companies",
+        positioning="Grounded sales automation",
+    )
+    for category, title in (("service", "Sales agent"), ("price", "Estimate")):
+        crm.save_company_knowledge(
+            "ollum-group",
+            category=category,
+            title=title,
+            content={"details": "confirmed by operator"},
+        )
+    crm.complete_company_onboarding("ollum-group", confirm_ready=True)
+    lead = crm.upsert_lead(
+        "Prospect", "https://lane-prospect.test", phones=["+7 999 111-22-33"]
+    )
+    event = crm.upsert_agent_inbox_event(
+        "ollum-group",
+        external_id="lane-reply-1",
+        chat_jid="79991112233@s.whatsapp.net",
+        message_text="Interested in the offer",
+        received_at="2026-08-23T11:00:00+00:00",
+        lead_id=lead["id"],
+    )[0]
+
+    inbox = agent_inbox.next_agent_action(crm, "ollum-group", lane="inbox")
+    prospecting = agent_inbox.next_agent_action(crm, "ollum-group", lane="prospecting")
+    assert inbox["action"] == "prepare_whatsapp_reply"
+    assert inbox["inbox_event"]["id"] == event["id"]
+    assert inbox["lane"] == "inbox"
+    assert prospecting["action"] == "continue_safe_lead_work"
+    assert prospecting["lane"] == "prospecting"
+    assert "inbox_event" not in prospecting
+    assert "inbox" not in prospecting
+
+    crm.update_agent_inbox_event("ollum-group", event["id"], status="acknowledged")
+    clear = agent_inbox.next_agent_action(crm, "ollum-group", lane="inbox")
+    assert clear["action"] == "inbox_clear"
+    assert "qualified_leads" not in clear
+
+
+def test_lane_validation_rejects_cross_lane_contact_targeting(tmp_path) -> None:
+    crm = SalesCRM(tmp_path / "lane-validation.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    with pytest.raises(ValueError, match="lane must be"):
+        agent_inbox.next_agent_action(crm, "ollum-group", lane="unknown")
+    with pytest.raises(ValueError, match="only for the inbox lane"):
+        agent_inbox.next_agent_action(
+            crm,
+            "ollum-group",
+            lane="prospecting",
+            phone="+79991112233",
+        )

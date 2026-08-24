@@ -528,6 +528,101 @@ class SalesCRMTests(unittest.TestCase):
             "resolved",
         )
 
+    def test_inbound_sync_tracks_replies_once_and_coordination_hides_messages(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        replied_lead = self.crm.upsert_lead(
+            "Replied Company",
+            "https://replied-company.test",
+            phones=["+79990000011"],
+        )
+        silent_lead = self.crm.upsert_lead(
+            "Silent Company",
+            "https://silent-company.test",
+            phones=["+79990000012"],
+        )
+        unsolicited_lead = self.crm.upsert_lead(
+            "Inbound Company",
+            "https://inbound-company.test",
+            phones=["+79990000013"],
+        )
+        for lead, external_id in (
+            (replied_lead, "outbound-replied"),
+            (silent_lead, "outbound-silent"),
+        ):
+            self.crm.record_interaction(
+                lead["id"],
+                channel="whatsapp",
+                direction="outbound",
+                content="Sent outreach",
+                external_id=external_id,
+                occurred_at="2026-08-23T10:00:00+00:00",
+            )
+
+        event, created = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="reply-message-1",
+            chat_jid="79990000011@s.whatsapp.net",
+            message_text="Private reply text must stay out of coordination reports",
+            received_at="2026-08-23T11:00:00+00:00",
+            lead_id=replied_lead["id"],
+        )
+        duplicate, created_again = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="reply-message-1",
+            chat_jid="79990000011@s.whatsapp.net",
+            message_text="Private reply text must stay out of coordination reports",
+            received_at="2026-08-23T11:00:00+00:00",
+            lead_id=replied_lead["id"],
+        )
+        self.assertTrue(created)
+        self.assertFalse(created_again)
+        self.assertEqual(event["id"], duplicate["id"])
+        self.assertEqual(self.crm.get_lead(replied_lead["id"])["status"], "replied")
+
+        self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="unsolicited-message-1",
+            chat_jid="79990000013@s.whatsapp.net",
+            message_text="Unsolicited inbound",
+            received_at="2026-08-23T11:05:00+00:00",
+            lead_id=unsolicited_lead["id"],
+        )
+        self.assertEqual(self.crm.get_lead(unsolicited_lead["id"])["status"], "new")
+
+        with self.crm.connect() as connection:
+            inbox_interactions = connection.execute(
+                """
+                SELECT COUNT(*) FROM interactions
+                WHERE lead_id = ? AND direction = 'inbound'
+                  AND external_id LIKE 'agent_inbox:%'
+                """,
+                (replied_lead["id"],),
+            ).fetchone()[0]
+        self.assertEqual(inbox_interactions, 1)
+
+        summary = self.crm.agent_coordination_summary(
+            workspace_id, include_leads=True, limit=10
+        )
+        self.assertEqual(summary["execution_mode"], "chatgpt_mcp_two_chat")
+        self.assertEqual(summary["responses"]["contacted"], 2)
+        self.assertEqual(summary["responses"]["replied"], 1)
+        self.assertEqual(summary["responses"]["never_replied"], 1)
+        self.assertEqual(summary["responses"]["awaiting_reply"], 1)
+        self.assertEqual(summary["responses"]["reply_rate_percent"], 50.0)
+        self.assertEqual(
+            summary["responses"]["replied_leads"][0]["company_name"],
+            "Replied Company",
+        )
+        self.assertEqual(
+            summary["responses"]["never_replied_leads"][0]["company_name"],
+            "Silent Company",
+        )
+        self.assertNotIn("Private reply text", str(summary))
+        self.assertFalse(summary["safety"]["private_message_text_included"])
+
     def test_conversation_agent_settings_sessions_and_queue_lease_are_persistent(
         self,
     ) -> None:

@@ -733,6 +733,11 @@ def test_versioned_api_and_workspace_invitation(admin_client) -> None:
     assert bootstrap.status_code == 200
     assert bootstrap.json()["user"]["role"] == "owner"
     assert bootstrap.json()["workspace"]["id"] == "ollum-group"
+    coordination = bootstrap.json()["agent_coordination"]
+    assert coordination["execution_mode"] == "chatgpt_mcp_two_chat"
+    assert coordination["lanes"]["inbox"]["responsibility"]
+    assert coordination["lanes"]["prospecting"]["responsibility"]
+    assert coordination["safety"]["private_message_text_included"] is False
 
     invited = client.post(
         "/api/v1/workspace/invitations",

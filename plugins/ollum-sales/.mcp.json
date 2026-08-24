@@ -68,6 +68,9 @@
         "sales_get_campaign": {
           "approval_mode": "approve"
         },
+        "sales_get_agent_coordination": {
+          "approval_mode": "approve"
+        },
         "sales_get_chatgpt_agent_playbook": {
           "approval_mode": "approve"
         },

@@ -1841,6 +1841,83 @@ class SalesCRM:
             "send_enabled": False,
         }
 
+    def _record_inbound_interaction_once(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        source: str,
+        external_id: str,
+        lead_id: str,
+        content: str,
+        occurred_at: str,
+        timestamp: str,
+    ) -> bool:
+        """Persist one inbox-derived interaction without duplicating sync retries."""
+        interaction_external_id = f"agent_inbox:{workspace_id}:{source}:{external_id}"
+        existing = connection.execute(
+            """
+            SELECT id FROM interactions
+            WHERE direction = 'inbound' AND external_id = ?
+            LIMIT 1
+            """,
+            (interaction_external_id,),
+        ).fetchone()
+        if existing is not None:
+            return False
+        normalized_occurred_at = normalize_datetime(occurred_at)
+        connection.execute(
+            """
+            INSERT INTO interactions (
+                id, lead_id, channel, direction, content, status, external_id,
+                occurred_at, created_at
+            ) VALUES (?, ?, ?, 'inbound', ?, 'recorded', ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                lead_id,
+                "whatsapp" if source == "whatsapp" else source,
+                content,
+                interaction_external_id,
+                normalized_occurred_at,
+                timestamp,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE leads
+            SET status = CASE
+                    WHEN status IN (
+                        'new', 'researching', 'analyzed', 'qualified', 'drafted',
+                        'approved', 'contacted', 'follow_up'
+                    ) AND EXISTS (
+                        SELECT 1 FROM interactions outbound
+                        WHERE outbound.lead_id = leads.id
+                          AND outbound.direction = 'outbound'
+                          AND outbound.occurred_at <= ?
+                    ) THEN 'replied'
+                    ELSE status
+                END,
+                updated_at = CASE
+                    WHEN EXISTS (
+                        SELECT 1 FROM interactions outbound
+                        WHERE outbound.lead_id = leads.id
+                          AND outbound.direction = 'outbound'
+                          AND outbound.occurred_at <= ?
+                    ) THEN ?
+                    ELSE updated_at
+                END
+            WHERE id = ?
+            """,
+            (
+                normalized_occurred_at,
+                normalized_occurred_at,
+                timestamp,
+                lead_id,
+            ),
+        )
+        return True
+
     def upsert_agent_inbox_event(
         self,
         workspace_id: str,
@@ -1931,6 +2008,17 @@ class SalesCRM:
             row = connection.execute(
                 "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
             ).fetchone()
+            if row is not None and row["lead_id"]:
+                self._record_inbound_interaction_once(
+                    connection,
+                    workspace_id=workspace_id,
+                    source=clean_source,
+                    external_id=clean_external_id,
+                    lead_id=str(row["lead_id"]),
+                    content=clean_message,
+                    occurred_at=str(row["received_at"]),
+                    timestamp=timestamp,
+                )
         assert row is not None
         return self._agent_inbox_from_row(row), created
 
@@ -2197,6 +2285,17 @@ class SalesCRM:
             row = connection.execute(
                 "SELECT * FROM agent_inbox_events WHERE id = ?", (event_id,)
             ).fetchone()
+            if row is not None:
+                self._record_inbound_interaction_once(
+                    connection,
+                    workspace_id=workspace_id,
+                    source=str(row["source"]),
+                    external_id=str(row["external_id"]),
+                    lead_id=lead_id,
+                    content=str(row["message_text"]),
+                    occurred_at=str(row["received_at"]),
+                    timestamp=timestamp,
+                )
         assert row is not None
         return self._agent_inbox_from_row(row)
 
@@ -2258,6 +2357,167 @@ class SalesCRM:
         else:
             counts["oldest_open_minutes"] = 0
         return counts
+
+    def agent_coordination_summary(
+        self,
+        workspace_id: str,
+        *,
+        include_leads: bool = False,
+        limit: int = 20,
+    ) -> dict[str, Any]:
+        """Return shared two-chat state without private message or recipient data."""
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        bounded_limit = max(1, min(int(limit), 100))
+        onboarding = self.get_company_onboarding_state(workspace_id)
+        inbox = self.agent_inbox_summary(workspace_id)
+        overview = self.overview()
+        by_status = overview.get("by_status") or {}
+        with self.connect() as connection:
+            response_counts = connection.execute(
+                """
+                WITH activity AS (
+                    SELECT
+                        l.id,
+                        MIN(CASE WHEN i.direction = 'outbound'
+                            THEN i.occurred_at END) AS first_outbound_at,
+                        MAX(CASE WHEN i.direction = 'outbound'
+                            THEN i.occurred_at END) AS last_outbound_at,
+                        MAX(CASE WHEN i.direction = 'inbound'
+                            THEN i.occurred_at END) AS last_inbound_at
+                    FROM leads l
+                    LEFT JOIN interactions i ON i.lead_id = l.id
+                    GROUP BY l.id
+                )
+                SELECT
+                    SUM(CASE WHEN first_outbound_at IS NOT NULL
+                        THEN 1 ELSE 0 END) AS contacted,
+                    SUM(CASE WHEN first_outbound_at IS NOT NULL
+                        AND last_inbound_at >= first_outbound_at
+                        THEN 1 ELSE 0 END) AS replied,
+                    SUM(CASE WHEN first_outbound_at IS NOT NULL
+                        AND (last_inbound_at IS NULL
+                            OR last_inbound_at < first_outbound_at)
+                        THEN 1 ELSE 0 END) AS never_replied,
+                    SUM(CASE WHEN last_outbound_at IS NOT NULL
+                        AND (last_inbound_at IS NULL
+                            OR last_outbound_at > last_inbound_at)
+                        THEN 1 ELSE 0 END) AS awaiting_reply
+                FROM activity
+                """
+            ).fetchone()
+            knowledge_count = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM company_knowledge_items
+                    WHERE workspace_id = ? AND status = 'active'
+                    """,
+                    (workspace_id,),
+                ).fetchone()[0]
+            )
+            active_sessions = int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM conversation_sessions
+                    WHERE workspace_id = ? AND stage != 'closed'
+                    """,
+                    (workspace_id,),
+                ).fetchone()[0]
+            )
+            waiting_drafts = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM outreach_drafts WHERE status = 'draft'"
+                ).fetchone()[0]
+            )
+
+            def response_leads(condition: str) -> list[dict[str, Any]]:
+                rows = connection.execute(
+                    f"""
+                    WITH activity AS (
+                        SELECT
+                            l.id, l.company_name, l.website_url, l.status, l.score,
+                            MIN(CASE WHEN i.direction = 'outbound'
+                                THEN i.occurred_at END) AS first_outbound_at,
+                            MAX(CASE WHEN i.direction = 'outbound'
+                                THEN i.occurred_at END) AS last_outbound_at,
+                            MAX(CASE WHEN i.direction = 'inbound'
+                                THEN i.occurred_at END) AS last_inbound_at
+                        FROM leads l
+                        LEFT JOIN interactions i ON i.lead_id = l.id
+                        GROUP BY l.id
+                    )
+                    SELECT * FROM activity
+                    WHERE first_outbound_at IS NOT NULL AND ({condition})
+                    ORDER BY COALESCE(last_inbound_at, last_outbound_at) DESC
+                    LIMIT ?
+                    """,
+                    (bounded_limit,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+            response_lists = (
+                {
+                    "replied_leads": response_leads(
+                        "last_inbound_at >= first_outbound_at"
+                    ),
+                    "never_replied_leads": response_leads(
+                        "last_inbound_at IS NULL OR last_inbound_at < first_outbound_at"
+                    ),
+                    "awaiting_reply_leads": response_leads(
+                        "last_inbound_at IS NULL OR last_outbound_at > last_inbound_at"
+                    ),
+                }
+                if include_leads
+                else {}
+            )
+        contacted = int(response_counts["contacted"] or 0)
+        replied = int(response_counts["replied"] or 0)
+        return {
+            "execution_mode": "chatgpt_mcp_two_chat",
+            "onboarding": {
+                "status": onboarding["onboarding_status"],
+                "ready_for_sales": bool(onboarding["ready_for_sales"]),
+                "next_questions": onboarding["next_questions"],
+            },
+            "lanes": {
+                "inbox": {
+                    "responsibility": "new inbound WhatsApp messages only",
+                    **inbox,
+                },
+                "prospecting": {
+                    "responsibility": "new companies, analysis, scoring and drafts only",
+                    "total_leads": int(overview.get("lead_count") or 0),
+                    "unreviewed": int(by_status.get("new", 0))
+                    + int(by_status.get("researching", 0)),
+                    "analyzed": int(by_status.get("analyzed", 0)),
+                    "qualified": int(by_status.get("qualified", 0)),
+                    "drafts_waiting_review": waiting_drafts,
+                    "top_score": overview.get("top_score"),
+                },
+            },
+            "responses": {
+                "contacted": contacted,
+                "replied": replied,
+                "never_replied": int(response_counts["never_replied"] or 0),
+                "awaiting_reply": int(response_counts["awaiting_reply"] or 0),
+                "reply_rate_percent": (
+                    round(replied * 100 / contacted, 1) if contacted else 0.0
+                ),
+                **response_lists,
+            },
+            "shared_memory": {
+                "company_knowledge_items": knowledge_count,
+                "active_conversation_sessions": active_sessions,
+                "storage": "persistent_server_crm",
+                "guesses_promoted_to_company_facts": False,
+            },
+            "safety": {
+                "external_send": False,
+                "approves": False,
+                "sends": False,
+                "private_message_text_included": False,
+            },
+        }
 
     def resolve_agent_inbox_for_draft(self, workspace_id: str, draft_id: str) -> int:
         workspace_id = self._workspace_id(workspace_id)
