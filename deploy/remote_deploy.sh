@@ -303,7 +303,7 @@ else
     [[ -f deploy/Dockerfile.mcp-overlay ]] \
       || die 'low-disk MCP overlay Dockerfile is missing'
     docker run --rm --entrypoint python "$mcp_image" -c \
-      'import bs4, mcp, pydantic, requests, scrapegraphai, uvicorn' \
+      'import bs4, mcp, pydantic, requests, uvicorn' \
       || die 'existing MCP image does not contain the required runtime dependencies'
     docker build \
       --file deploy/Dockerfile.mcp-overlay \

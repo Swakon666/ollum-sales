@@ -28,7 +28,7 @@ ollum-sales-mcp :8000 ---- internal Docker network ---- whatsapp-bridge :8080
   |                  +-- named volume                      +-- named volume
   |                      ollum-sales-crm-data                   ollum-sales-whatsapp-data
   v
-ScrapeGraphAI / LLM provider (optional)
+ChatGPT via authenticated MCP (the only reasoning engine; no server LLM API)
 ```
 
 The WhatsApp bridge has no published host port. The MCP container is published only on localhost;
@@ -57,10 +57,7 @@ Configure these repository secrets under **Settings → Secrets and variables �
 | `OLLUM_ADMIN_ALLOWED_EMAILS` | OIDC cabinet | Comma-separated bootstrap allowlist |
 | `OLLUM_WORKSPACE_OWNER_EMAILS` | OIDC cabinet | Comma-separated owner emails |
 | `OLLUM_ADMIN_SESSION_SECRET` | OIDC cabinet | At least 32 random bytes |
-| `OPENAI_API_KEY` | for OpenAI | ScrapeGraphAI and autonomous conversation-agent credential |
-| `LLM_API_KEY` | optional | Generic provider credential override |
 | `SERPER_API_KEY` | optional | Reliable server-side company discovery through Serper |
-| `SCRAPEGRAPH_MODEL` | optional | Defaults to `openai/gpt-4o-mini` |
 | `OLLUM_GOOGLE_SERVICE_ACCOUNT_JSON` | yes for v0.4 | Complete Google service-account JSON; transferred as a mode-`0600` file and never written to `.env` |
 | `OLLUM_WHATSAPP_TEST_RECIPIENTS` | optional | Comma-separated exact test recipients; text-only and still subject to saved-draft approval plus separate send confirmation |
 
@@ -81,7 +78,7 @@ OLLUM_ADMIN_OIDC_CLIENT_ID=<regular web application client id>
 OLLUM_DEFAULT_WORKSPACE_ID=ollum-group
 OLLUM_DEFAULT_WORKSPACE_NAME=Ollum Group
 OLLUM_CONVERSATION_AGENT_ENABLED=true
-OLLUM_CONVERSATION_AGENT_MODEL=gpt-5.6-luna
+OLLUM_CONVERSATION_AGENT_POLL_SECONDS=900
 ```
 
 Also configure `OLLUM_GOOGLE_SHEETS_ID` with the target spreadsheet ID. Production
@@ -309,9 +306,9 @@ Rollback is unavailable before at least two successful releases exist.
   `/etc/nginx/sites-available/ollum-sales` or unrelated enabled-site symlink.
 - **HTTP 502:** check `sudo docker compose ps` and MCP logs, then verify localhost port `18000`.
 - **HTTP 401 on `/mcp`:** expected without `Authorization: Bearer …`; check the client header.
-- **No LLM key:** `sales_analyze_lead` returns bounded website evidence in `codex_fallback` mode;
-  Codex can ground an analysis in that evidence and save it with `sales_save_analysis`. Configure an
-  LLM key only when provider-side ScrapeGraphAI analysis is required.
+- **ChatGPT reasoning:** `sales_analyze_lead` always returns bounded website evidence in
+  `chatgpt_mcp` mode. ChatGPT grounds the analysis and saves it with `sales_save_analysis`.
+  Production intentionally has no OpenAI or other LLM API key.
 - **Company discovery is empty or noisy:** configure `SERPER_API_KEY`, or verify candidates through
   agent research and persist them with `sales_import_leads`.
 - **WhatsApp bridge not healthy:** follow the QR/auth logs and pair the device. A timed-out QR attempt

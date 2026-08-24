@@ -22,7 +22,7 @@ const STATUS_LABELS = {
   timed_out: "Время истекло", restarting: "Перезапускается",
   not_started: "Не настроено", in_progress: "Настройка",
   acknowledged: "В работе", drafted: "Черновик готов", resolved: "Закрыто",
-  ignored: "Игнор", processing: "AI обрабатывает", needs_review: "Нужен человек",
+  ignored: "Игнор", processing: "Передано ChatGPT", needs_review: "Нужен человек",
   discovery: "Знакомство", qualification: "Квалификация", objection: "Возражение",
   handoff: "Передача менеджеру", closed: "Закрыт", observe: "Наблюдение",
 };
@@ -447,11 +447,11 @@ function renderConversationAgent() {
   const inbox = summary.inbox || {};
   const runtime = status.runtime || {};
   const badge = $("#agent-runtime-state");
-  badge.textContent = runtime.ready ? "Готов к диалогам" : "Требует настройки";
+  badge.textContent = runtime.ready ? "ChatGPT / MCP готов" : "Playbook выключен";
   badge.classList.toggle("is-ready", Boolean(runtime.ready));
 
   const metrics = [
-    ["Ждут AI", Number(inbox.new || 0) + Number(inbox.processing || 0)],
+    ["Ждут ChatGPT", Number(inbox.new || 0) + Number(inbox.processing || 0)],
     ["Черновики", inbox.drafted || 0],
     ["Нужен человек", inbox.needs_review || 0],
     ["Активные диалоги", summary.active_sessions || 0],
@@ -473,11 +473,12 @@ function renderConversationAgent() {
   }
 
   const runtimeRows = [
-    ["Модель", runtime.model || "—"],
+    ["Мозг", "ChatGPT через MCP"],
     ["Режим", label(settings.autonomy_mode || "draft")],
     ["Ниша", settings.niche === "auto" ? "Определяется по контексту" : (settings.niche || "—")],
-    ["Память компании", runtime.company_ready ? "Готова" : "Нужно закончить интервью"],
-    ["AI-провайдер", runtime.llm_configured ? "Подключён" : "Не настроен"],
+    ["Память компании", runtime.company_ready ? "Готова" : "Можно дополнять в чате"],
+    ["Синхронизация WhatsApp", "Каждые 15 минут"],
+    ["LLM API-ключ", "Не используется"],
     ["Отправка", "Только после отдельного одобрения"],
   ];
   $("#agent-runtime-details").innerHTML = runtimeRows.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
@@ -502,7 +503,7 @@ function renderInbox() {
   const summary = state.data.agent_inbox || {};
   const metrics = [
     ["Новые", summary.new || 0],
-    ["AI обрабатывает", summary.processing || 0],
+    ["Передано ChatGPT", summary.processing || 0],
     ["Черновики", summary.drafted || 0],
     ["Нужен человек", summary.needs_review || 0],
   ];
@@ -524,7 +525,7 @@ function renderInbox() {
       const decisionMeta = decision.intent ? `<small>${escapeHtml(decision.intent)} · ${escapeHtml(decision.confidence ?? "—")}%</small>` : "";
       return `<tr><td data-label="Получено">${escapeHtml(formatDate(item.received_at))}</td><td data-label="Контакт"><strong>${escapeHtml(item.sender_label || item.chat_jid)}</strong><small>${escapeHtml(item.chat_jid)}</small></td><td data-label="Сообщение" class="message-preview">${escapeHtml(message.slice(0, 320))}${message.length > 320 ? "…" : ""}${decisionMeta}</td><td data-label="Лид">${leadControl}</td><td data-label="Статус">${statusPill(item.status)}</td><td data-label="Действие">${actions}</td></tr>`;
     }).join("")
-    : `<tr class="empty-inbox-row"><td colspan="6"><div class="empty-state"><strong>Нет входящих с таким статусом</strong><span>Фоновый worker проверяет личные чаты каждые 30 секунд.</span></div></td></tr>`;
+    : `<tr class="empty-inbox-row"><td colspan="6"><div class="empty-state"><strong>Нет входящих с таким статусом</strong><span>Фоновая синхронизация проверяет личные чаты каждые 15 минут.</span></div></td></tr>`;
 }
 
 function renderTeam() {
@@ -578,6 +579,10 @@ function renderPlugin() {
   readiness.classList.toggle("is-ready", plugin.ready);
   const fields = [
     ["Название", plugin.name], ["Описание", plugin.description],
+    ["Мозг агента", plugin.brain],
+    ["Синхронизация входящих", `Каждые ${plugin.server_sync_interval_minutes} минут`],
+    ["Расписание ChatGPT", plugin.recommended_chatgpt_schedule === "every_15_minutes_in_chat" ? "Каждые 15 минут в этом чате" : plugin.recommended_chatgpt_schedule],
+    ["Промпт для расписания", plugin.scheduled_prompt],
     ["URL-адрес сервера", plugin.server_url], ["Аутентификация", plugin.authentication],
     ["Личный кабинет", plugin.dashboard_url],
     ["Authorization server", plugin.authorization_server],
@@ -741,7 +746,7 @@ async function saveConversationAgent(event) {
     state.data.conversation_agent = await api("/api/v1/conversation-agent/settings", { method: "PATCH", body });
     state.agentDirty = false;
     renderConversationAgent();
-    showToast("Playbook сохранён. Worker применит его к следующему входящему.");
+    showToast("Playbook сохранён. ChatGPT применит его в следующем MCP-цикле.");
   } catch (error) {
     showToast(error.message, true);
   }
@@ -751,10 +756,9 @@ async function processConversations() {
   const button = $("#process-conversations-button");
   button.disabled = true;
   try {
-    await api("/api/v1/conversation-agent/process", { method: "POST", body: { limit: 3 } });
-    showToast("AI-обработка запущена. Ответы появятся только как черновики.");
-    window.setTimeout(() => refreshAll({ quiet: true, force: true }), 1400);
-    window.setTimeout(() => refreshAll({ quiet: true, force: true }), 4200);
+    const result = await api("/api/v1/conversation-agent/process", { method: "POST", body: { scan_limit: 100 } });
+    showToast(`Очередь синхронизирована: новых обращений ${Number(result.new_events || 0)}. Обработка выполняется в ChatGPT.`);
+    await refreshAll({ quiet: true, force: true });
   } catch (error) {
     showToast(error.message, true);
   } finally {

@@ -387,7 +387,21 @@ def _plugin_status(settings: Settings) -> dict[str, Any]:
     }
     return {
         "name": "Ollum Sales",
-        "description": "Grounded sales research, scoring and SAFE outreach drafting for Ollum Group.",
+        "description": (
+            "ChatGPT-native sales agent: grounded research, scoring and SAFE "
+            "WhatsApp drafting without a server-side LLM API."
+        ),
+        "brain": "ChatGPT through Ollum Sales MCP",
+        "server_llm_enabled": False,
+        "server_sync_interval_minutes": 15,
+        "recommended_chatgpt_schedule": "every_15_minutes_in_chat",
+        "scheduled_prompt": (
+            "Используй Ollum Sales. Проверь статус, вызови "
+            "sales_prepare_conversation_batch с sync_inbox=true, рассуждай только "
+            "по возвращённым фактам и для каждого элемента передай один строгий "
+            "ConversationDecision через sales_submit_conversation_decision. Покажи "
+            "созданные черновики и эскалации. Ничего не одобряй и не отправляй."
+        ),
         "server_url": resource_url,
         "authentication": "OAuth",
         "authorization_server": settings.oidc_issuer_url,
@@ -879,37 +893,40 @@ async def api_conversation_sessions(
 async def api_process_conversations(
     request: Request, context: AdminContext, user: dict[str, Any]
 ) -> Response:
-    if context.conversation_agent is None:
-        raise AdminRequestError(503, "Conversation agent runtime is unavailable")
     body = await _read_json(request)
-    limit = _bounded_int(
-        body.get("limit", context.settings.conversation_agent_batch_size),
-        name="limit",
+    scan_limit = _bounded_int(
+        body.get("scan_limit", 100),
+        name="scan_limit",
         minimum=1,
-        maximum=10,
+        maximum=100,
     )
     workspace_id = str(user["workspace_id"])
-    job = context.jobs.create(
-        name="conversation_agent.process_pending", actor=str(user["email"])
+    result = sync_whatsapp_inbox(
+        context.crm,
+        workspace_id,
+        scan_limit=scan_limit,
     )
     context.crm.record_admin_audit(
         actor=str(user["email"]),
-        action="conversation_agent.process_pending",
-        target_type="background_job",
-        target_id=job["id"],
-        outcome="queued",
-        details={"limit": limit, "approves": False, "sends": False},
+        action="conversation_agent.queue_sync",
+        target_type="workspace",
+        target_id=workspace_id,
+        outcome="success",
+        details={
+            "scan_limit": scan_limit,
+            "new_events": result["new_events"],
+            "existing_events": result["existing_events"],
+            "chatgpt_reasoning_started": False,
+            "approves": False,
+            "sends": False,
+        },
     )
-    agent = context.conversation_agent
     return JSONResponse(
-        {"job": job},
-        status_code=202,
-        background=BackgroundTask(
-            context.jobs.run,
-            job["id"],
-            lambda: agent.process_pending(workspace_id, limit=limit),
-            context.crm,
-        ),
+        {
+            **result,
+            "execution_mode": "chatgpt_mcp",
+            "next_action": "Open ChatGPT and run the Ollum Sales agent cycle.",
+        }
     )
 
 

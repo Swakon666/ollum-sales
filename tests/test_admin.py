@@ -77,7 +77,6 @@ class FakeSheets:
 class FakeConversationAgent:
     def __init__(self, crm: SalesCRM) -> None:
         self.crm = crm
-        self.process_calls = 0
 
     def status(self, workspace_id: str) -> dict[str, Any]:
         summary = self.crm.conversation_agent_summary(workspace_id)
@@ -87,24 +86,18 @@ class FakeConversationAgent:
             "runtime": {
                 "enabled": True,
                 "ready": True,
-                "model": "test-model",
-                "llm_configured": True,
+                "execution_mode": "chatgpt_mcp",
+                "brain": "ChatGPT through Ollum Sales MCP",
+                "server_llm_enabled": False,
+                "requires_api_key": False,
                 "company_ready": True,
             },
-            "safety": {"approves": False, "sends": False, "external_send": False},
-        }
-
-    def process_pending(self, _workspace_id: str, *, limit: int) -> dict[str, Any]:
-        self.process_calls += 1
-        return {
-            "success": True,
-            "processed": min(limit, 1),
-            "drafted": 1,
-            "needs_review": 0,
-            "ignored": 0,
-            "failed": 0,
-            "approved": False,
-            "sent": False,
+            "safety": {
+                "approves": False,
+                "sends": False,
+                "external_send": False,
+                "draft_only": True,
+            },
         }
 
 
@@ -410,6 +403,13 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     }
     assert payload["whatsapp"]["logged_in"] is True
     assert payload["plugin"]["server_url"] == "https://sales.example/mcp"
+    assert payload["plugin"]["brain"] == "ChatGPT through Ollum Sales MCP"
+    assert payload["plugin"]["server_llm_enabled"] is False
+    assert payload["plugin"]["server_sync_interval_minutes"] == 15
+    assert (
+        payload["plugin"]["recommended_chatgpt_schedule"] == "every_15_minutes_in_chat"
+    )
+    assert "sales_prepare_conversation_batch" in payload["plugin"]["scheduled_prompt"]
 
 
 def test_write_routes_require_scope_and_csrf(admin_client) -> None:
@@ -637,7 +637,9 @@ def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) 
     assert bootstrap["agent_inbox"]["acknowledged"] == 1
 
 
-def test_conversation_agent_api_is_configurable_but_cannot_send(admin_client) -> None:
+def test_conversation_agent_api_is_configurable_but_cannot_send(
+    admin_client, monkeypatch
+) -> None:
     client, context, _autopilot, _sheets = admin_client
     _login(client)
 
@@ -647,6 +649,7 @@ def test_conversation_agent_api_is_configurable_but_cannot_send(admin_client) ->
         "approves": False,
         "sends": False,
         "external_send": False,
+        "draft_only": True,
     }
 
     assert (
@@ -679,14 +682,24 @@ def test_conversation_agent_api_is_configurable_but_cannot_send(admin_client) ->
     )
     assert forbidden.status_code == 400
 
+    monkeypatch.setattr(
+        admin_module,
+        "sync_whatsapp_inbox",
+        lambda *_args, **_kwargs: {
+            "success": True,
+            "new_events": 1,
+            "existing_events": 0,
+        },
+    )
     queued = client.post(
         "/api/v1/conversation-agent/process",
         headers=_csrf_headers(),
-        json={"limit": 3},
+        json={"scan_limit": 100},
     )
-    assert queued.status_code == 202
+    assert queued.status_code == 200
+    assert queued.json()["execution_mode"] == "chatgpt_mcp"
+    assert queued.json()["new_events"] == 1
     assert context.conversation_agent is not None
-    assert context.conversation_agent.process_calls == 1  # type: ignore[union-attr]
     assert context.crm.list_pending_send_requests(limit=10) == []
     assert (
         client.post(

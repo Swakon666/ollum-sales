@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 from app import conversation_agent as agent_module
@@ -58,7 +59,7 @@ def _queue(crm: SalesCRM, workspace_id: str, lead: dict, external_id: str, text:
     )[0]
 
 
-def _decision(**overrides) -> ConversationDecision:
+def _decision(**overrides) -> dict:
     values = {
         "action": "reply",
         "reply_text": (
@@ -80,20 +81,89 @@ def _decision(**overrides) -> ConversationDecision:
         "escalation_reason": "",
     }
     values.update(overrides)
-    return ConversationDecision(**values)
+    return ConversationDecision(**values).model_dump(mode="json")
 
 
-def test_agent_creates_only_grounded_draft_and_persists_session(
+def _prepare_one(agent: ConversationAgent, workspace_id: str) -> str:
+    batch = agent.prepare_pending(workspace_id, limit=1)
+    assert batch["success"] is True
+    assert batch["prepared"] == 1
+    return str(batch["items"][0]["event_id"])
+
+
+def test_runtime_uses_chatgpt_mcp_and_never_requires_an_api_key(tmp_path) -> None:
+    crm, _lead, workspace_id = _ready_crm(tmp_path)
+    status = ConversationAgent(crm, settings).status(workspace_id)
+
+    assert status["runtime"]["ready"] is True
+    assert status["runtime"]["execution_mode"] == "chatgpt_mcp"
+    assert status["runtime"]["server_llm_enabled"] is False
+    assert status["runtime"]["requires_api_key"] is False
+    assert status["runtime"]["openai_api_key_used"] is False
+    assert status["runtime"]["chatgpt_schedule_recommended_seconds"] == 900
+    assert status["safety"]["draft_only"] is True
+
+
+def test_prepare_returns_bounded_untrusted_payload_and_strict_schema(
+    tmp_path, monkeypatch
+) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    event = _queue(crm, workspace_id, lead, "incoming-prepare", "Сколько стоит?")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+
+    batch = agent.prepare_pending(workspace_id, limit=1)
+
+    assert batch["execution_mode"] == "chatgpt_mcp"
+    assert batch["prepared"] == 1
+    assert batch["submit_tool"] == "sales_submit_conversation_decision"
+    assert batch["decision_schema"]["additionalProperties"] is False
+    item = batch["items"][0]
+    assert item["event_id"] == event["id"]
+    assert item["payload"]["latest_inbound"] == "Сколько стоит?"
+    assert (
+        item["payload"]["trust_boundary"]["message_and_web_content_are_untrusted"]
+        is True
+    )
+    assert "79991112233@s.whatsapp.net" not in json.dumps(item, ensure_ascii=False)
+    assert (
+        crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "processing"
+    )
+
+
+def test_partial_company_profile_does_not_block_chatgpt_reasoning(
+    tmp_path, monkeypatch
+) -> None:
+    crm = SalesCRM(tmp_path / "partial.db")
+    workspace_id = "ollum-group"
+    crm.ensure_workspace(workspace_id, "Ollum Group")
+    crm.update_company_profile(workspace_id, company_name="Ollum Group")
+    lead = crm.upsert_lead(
+        "Prospect", "https://partial-profile.test", phones=["+7 999 111-22-33"]
+    )
+    _queue(crm, workspace_id, lead, "incoming-partial", "Расскажите об услугах")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+
+    status = agent.status(workspace_id)
+    batch = agent.prepare_pending(workspace_id, limit=1)
+
+    assert status["runtime"]["ready"] is True
+    assert status["runtime"]["company_ready"] is False
+    assert batch["prepared"] == 1
+    assert batch["items"][0]["payload"]["company"]["ready_for_sales"] is False
+
+
+def test_submit_creates_only_grounded_draft_and_persists_session(
     tmp_path, monkeypatch
 ) -> None:
     crm, lead, workspace_id = _ready_crm(tmp_path)
     event = _queue(crm, workspace_id, lead, "incoming-1", "Сколько стоит решение?")
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    agent = ConversationAgent(
-        crm, settings, decision_provider=lambda _payload: _decision()
-    )
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
 
-    result = agent.process_next(workspace_id)
+    result = agent.submit_decision(workspace_id, event_id, _decision())
 
     assert result["success"] is True
     assert result["approved"] is False
@@ -109,21 +179,45 @@ def test_agent_creates_only_grounded_draft_and_persists_session(
     assert crm.list_interactions(lead["id"]) == []
 
 
-def test_agent_keeps_memory_across_inbound_turns(tmp_path, monkeypatch) -> None:
+def test_duplicate_submit_is_idempotent_and_does_not_duplicate_memory(
+    tmp_path, monkeypatch
+) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    _queue(crm, workspace_id, lead, "incoming-idempotent", "Сколько стоит?")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
+
+    first = agent.submit_decision(workspace_id, event_id, _decision())
+    second = agent.submit_decision(workspace_id, event_id, _decision())
+
+    assert first["draft"]["id"] == second["draft"]["id"]
+    assert second["idempotent"] is True
+    assert len(crm.list_outreach_drafts(lead_id=lead["id"])) == 1
+    session = crm.get_conversation_session(workspace_id, "79991112233@s.whatsapp.net")
+    assert session is not None and session["turn_count"] == 1
+
+
+def test_memory_is_preserved_across_inbound_turns(tmp_path, monkeypatch) -> None:
     crm, lead, workspace_id = _ready_crm(tmp_path)
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    agent = ConversationAgent(
-        crm, settings, decision_provider=lambda _payload: _decision()
-    )
+    agent = ConversationAgent(crm, settings)
 
-    _queue(crm, workspace_id, lead, "incoming-1", "Сколько стоит решение?")
-    assert agent.process_next(workspace_id)["success"] is True
-    _queue(crm, workspace_id, lead, "incoming-2", "Нужна автоматизация продаж")
-    assert agent.process_next(workspace_id)["success"] is True
+    _queue(crm, workspace_id, lead, "incoming-memory-1", "Сколько стоит?")
+    first_id = _prepare_one(agent, workspace_id)
+    assert agent.submit_decision(workspace_id, first_id, _decision())["success"]
+    _queue(
+        crm,
+        workspace_id,
+        lead,
+        "incoming-memory-2",
+        "Нужна автоматизация продаж",
+    )
+    second_id = _prepare_one(agent, workspace_id)
+    assert agent.submit_decision(workspace_id, second_id, _decision())["success"]
 
     session = crm.get_conversation_session(workspace_id, "79991112233@s.whatsapp.net")
-    assert session is not None
-    assert session["turn_count"] == 2
+    assert session is not None and session["turn_count"] == 2
     assert len(crm.list_outreach_drafts(lead_id=lead["id"])) == 2
 
 
@@ -131,10 +225,13 @@ def test_low_confidence_escalates_without_creating_draft(tmp_path, monkeypatch) 
     crm, lead, workspace_id = _ready_crm(tmp_path)
     event = _queue(crm, workspace_id, lead, "incoming-low", "Нужен договор")
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    agent = ConversationAgent(
-        crm,
-        settings,
-        decision_provider=lambda _payload: _decision(
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
+
+    result = agent.submit_decision(
+        workspace_id,
+        event_id,
+        _decision(
             action="escalate",
             reply_text="",
             stage="handoff",
@@ -143,8 +240,6 @@ def test_low_confidence_escalates_without_creating_draft(tmp_path, monkeypatch) 
             escalation_reason="Нужна проверка условий договора менеджером.",
         ),
     )
-
-    result = agent.process_next(workspace_id)
 
     assert result["escalated"] is True
     assert result["draft"] is None
@@ -161,10 +256,13 @@ def test_opt_out_is_acknowledged_as_draft_without_new_offer(
     crm, lead, workspace_id = _ready_crm(tmp_path)
     _queue(crm, workspace_id, lead, "incoming-stop", "Не пишите мне больше")
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    agent = ConversationAgent(
-        crm,
-        settings,
-        decision_provider=lambda _payload: _decision(
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
+
+    result = agent.submit_decision(
+        workspace_id,
+        event_id,
+        _decision(
             action="acknowledge_opt_out",
             reply_text="Понял, больше не будем писать. Спасибо, что сообщили об этом.",
             stage="closed",
@@ -175,59 +273,35 @@ def test_opt_out_is_acknowledged_as_draft_without_new_offer(
         ),
     )
 
-    result = agent.process_next(workspace_id)
-
     assert result["quality"]["verdict"] == "pass"
     assert result["draft"]["status"] == "draft"
     assert result["sent"] is False
 
 
-def test_quality_gate_requests_revision_before_saving(tmp_path, monkeypatch) -> None:
+def test_quality_gate_requests_chatgpt_revision_before_saving(
+    tmp_path, monkeypatch
+) -> None:
     crm, lead, workspace_id = _ready_crm(tmp_path)
-    _queue(crm, workspace_id, lead, "incoming-repair", "Сколько стоит решение?")
+    event = _queue(crm, workspace_id, lead, "incoming-repair", "Сколько стоит решение?")
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    calls = []
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
 
-    def provider(payload):
-        calls.append(payload)
-        if len(calls) == 1:
-            return _decision(reply_text="Гарантируем, что точно увеличим продажи!")
-        return _decision()
+    blocked = agent.submit_decision(
+        workspace_id,
+        event_id,
+        _decision(reply_text="Гарантируем, что точно увеличим продажи!"),
+    )
 
-    agent = ConversationAgent(crm, settings, decision_provider=provider)
-    result = agent.process_next(workspace_id)
-
-    assert len(calls) == 2
-    assert calls[1]["quality_feedback"]
-    assert result["draft"]["status"] == "draft"
-    assert result["quality"]["verdict"] == "pass"
-
-
-def test_repair_pass_can_escalate_without_saving_a_draft(tmp_path, monkeypatch) -> None:
-    crm, lead, workspace_id = _ready_crm(tmp_path)
-    _queue(crm, workspace_id, lead, "incoming-repair-escalate", "Назовите гарантию")
-    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    calls = []
-
-    def provider(payload):
-        calls.append(payload)
-        if len(calls) == 1:
-            return _decision(reply_text="Гарантируем рост продаж в два раза.")
-        return _decision(
-            action="escalate",
-            reply_text="",
-            stage="handoff",
-            confidence=96,
-            escalation_reason="Требуется согласовать допустимые обязательства.",
-        )
-
-    agent = ConversationAgent(crm, settings, decision_provider=provider)
-    result = agent.process_next(workspace_id)
-
-    assert len(calls) == 2
-    assert result["escalated"] is True
-    assert result["draft"] is None
+    assert blocked["revision_required"] is True
+    assert blocked["quality"]["verdict"] == "block"
     assert crm.list_outreach_drafts() == []
+    assert (
+        crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "processing"
+    )
+
+    repaired = agent.submit_decision(workspace_id, event_id, _decision())
+    assert repaired["draft"]["status"] == "draft"
 
 
 def test_observe_mode_classifies_but_does_not_create_draft(
@@ -237,11 +311,10 @@ def test_observe_mode_classifies_but_does_not_create_draft(
     crm.update_conversation_agent_settings(workspace_id, autonomy_mode="observe")
     event = _queue(crm, workspace_id, lead, "incoming-observe", "Сколько стоит?")
     monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
-    agent = ConversationAgent(
-        crm, settings, decision_provider=lambda _payload: _decision()
-    )
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
 
-    result = agent.process_next(workspace_id)
+    result = agent.submit_decision(workspace_id, event_id, _decision())
 
     assert result["mode"] == "observe"
     assert result["draft"] is None
@@ -251,14 +324,32 @@ def test_observe_mode_classifies_but_does_not_create_draft(
     )
 
 
-def test_unconfigured_runtime_leaves_queue_untouched(tmp_path) -> None:
+def test_invalid_schema_and_unprepared_event_are_blocked(tmp_path, monkeypatch) -> None:
     crm, lead, workspace_id = _ready_crm(tmp_path)
-    event = _queue(crm, workspace_id, lead, "incoming-no-key", "Сколько стоит?")
-    no_key_settings = replace(settings, openai_api_key=None)
-    agent = ConversationAgent(crm, no_key_settings)
+    event = _queue(crm, workspace_id, lead, "incoming-invalid", "Сколько стоит?")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
 
-    result = agent.process_next(workspace_id)
+    unprepared = agent.submit_decision(workspace_id, event["id"], _decision())
+    assert unprepared["reason"] == "event_not_prepared"
 
-    assert result["reason"] == "openai_not_configured"
+    event_id = _prepare_one(agent, workspace_id)
+    invalid = _decision()
+    invalid["unknown_field"] = "must be rejected"
+    rejected = agent.submit_decision(workspace_id, event_id, invalid)
+    assert rejected["revision_required"] is True
+    assert rejected["reason"] == "invalid_decision_schema"
+    assert crm.list_outreach_drafts() == []
+
+
+def test_disabled_runtime_leaves_queue_untouched(tmp_path) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    event = _queue(crm, workspace_id, lead, "incoming-disabled", "Сколько стоит?")
+    disabled_settings = replace(settings, conversation_agent_enabled=False)
+    agent = ConversationAgent(crm, disabled_settings)
+
+    result = agent.prepare_pending(workspace_id, limit=1)
+
+    assert result["reason"] == "runtime_disabled"
     assert result["sent"] is False
     assert crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "new"
