@@ -55,6 +55,18 @@ def test_production_deployment_requires_manual_dispatch() -> None:
     assert "DEPLOY_MODE: ${{ inputs.mode }}" in workflow
 
 
+def test_public_verification_uses_local_oauth_issuer_when_dcr_is_enabled() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    public_verification = workflow.split("  public-verification:", 1)[1]
+
+    assert "PUBLIC_BASE_URL: ${{ vars.OLLUM_PUBLIC_BASE_URL }}" in public_verification
+    assert (
+        "OAUTH_DCR_ENABLED: ${{ vars.OLLUM_OAUTH_DCR_ENABLED }}" in public_verification
+    )
+
+
 def test_direct_whatsapp_tool_cannot_bypass_persistent_draft_flow() -> None:
     server = (REPOSITORY_ROOT / "app" / "server.py").read_text(encoding="utf-8")
     direct_tool = server.split("def whatsapp_send_message(", 1)[1].split("\n@_", 1)[0]
