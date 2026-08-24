@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 from app import conversation_agent as agent_module
 from app.config import settings
@@ -62,7 +63,7 @@ def _queue(
         external_id=external_id,
         chat_jid=chat_jid,
         message_text=text,
-        received_at="2026-08-23T11:00:00+00:00",
+        received_at=datetime.now(UTC).isoformat(timespec="seconds"),
         lead_id=lead["id"],
     )[0]
 
@@ -409,3 +410,28 @@ def test_disabled_runtime_leaves_queue_untouched(tmp_path) -> None:
     assert result["reason"] == "runtime_disabled"
     assert result["sent"] is False
     assert crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "new"
+
+
+def test_stale_inbound_is_quarantined_before_chatgpt_reasoning(tmp_path) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    crm.update_conversation_agent_settings(workspace_id, max_inbound_age_hours=24)
+    event = crm.upsert_agent_inbox_event(
+        workspace_id,
+        external_id="stale-conversation",
+        chat_jid="79991112233@s.whatsapp.net",
+        message_text="Old request",
+        received_at=(datetime.now(UTC) - timedelta(days=3)).isoformat(
+            timespec="seconds"
+        ),
+        lead_id=lead["id"],
+    )[0]
+    agent = ConversationAgent(crm, settings)
+
+    result = agent.prepare_pending(workspace_id, limit=1)
+
+    assert result["prepared"] == 0
+    assert result["queue_maintenance"]["stale_quarantined"] == 1
+    assert result["sent"] is False
+    updated = crm.get_agent_inbox_event(workspace_id, event["id"])
+    assert updated["status"] == "needs_review"
+    assert "older than" in updated["agent_error"]

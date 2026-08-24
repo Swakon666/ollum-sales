@@ -225,6 +225,12 @@ to `needs_review`. This path never approves a draft, queues a send request, or r
 interaction. A normal dormant chat cannot be awakened by MCP; use the hourly in-chat schedule returned by
 `sales_get_chatgpt_agent_playbook` when Workspace Agents are available.
 
+Before ChatGPT claims work, a queue watchdog recovers expired processing leases. Fresh events are
+requeued until their retry budget is exhausted; inbound messages older than
+`max_inbound_age_hours` (168 hours by default) are quarantined in `needs_review` instead of being
+answered out of context. The admin dashboard exposes expired leases and stale actionable events as
+degraded runtime health without revealing private message text.
+
 ## Google Sheets panel
 
 The integration creates and refreshes `LEADS`, `CAMPAIGNS`, `OUTREACH`, `FOLLOWUPS`, and

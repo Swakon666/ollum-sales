@@ -534,6 +534,7 @@ def sales_update_conversation_agent_settings(
     escalation_rules: list[str] | None = None,
     max_context_messages: int | None = None,
     max_reply_chars: int | None = None,
+    max_inbound_age_hours: int | None = None,
     confidence_threshold: int | None = None,
     auto_create_inbound_leads: bool | None = None,
 ) -> dict[str, Any]:
@@ -550,6 +551,7 @@ def sales_update_conversation_agent_settings(
         "escalation_rules": escalation_rules,
         "max_context_messages": max_context_messages,
         "max_reply_chars": max_reply_chars,
+        "max_inbound_age_hours": max_inbound_age_hours,
         "confidence_threshold": confidence_threshold,
         "auto_create_inbound_leads": auto_create_inbound_leads,
     }

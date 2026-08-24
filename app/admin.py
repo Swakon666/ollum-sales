@@ -862,6 +862,7 @@ async def api_update_conversation_agent_settings(
         "escalation_rules",
         "max_context_messages",
         "max_reply_chars",
+        "max_inbound_age_hours",
         "confidence_threshold",
         "auto_create_inbound_leads",
     }

@@ -442,6 +442,7 @@ class SalesCRM:
                     escalation_rules_json TEXT NOT NULL DEFAULT '[]',
                     max_context_messages INTEGER NOT NULL DEFAULT 12,
                     max_reply_chars INTEGER NOT NULL DEFAULT 700,
+                    max_inbound_age_hours INTEGER NOT NULL DEFAULT 168,
                     confidence_threshold INTEGER NOT NULL DEFAULT 65,
                     auto_create_inbound_leads INTEGER NOT NULL DEFAULT 1,
                     created_at TEXT NOT NULL,
@@ -534,6 +535,17 @@ class SalesCRM:
                     connection.execute(
                         f"ALTER TABLE agent_inbox_events ADD COLUMN {name} {column_type}"
                     )
+            conversation_settings_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(conversation_agent_settings)"
+                ).fetchall()
+            }
+            if "max_inbound_age_hours" not in conversation_settings_columns:
+                connection.execute(
+                    "ALTER TABLE conversation_agent_settings "
+                    "ADD COLUMN max_inbound_age_hours INTEGER NOT NULL DEFAULT 168"
+                )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_claim
@@ -562,7 +574,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 10")
+            connection.execute("PRAGMA user_version = 11")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -1380,9 +1392,10 @@ class SalesCRM:
                 """
                 INSERT OR IGNORE INTO conversation_agent_settings (
                     workspace_id, enabled, autonomy_mode, niche,
-                    max_context_messages, max_reply_chars, confidence_threshold,
+                    max_context_messages, max_reply_chars, max_inbound_age_hours,
+                    confidence_threshold,
                     auto_create_inbound_leads, created_at, updated_at
-                ) VALUES (?, 1, 'draft', 'auto', 12, 700, 65, 1, ?, ?)
+                ) VALUES (?, 1, 'draft', 'auto', 12, 700, 168, 65, 1, ?, ?)
                 """,
                 (workspace_id, timestamp, timestamp),
             )
@@ -1410,6 +1423,7 @@ class SalesCRM:
             "escalation_rules",
             "max_context_messages",
             "max_reply_chars",
+            "max_inbound_age_hours",
             "confidence_threshold",
             "auto_create_inbound_leads",
         }
@@ -1465,6 +1479,9 @@ class SalesCRM:
             elif name == "max_reply_chars":
                 assignments.append("max_reply_chars = ?")
                 values.append(max(120, min(int(value), 700)))
+            elif name == "max_inbound_age_hours":
+                assignments.append("max_inbound_age_hours = ?")
+                values.append(max(1, min(int(value), 720)))
             elif name == "confidence_threshold":
                 assignments.append("confidence_threshold = ?")
                 values.append(max(40, min(int(value), 95)))
@@ -1667,6 +1684,79 @@ class SalesCRM:
         assert claimed is not None
         return self._agent_inbox_from_row(claimed)
 
+    def recover_expired_agent_inbox_leases(
+        self,
+        workspace_id: str,
+        *,
+        max_inbound_age_hours: int = 168,
+        max_attempts: int = 3,
+    ) -> dict[str, Any]:
+        """Recover abandoned leases and quarantine stale inbound conversations."""
+
+        workspace_id = self._workspace_id(workspace_id)
+        now = datetime.now(UTC)
+        now_value = now.isoformat(timespec="seconds")
+        bounded_age_hours = max(1, min(int(max_inbound_age_hours), 720))
+        bounded_attempts = max(1, min(int(max_attempts), 10))
+        stale_before = (now - timedelta(hours=bounded_age_hours)).isoformat(
+            timespec="seconds"
+        )
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            stale = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'needs_review', agent_lock_until = NULL,
+                    agent_error = 'Inbound message is older than the configured response window',
+                    updated_at = ?
+                WHERE workspace_id = ?
+                  AND status IN ('new', 'processing')
+                  AND received_at < ?
+                  AND (
+                    status = 'new'
+                    OR agent_lock_until IS NULL
+                    OR agent_lock_until <= ?
+                  )
+                """,
+                (now_value, workspace_id, stale_before, now_value),
+            )
+            exhausted = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'needs_review', agent_lock_until = NULL,
+                    agent_error = 'ChatGPT did not complete this event after the configured lease attempts',
+                    updated_at = ?
+                WHERE workspace_id = ? AND status = 'processing'
+                  AND (agent_lock_until IS NULL OR agent_lock_until <= ?)
+                  AND agent_attempts >= ?
+                """,
+                (now_value, workspace_id, now_value, bounded_attempts),
+            )
+            requeued = connection.execute(
+                """
+                UPDATE agent_inbox_events
+                SET status = 'new', agent_lock_until = NULL, agent_error = NULL,
+                    updated_at = ?
+                WHERE workspace_id = ? AND status = 'processing'
+                  AND (agent_lock_until IS NULL OR agent_lock_until <= ?)
+                  AND agent_attempts < ?
+                """,
+                (now_value, workspace_id, now_value, bounded_attempts),
+            )
+        stale_count = int(stale.rowcount)
+        exhausted_count = int(exhausted.rowcount)
+        requeued_count = int(requeued.rowcount)
+        return {
+            "checked_at": now_value,
+            "max_inbound_age_hours": bounded_age_hours,
+            "max_attempts": bounded_attempts,
+            "stale_quarantined": stale_count,
+            "leases_exhausted": exhausted_count,
+            "leases_requeued": requeued_count,
+            "changed": stale_count + exhausted_count + requeued_count,
+            "sent": False,
+        }
+
     def finish_agent_inbox_event(
         self,
         workspace_id: str,
@@ -1713,13 +1803,6 @@ class SalesCRM:
     def conversation_agent_summary(self, workspace_id: str) -> dict[str, Any]:
         workspace_id = self._workspace_id(workspace_id)
         with self.connect() as connection:
-            event_rows = connection.execute(
-                """
-                SELECT status, COUNT(*) AS item_count FROM agent_inbox_events
-                WHERE workspace_id = ? GROUP BY status
-                """,
-                (workspace_id,),
-            ).fetchall()
             session_rows = connection.execute(
                 """
                 SELECT stage, COUNT(*) AS item_count FROM conversation_sessions
@@ -1729,7 +1812,7 @@ class SalesCRM:
             ).fetchall()
         return {
             "settings": self.get_conversation_agent_settings(workspace_id),
-            "inbox": {str(row["status"]): int(row["item_count"]) for row in event_rows},
+            "inbox": self.agent_inbox_summary(workspace_id),
             "sessions": {
                 str(row["stage"]): int(row["item_count"]) for row in session_rows
             },
@@ -1950,6 +2033,12 @@ class SalesCRM:
 
     def agent_inbox_summary(self, workspace_id: str) -> dict[str, int]:
         workspace_id = self._workspace_id(workspace_id)
+        agent_settings = self.get_conversation_agent_settings(workspace_id)
+        now = datetime.now(UTC)
+        now_value = now.isoformat(timespec="seconds")
+        stale_before = (
+            now - timedelta(hours=int(agent_settings["max_inbound_age_hours"]))
+        ).isoformat(timespec="seconds")
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -1958,9 +2047,26 @@ class SalesCRM:
                 """,
                 (workspace_id,),
             ).fetchall()
+            health = connection.execute(
+                """
+                SELECT
+                    SUM(CASE WHEN status = 'processing'
+                        AND agent_lock_until > ? THEN 1 ELSE 0 END) AS processing_active,
+                    SUM(CASE WHEN status = 'processing'
+                        AND (agent_lock_until IS NULL OR agent_lock_until <= ?)
+                        THEN 1 ELSE 0 END) AS processing_expired,
+                    SUM(CASE WHEN status IN ('new', 'processing')
+                        AND received_at < ? THEN 1 ELSE 0 END) AS stale_actionable
+                FROM agent_inbox_events WHERE workspace_id = ?
+                """,
+                (now_value, now_value, stale_before, workspace_id),
+            ).fetchone()
         counts = {status: 0 for status in AGENT_INBOX_STATUSES}
         counts.update({str(row["status"]): int(row["event_count"]) for row in rows})
         counts["total"] = sum(counts[status] for status in AGENT_INBOX_STATUSES)
+        counts["processing_active"] = int(health["processing_active"] or 0)
+        counts["processing_expired"] = int(health["processing_expired"] or 0)
+        counts["stale_actionable"] = int(health["stale_actionable"] or 0)
         return counts
 
     def resolve_agent_inbox_for_draft(self, workspace_id: str, draft_id: str) -> int:

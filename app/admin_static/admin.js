@@ -447,11 +447,13 @@ function renderConversationAgent() {
   const inbox = summary.inbox || {};
   const runtime = status.runtime || {};
   const badge = $("#agent-runtime-state");
-  badge.textContent = runtime.ready ? "ChatGPT / MCP готов" : "Playbook выключен";
+  badge.textContent = !runtime.ready
+    ? "Playbook выключен"
+    : (runtime.health === "degraded" ? "MCP готов · требуется внимание" : "ChatGPT / MCP готов");
   badge.classList.toggle("is-ready", Boolean(runtime.ready));
 
   const metrics = [
-    ["Ждут ChatGPT", Number(inbox.new || 0) + Number(inbox.processing || 0)],
+    ["Ждут ChatGPT", Number(inbox.new || 0) + Number(inbox.processing_active ?? inbox.processing ?? 0)],
     ["Черновики", inbox.drafted || 0],
     ["Нужен человек", inbox.needs_review || 0],
     ["Активные диалоги", summary.active_sessions || 0],
@@ -460,7 +462,7 @@ function renderConversationAgent() {
 
   const form = $("#conversation-agent-form");
   if (!state.agentDirty && !form.contains(document.activeElement)) {
-    ["niche", "objective", "tone", "instructions", "autonomy_mode", "confidence_threshold", "max_context_messages", "max_reply_chars"].forEach((name) => {
+    ["niche", "objective", "tone", "instructions", "autonomy_mode", "confidence_threshold", "max_context_messages", "max_reply_chars", "max_inbound_age_hours"].forEach((name) => {
       const field = form.elements.namedItem(name);
       if (field) field.value = settings[name] ?? "";
     });
@@ -478,6 +480,8 @@ function renderConversationAgent() {
     ["Ниша", settings.niche === "auto" ? "Определяется по контексту" : (settings.niche || "—")],
     ["Память компании", runtime.company_ready ? "Готова" : "Можно дополнять в чате"],
     ["Синхронизация WhatsApp", "Каждые 15 минут"],
+    ["Окно свежести", `${settings.max_inbound_age_hours || 168} ч`],
+    ["Lease очереди", Number(inbox.processing_expired || 0) ? `Просрочено: ${Number(inbox.processing_expired)}` : "Норма"],
     ["LLM API-ключ", "Не используется"],
     ["Отправка", "Только после отдельного одобрения"],
   ];
@@ -741,6 +745,7 @@ async function saveConversationAgent(event) {
     confidence_threshold: Number(form.elements.namedItem("confidence_threshold").value),
     max_context_messages: Number(form.elements.namedItem("max_context_messages").value),
     max_reply_chars: Number(form.elements.namedItem("max_reply_chars").value),
+    max_inbound_age_hours: Number(form.elements.namedItem("max_inbound_age_hours").value),
   };
   try {
     state.data.conversation_agent = await api("/api/v1/conversation-agent/settings", { method: "PATCH", body });

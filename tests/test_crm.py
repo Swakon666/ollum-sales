@@ -156,7 +156,7 @@ class SalesCRMTests(unittest.TestCase):
         )
         with self.crm.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 10
+                connection.execute("PRAGMA user_version").fetchone()[0], 11
             )
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
@@ -625,6 +625,111 @@ class SalesCRMTests(unittest.TestCase):
         assert session is not None
         self.assertEqual(session["stage"], "interested")
         self.assertTrue(session["facts"]["demo_requested"])
+
+    def test_existing_conversation_settings_schema_is_migrated(self) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        self.crm.get_conversation_agent_settings(workspace_id)
+        with self.crm.connect() as connection:
+            connection.execute(
+                "ALTER TABLE conversation_agent_settings "
+                "DROP COLUMN max_inbound_age_hours"
+            )
+            connection.execute("PRAGMA user_version = 10")
+
+        migrated = SalesCRM(self.crm.db_path)
+
+        self.assertEqual(
+            migrated.get_conversation_agent_settings(workspace_id)[
+                "max_inbound_age_hours"
+            ],
+            168,
+        )
+        with migrated.connect() as connection:
+            self.assertEqual(
+                connection.execute("PRAGMA user_version").fetchone()[0], 11
+            )
+
+    def test_conversation_queue_watchdog_recovers_and_quarantines_safely(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        updated = self.crm.update_conversation_agent_settings(
+            workspace_id, max_inbound_age_hours=9999
+        )
+        self.assertEqual(updated["max_inbound_age_hours"], 720)
+        self.crm.update_conversation_agent_settings(
+            workspace_id, max_inbound_age_hours=168
+        )
+        lead = self.crm.upsert_lead(
+            "Queue Watchdog Lead",
+            "https://queue-watchdog.test",
+            phones=["+79990000002"],
+        )
+        now = datetime.now(UTC)
+
+        def add_event(external_id: str, received_at: datetime) -> dict:
+            return self.crm.upsert_agent_inbox_event(
+                workspace_id,
+                external_id=external_id,
+                chat_jid=f"7999000{external_id[-4:]}@s.whatsapp.net",
+                message_text="Test inbound",
+                received_at=received_at.isoformat(timespec="seconds"),
+                lead_id=lead["id"],
+            )[0]
+
+        stale = add_event("stale-0001", now - timedelta(days=8))
+        requeue = add_event("requeue-0002", now - timedelta(hours=1))
+        exhausted = add_event("exhausted-0003", now - timedelta(hours=1))
+        active_stale = add_event("active-0004", now - timedelta(days=8))
+        expired_at = (now - timedelta(minutes=1)).isoformat(timespec="seconds")
+        active_until = (now + timedelta(minutes=10)).isoformat(timespec="seconds")
+        with self.crm.connect() as connection:
+            connection.execute(
+                "UPDATE agent_inbox_events SET status = 'processing', "
+                "agent_attempts = 1, agent_lock_until = ? WHERE id = ?",
+                (expired_at, requeue["id"]),
+            )
+            connection.execute(
+                "UPDATE agent_inbox_events SET status = 'processing', "
+                "agent_attempts = 3, agent_lock_until = ? WHERE id = ?",
+                (expired_at, exhausted["id"]),
+            )
+            connection.execute(
+                "UPDATE agent_inbox_events SET status = 'processing', "
+                "agent_attempts = 1, agent_lock_until = ? WHERE id = ?",
+                (active_until, active_stale["id"]),
+            )
+
+        result = self.crm.recover_expired_agent_inbox_leases(
+            workspace_id, max_inbound_age_hours=168, max_attempts=3
+        )
+
+        self.assertEqual(result["stale_quarantined"], 1)
+        self.assertEqual(result["leases_requeued"], 1)
+        self.assertEqual(result["leases_exhausted"], 1)
+        self.assertFalse(result["sent"])
+        self.assertEqual(
+            self.crm.get_agent_inbox_event(workspace_id, stale["id"])["status"],
+            "needs_review",
+        )
+        self.assertEqual(
+            self.crm.get_agent_inbox_event(workspace_id, requeue["id"])["status"],
+            "new",
+        )
+        self.assertEqual(
+            self.crm.get_agent_inbox_event(workspace_id, exhausted["id"])["status"],
+            "needs_review",
+        )
+        self.assertEqual(
+            self.crm.get_agent_inbox_event(workspace_id, active_stale["id"])["status"],
+            "processing",
+        )
+        summary = self.crm.agent_inbox_summary(workspace_id)
+        self.assertEqual(summary["processing_active"], 1)
+        self.assertEqual(summary["processing_expired"], 0)
+        self.assertEqual(summary["stale_actionable"], 1)
 
 
 if __name__ == "__main__":

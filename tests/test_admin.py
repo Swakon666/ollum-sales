@@ -837,10 +837,12 @@ def test_conversation_agent_api_is_configurable_but_cannot_send(
             "tone": "Кратко и уважительно",
             "qualification_questions": ["Какой объём каталога?"],
             "confidence_threshold": 74,
+            "max_inbound_age_hours": 96,
         },
     )
     assert updated.status_code == 200
     assert updated.json()["settings"]["niche"] == "e-commerce"
+    assert updated.json()["settings"]["max_inbound_age_hours"] == 96
     assert updated.json()["settings"]["send_enabled"] is False
 
     forbidden = client.patch(
