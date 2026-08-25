@@ -232,19 +232,21 @@ Start the guarded mode:
 autopilot_start(mode="safe")
 ```
 
-SAFE server work can discover, deduplicate, inspect public evidence, queue records, and synchronize
-state. It never analyzes, scores, composes drafts, sends messages, or executes follow-ups; those
-semantic decisions belong exclusively to ChatGPT through MCP. `SEMI_AUTO` and `AUTOPILOT` cannot
+SAFE server work synchronizes inbox, Sheets and durable state. Company discovery strategy belongs
+to the hourly ChatGPT prospecting task: GPT selects a vertical, region and query, then calls
+`sales_search_companies`; the server only executes that bounded search, deduplicates candidates and
+inspects public evidence. It never chooses what to search, analyzes, scores, composes drafts, sends
+messages, or executes follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot
 start unless all of these are true:
 
 - the operator passes `confirm_non_safe=true`;
 - the CRM has at least `OLLUM_AUTOPILOT_MIN_TRAINING_LEADS` (100 by default);
 - both WhatsApp sending and `OLLUM_AUTOPILOT_ALLOW_SEND` are explicitly enabled.
 
-The worker polls WhatsApp every 15 minutes and starts an Autopilot collection cycle only when
-`next_cycle_at` is due. The collection interval defaults to 15 minutes. Discovery pauses when the
-pending ChatGPT prospecting queue reaches `OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT` (six by default),
-so the server cannot silently outrun the reasoning chat.
+The worker polls WhatsApp and synchronizes durable state every 15 minutes. With the safe default
+`OLLUM_AUTOPILOT_SERVER_DISCOVERY_ENABLED=false`, it never starts company discovery itself. The
+hourly ChatGPT task calls `sales_search_companies` only while the pending prospecting queue remains
+below `OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT` (six by default), so discovery remains reasoned and bounded.
 
 The worker never generates a reply. The primary ChatGPT chat completes fact-only onboarding and then
 calls `sales_agent_next_action(lane="prospecting")`; it cannot consume inbox work. After confirmation,

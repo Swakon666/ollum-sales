@@ -106,6 +106,9 @@ class Settings:
     chatgpt_prospecting_queue_limit: int = int(
         os.getenv("OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT", "6")
     )
+    autopilot_server_discovery_enabled: bool = _env_bool(
+        "OLLUM_AUTOPILOT_SERVER_DISCOVERY_ENABLED", False
+    )
     serper_api_key: str | None = os.getenv("SERPER_API_KEY")
     crm_db_path: str = os.getenv("OLLUM_CRM_DB_PATH", str(DEFAULT_CRM_DB))
     company_search_timeout: int = int(os.getenv("OLLUM_COMPANY_SEARCH_TIMEOUT", "20"))
