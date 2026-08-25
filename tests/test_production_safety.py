@@ -116,6 +116,15 @@ def test_direct_whatsapp_tool_cannot_bypass_persistent_draft_flow() -> None:
     assert "return send_message(" not in direct_tool
 
 
+def test_saving_chatgpt_analysis_does_not_initiate_server_scoring() -> None:
+    server = (REPOSITORY_ROOT / "app" / "server.py").read_text(encoding="utf-8")
+    save_tool = server.split("def sales_save_analysis(", 1)[1].split("\n@_", 1)[0]
+
+    assert "crm.save_analysis" in save_tool
+    assert "crm.score_lead" not in save_tool
+    assert "return saved" in save_tool
+
+
 def test_ranking_defaults_to_fresh_evidence_only() -> None:
     server = (REPOSITORY_ROOT / "app" / "server.py").read_text(encoding="utf-8")
     rank_tool = server.split("def sales_rank_leads(", 1)[1].split("\n@_", 1)[0]

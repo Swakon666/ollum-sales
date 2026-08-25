@@ -1,6 +1,6 @@
 {
   "name": "ollum-sales",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Two coordinated ChatGPT sales chats, persistent grounded CRM memory, and operator-controlled WhatsApp outreach.",
   "author": {
     "name": "Ollum Group",

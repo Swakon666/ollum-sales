@@ -442,6 +442,10 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
         in script.text
     )
     assert "plugin.chat_handoff" in script.text
+    assert "plugin.reasoning_boundary.server_llm_api" in script.text
+    assert "plugin.prospecting_queue.max_pending" in script.text
+    assert "autopilot.pending_chatgpt_prospecting" in script.text
+    assert "autopilot.chatgpt_prospecting_queue_limit" in script.text
     assert "function retryInboxEvent(" in script.text
     assert "transition: all" not in stylesheet.text
     assert "background-image: none" in stylesheet.text
@@ -634,6 +638,9 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     assert payload["plugin"]["brain"] == "ChatGPT through Ollum Sales MCP"
     assert payload["plugin"]["server_llm_enabled"] is False
     assert payload["plugin"]["server_sync_interval_minutes"] == 15
+    assert payload["plugin"]["prospecting_queue"]["max_pending"] == 6
+    assert payload["plugin"]["reasoning_boundary"]["server_llm_api"] is False
+    assert "lead_analysis" in payload["plugin"]["reasoning_boundary"]["chatgpt_only"]
     assert payload["plugin"]["recommended_chatgpt_schedule"] == "hourly_in_chat"
     assert "sales_prepare_conversation_batch" in payload["plugin"]["scheduled_prompt"]
     assert "lane='inbox'" in payload["plugin"]["scheduled_prompts"]["inbox"]

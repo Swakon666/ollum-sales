@@ -28,6 +28,17 @@ def test_selected_lane_gets_its_own_scheduled_prompt() -> None:
     assert "lane='inbox'" not in prospecting["scheduled_prompt"]
     assert "lane='inbox'" in inbox["scheduled_prompt"]
     assert prospecting["scheduled_prompt"] != inbox["scheduled_prompt"]
+    assert "already queued by the server" in prospecting["scheduled_prompt"]
+    assert "explicit operator request" in prospecting["scheduled_prompt"]
+
+    boundary = prospecting["reasoning_boundary"]
+    assert boundary["server_llm_api"] is False
+    assert "public_fact_collection" in boundary["server_only"]
+    assert "lead_analysis" in boundary["chatgpt_only"]
+    assert "lead_scoring" in boundary["chatgpt_only"]
+    assert "outreach_drafting" in boundary["chatgpt_only"]
+    assert "lead_analysis" in boundary["server_forbidden"]
+    assert prospecting["prospecting_queue"]["max_pending"] == 6
 
 
 def test_first_connection_moves_from_interview_to_review_and_handoff() -> None:

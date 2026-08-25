@@ -3684,6 +3684,19 @@ class SalesCRM:
             ).fetchall()
         return [self._lead_from_row(row) for row in rows]
 
+    def count_pending_chatgpt_prospecting_leads(self) -> int:
+        """Count fresh prospecting records still awaiting ChatGPT reasoning."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM leads
+                WHERE source != 'whatsapp_inbound'
+                  AND status IN ('new', 'researching')
+                """
+            ).fetchone()
+        return int(row[0] or 0)
+
     def save_inspection(
         self,
         lead_id: str,

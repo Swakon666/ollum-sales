@@ -32,7 +32,7 @@ def test_codex_plugin_manifest_is_release_ready() -> None:
     manifest = _load_json(".codex-plugin/plugin.json")
 
     assert manifest["name"] == "ollum-sales"
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.6.0"
     assert manifest["mcpServers"] == "./.mcp.json"
     assert manifest["skills"] == "./skills/"
     assert manifest["interface"]["developerName"] == "Ollum Group"

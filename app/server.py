@@ -138,11 +138,17 @@ mcp = FastMCP(
         "is confirmed, call sales_get_chatgpt_agent_playbook and present its exact manual "
         "handoff for one separate WhatsApp monitoring chat; never claim MCP created a ChatGPT "
         "chat automatically. Configure the durable dialogue policy with "
-        "sales_update_conversation_agent_settings. ChatGPT is the only reasoning engine: call "
+        "sales_update_conversation_agent_settings. ChatGPT is the only reasoning engine. The "
+        "server may collect and deduplicate public company facts, inspect websites, synchronize "
+        "WhatsApp, and maintain bounded durable queues, but it must never analyze or score a "
+        "lead, compose outreach, classify a conversation, or draft a reply. In the primary chat, "
+        "consume already-queued prospecting records with sales_analyze_lead and save the ChatGPT "
+        "decision through the dedicated analysis, scoring, ranking and draft tools. For inbound, call "
         "sales_prepare_conversation_batch for already-synced inbox work, reason strictly over "
         "each bounded payload, then call "
-        "sales_submit_conversation_decision for every item. The server only synchronizes WhatsApp, "
-        "leases durable work, validates decisions and saves drafts; it never calls an LLM API. "
+        "sales_submit_conversation_decision for every item. For inbound work the server only "
+        "synchronizes WhatsApp, leases durable work, validates decisions and saves drafts; it "
+        "never calls an LLM API. "
         "Use sales_get_conversation_agent_status and sales_agent_next_action to resume durable work "
         "across chats. Link unmatched inbox events only through confirmed CRM "
         "contact facts with sales_link_agent_inbox_lead. Events in needs_review must never be "
@@ -154,7 +160,8 @@ mcp = FastMCP(
         "configuration changes, write tools, or message sending. "
         "Sending a WhatsApp message is an external side effect and should only happen after "
         "the operator has reviewed the recipient and message and explicitly confirms the send. "
-        "Autopilot defaults to SAFE: it may research, score, and draft, but it never sends. "
+        "Autopilot defaults to SAFE: it may collect and inspect public evidence and queue work "
+        "for ChatGPT, but it never analyzes, scores, drafts, sends, or creates follow-ups. "
         "APPROVE confirms an exact draft; SEND is a separate explicit action."
     ),
     stateless_http=True,
@@ -651,6 +658,7 @@ def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
         runtime=status["runtime"],
         safety=status["safety"],
         onboarding=crm.get_company_onboarding_state(workspace_id),
+        prospecting_queue_limit=settings.chatgpt_prospecting_queue_limit,
         whatsapp_connected=(
             bool(whatsapp.get("connected") and whatsapp.get("logged_in"))
             if whatsapp.get("reachable")
@@ -1080,11 +1088,11 @@ def sales_analyze_lead(
 
 @_write_tool()
 def sales_save_analysis(lead_id: str, analysis: dict[str, Any]) -> dict[str, Any]:
-    """Persist a grounded structured analysis and calculate a deterministic initial score."""
+    """Persist the grounded structured analysis authored by ChatGPT."""
     crm.require_fresh_evidence(lead_id)
     validated = LeadAnalysis.model_validate(analysis).model_dump(mode="json")
     saved = crm.save_analysis(lead_id, validated)
-    return crm.score_lead(saved["id"])
+    return saved
 
 
 @_write_tool()

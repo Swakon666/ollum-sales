@@ -103,6 +103,9 @@ class Settings:
     conversation_agent_batch_size: int = int(
         os.getenv("OLLUM_CONVERSATION_AGENT_BATCH_SIZE", "3")
     )
+    chatgpt_prospecting_queue_limit: int = int(
+        os.getenv("OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT", "6")
+    )
     serper_api_key: str | None = os.getenv("SERPER_API_KEY")
     crm_db_path: str = os.getenv("OLLUM_CRM_DB_PATH", str(DEFAULT_CRM_DB))
     company_search_timeout: int = int(os.getenv("OLLUM_COMPANY_SEARCH_TIMEOUT", "20"))
@@ -128,7 +131,7 @@ class Settings:
         os.getenv("OLLUM_AUTOPILOT_DEFAULT_MODE", "safe").strip().lower()
     )
     autopilot_interval_minutes: int = int(
-        os.getenv("OLLUM_AUTOPILOT_INTERVAL_MINUTES", "60")
+        os.getenv("OLLUM_AUTOPILOT_INTERVAL_MINUTES", "15")
     )
     autopilot_max_verticals_per_cycle: int = int(
         os.getenv("OLLUM_AUTOPILOT_MAX_VERTICALS_PER_CYCLE", "2")

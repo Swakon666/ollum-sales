@@ -36,6 +36,7 @@ def settings(**overrides: object) -> SimpleNamespace:
         "autopilot_leads_per_vertical": 5,
         "autopilot_score_threshold": 60,
         "autopilot_min_training_leads": 100,
+        "chatgpt_prospecting_queue_limit": 6,
         "allow_autopilot_send": False,
         "allow_whatsapp_send": False,
     }
@@ -79,7 +80,7 @@ class AutopilotTests(unittest.TestCase):
         self.assertTrue(result["blocked"])
         self.assertFalse(self.crm.get_autopilot_state()["running"])
 
-    def test_safe_cycle_discovers_analyzes_and_drafts_without_sending(self) -> None:
+    def test_safe_cycle_only_collects_evidence_and_queues_for_chatgpt(self) -> None:
         self.crm.create_vertical(
             "ventilation",
             region="Moscow",
@@ -125,11 +126,24 @@ class AutopilotTests(unittest.TestCase):
         self.assertTrue(service.start(mode="safe")["success"])
         result = service.run_cycle(force=True)
         self.assertTrue(result["success"])
-        self.assertEqual(result["cycle"]["metrics"]["analyzed"], 1)
-        self.assertEqual(result["cycle"]["metrics"]["drafts_created"], 1)
-        self.assertEqual(len(self.crm.list_outreach_drafts()), 1)
+        metrics = result["cycle"]["metrics"]
+        self.assertEqual(metrics["queued_for_chatgpt"], 1)
+        self.assertEqual(metrics["analyzed"], 0)
+        self.assertEqual(metrics["qualified"], 0)
+        self.assertEqual(metrics["drafts_created"], 0)
+        lead = self.crm.list_leads()[0]
+        self.assertEqual(lead["status"], "new")
+        self.assertEqual(lead["analysis"], {})
+        self.assertIsNone(lead["score"])
+        self.assertEqual(len(self.crm.list_outreach_drafts()), 0)
         self.assertEqual(send_calls, [])
         self.assertEqual(sheets.sync_calls, 1)
+
+        status = service.status()
+        self.assertEqual(status["reasoning_engine"], "chatgpt_mcp_only")
+        self.assertFalse(status["server_llm_enabled"])
+        self.assertFalse(status["server_analysis_enabled"])
+        self.assertIn("never analyzes", status["safe_behavior"])
 
     def test_cycle_skips_duplicates_and_rejects_non_company_pages(self) -> None:
         self.crm.create_vertical(
@@ -189,8 +203,45 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(metrics["duplicates_skipped"], 1)
         self.assertEqual(metrics["candidates_rejected"], 1)
         self.assertEqual(metrics["leads_found"], 1)
-        self.assertEqual(metrics["analyzed"], 1)
+        self.assertEqual(metrics["queued_for_chatgpt"], 1)
+        self.assertEqual(metrics["analyzed"], 0)
         self.assertIn("editorial_path", metrics["rejection_reasons"])
+
+    def test_cycle_stops_discovery_when_chatgpt_queue_is_full(self) -> None:
+        self.crm.create_vertical(
+            "ventilation", region="Moscow", daily_target=5, min_score=60
+        )
+        for index in range(2):
+            self.crm.upsert_lead(
+                f"Pending {index}",
+                f"https://pending-{index}.example/",
+                source="autopilot:test",
+            )
+
+        discover_calls = 0
+
+        def discoverer(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal discover_calls
+            discover_calls += 1
+            raise AssertionError("discovery must not run while the GPT queue is full")
+
+        service = AutopilotService(
+            self.crm,
+            settings(chatgpt_prospecting_queue_limit=2),
+            FakeSheets(),
+            discoverer=discoverer,
+        )
+        self.assertTrue(service.start(mode="safe")["success"])
+        result = service.run_cycle(force=True)
+
+        self.assertTrue(result["success"])
+        metrics = result["cycle"]["metrics"]
+        self.assertEqual(discover_calls, 0)
+        self.assertEqual(metrics["queue_before"], 2)
+        self.assertEqual(metrics["queue_after"], 2)
+        self.assertEqual(metrics["queue_limit"], 2)
+        self.assertEqual(metrics["discovery_skipped_queue_full"], 1)
+        self.assertEqual(metrics["queued_for_chatgpt"], 0)
 
     def test_autopilot_retries_transient_discovery_idempotently(self) -> None:
         self.crm.create_vertical(

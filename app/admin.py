@@ -24,7 +24,12 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .agent_inbox import resolve_target_chat_jid, sync_whatsapp_inbox
 from .auth import AuthenticationError, OIDCSessionManager
 from .autopilot import AutopilotService
-from .chatgpt_playbook import first_connection_plan, lane_prompts, two_chat_handoff
+from .chatgpt_playbook import (
+    first_connection_plan,
+    lane_prompts,
+    reasoning_boundary,
+    two_chat_handoff,
+)
 from .config import Settings
 from .conversation_agent import ConversationAgent
 from .crm import SalesCRM, utc_now
@@ -418,6 +423,13 @@ def _plugin_status(
         ),
         "brain": "ChatGPT through Ollum Sales MCP",
         "server_llm_enabled": False,
+        "reasoning_boundary": reasoning_boundary(),
+        "prospecting_queue": {
+            "producer": "server_public_fact_collector",
+            "consumer": "primary_chat_chatgpt",
+            "max_pending": max(1, settings.chatgpt_prospecting_queue_limit),
+            "backpressure": "pause_discovery_when_full",
+        },
         "server_sync_interval_minutes": 15,
         "recommended_chatgpt_schedule": "hourly_in_chat",
         "tenant_mode": "single_company_closed_beta",

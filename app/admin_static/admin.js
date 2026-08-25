@@ -358,8 +358,9 @@ function renderAutopilot() {
     ["Режим", String(autopilot.mode || "—").toUpperCase()],
     ["Интервал", `${autopilot.interval_minutes || 0} мин`],
     ["Вертикалей / цикл", autopilot.max_verticals_per_cycle || 0],
-    ["Лидов / вертикаль", autopilot.leads_per_vertical || 0],
-    ["Порог score", autopilot.score_threshold || 0],
+    ["Сбор / вертикаль", autopilot.leads_per_vertical || 0],
+    ["Очередь для GPT", `${autopilot.pending_chatgpt_prospecting || 0} / ${autopilot.chatgpt_prospecting_queue_limit || 0}`],
+    ["Мозг", autopilot.reasoning_engine === "chatgpt_mcp_only" ? "GPT через два чата" : "Проверьте конфигурацию"],
     ["Следующий цикл", formatDate(autopilot.next_cycle_at)],
   ];
   $("#autopilot-details").innerHTML = rows.map(([name, value]) => `<div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
@@ -706,6 +707,9 @@ function renderPlugin() {
   const fields = [
     ["Название", plugin.name], ["Описание", plugin.description],
     ["Мозг агента", plugin.brain],
+    ["Решения", plugin.reasoning_boundary.server_llm_api === false ? "Анализ, scoring и тексты — только GPT в чатах" : "Проверьте конфигурацию"],
+    ["Роль сервера", "Сбор фактов, очереди, синхронизация и SAFE-контроль"],
+    ["Очередь компаний", `До ${plugin.prospecting_queue.max_pending} необработанных записей; затем сбор приостанавливается`],
     ["Синхронизация входящих", `Каждые ${plugin.server_sync_interval_minutes} минут`],
     ["Расписание ChatGPT", plugin.recommended_chatgpt_schedule === "hourly_in_chat" ? "Каждый час в этом чате" : plugin.recommended_chatgpt_schedule],
     ["Промпт для расписания", plugin.scheduled_prompt],

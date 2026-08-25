@@ -44,6 +44,8 @@ After the factual onboarding summary is explicitly confirmed, keep this chat for
 
 Use the exact prompts returned by `sales_get_chatgpt_agent_playbook`. The server synchronizes WhatsApp every 15 minutes. A normal dormant ChatGPT chat cannot be awakened by MCP; run each ChatGPT task hourly or on demand and stagger the two chats when useful.
 
+Treat the reasoning boundary as an invariant. The autonomous server worker may discover and deduplicate public companies, inspect official evidence, synchronize sources, and fill a bounded queue. It must never initiate lead analysis or scoring, compose outreach, classify inbound messages, or draft replies. MCP may mechanically validate and persist an explicit ChatGPT tool decision, but never originate it. The primary ChatGPT chat consumes the prospecting queue; the WhatsApp monitoring chat consumes the inbox queue. Any autonomous server-side semantic decision is a defect, even in SAFE mode.
+
 ## Durable learning
 
 Persist only three kinds of learning:
