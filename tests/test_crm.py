@@ -623,6 +623,56 @@ class SalesCRMTests(unittest.TestCase):
         self.assertNotIn("Private reply text", str(summary))
         self.assertFalse(summary["safety"]["private_message_text_included"])
 
+    def test_coordination_keeps_whatsapp_contacts_out_of_prospecting(self) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        prospect = self.crm.upsert_lead(
+            "Grounded Prospect",
+            "https://grounded-prospect.test",
+            source="autopilot:search",
+        )
+        inbound_contact = self.crm.upsert_lead(
+            "Technical WhatsApp Contact",
+            "https://wa-contact.contact.invalid",
+            industry="WhatsApp inbound",
+            source="whatsapp_inbound",
+            phones=["+79990000021"],
+        )
+        self.crm.save_outreach_draft(
+            prospect["id"],
+            channel="whatsapp",
+            message="Grounded prospecting draft",
+            recipient="+79990000020",
+        )
+        reply_draft = self.crm.save_outreach_draft(
+            inbound_contact["id"],
+            channel="whatsapp",
+            message="Inbound reply draft",
+            recipient="+79990000021",
+        )
+        self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="technical-inbound-1",
+            chat_jid="79990000021@s.whatsapp.net",
+            message_text="Untrusted inbound text",
+            received_at="2026-08-25T05:00:00+00:00",
+            lead_id=inbound_contact["id"],
+        )
+        event = self.crm.list_agent_inbox_events(workspace_id, status="new", limit=1)[0]
+        self.crm.update_agent_inbox_event(
+            workspace_id,
+            event["id"],
+            status="drafted",
+            draft_id=reply_draft["id"],
+        )
+
+        summary = self.crm.agent_coordination_summary(workspace_id)
+
+        self.assertEqual(summary["lanes"]["prospecting"]["total_leads"], 1)
+        self.assertEqual(summary["lanes"]["prospecting"]["unreviewed"], 0)
+        self.assertEqual(summary["lanes"]["prospecting"]["drafts_waiting_review"], 1)
+        self.assertEqual(summary["lanes"]["inbox"]["drafted"], 1)
+
     def test_conversation_agent_settings_sessions_and_queue_lease_are_persistent(
         self,
     ) -> None:

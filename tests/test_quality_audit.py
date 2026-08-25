@@ -79,3 +79,33 @@ def test_safe_quality_audit_blocks_if_any_send_flag_is_enabled(tmp_path) -> None
     assert result["safety"]["safe"] is False
     assert any(issue["code"] == "unsafe_send_flags" for issue in result["issues"])
     assert result["sent"] is False
+
+
+def test_safe_quality_audit_excludes_technical_whatsapp_contacts(tmp_path) -> None:
+    crm = SalesCRM(tmp_path / "quality-audit-lanes.db")
+    workspace_id = "quality-workspace"
+    crm.ensure_workspace(workspace_id, "Quality workspace")
+    crm.upsert_lead(
+        "Real prospect",
+        "https://real-prospect.example",
+        source="autopilot:search",
+    )
+    crm.upsert_lead(
+        "Technical WhatsApp Contact",
+        "https://wa-contact.contact.invalid",
+        industry="WhatsApp inbound",
+        source="whatsapp_inbound",
+        phones=["+79990000031"],
+    )
+
+    result = build_safe_quality_audit(
+        crm,
+        workspace_id,
+        whatsapp_send_enabled=False,
+        autopilot_send_enabled=False,
+    )
+
+    assert result["companies"]["total"] == 1
+    assert result["companies"]["active"] == 1
+    assert result["companies"]["missing_analysis"] == 1
+    assert result["companies"]["missing_inspection"] == 1

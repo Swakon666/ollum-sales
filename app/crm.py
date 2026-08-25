@@ -2371,9 +2371,22 @@ class SalesCRM:
         bounded_limit = max(1, min(int(limit), 100))
         onboarding = self.get_company_onboarding_state(workspace_id)
         inbox = self.agent_inbox_summary(workspace_id)
-        overview = self.overview()
-        by_status = overview.get("by_status") or {}
         with self.connect() as connection:
+            prospecting_counts = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_leads,
+                    SUM(CASE WHEN status IN ('new', 'researching')
+                        THEN 1 ELSE 0 END) AS unreviewed,
+                    SUM(CASE WHEN status = 'analyzed'
+                        THEN 1 ELSE 0 END) AS analyzed,
+                    SUM(CASE WHEN status = 'qualified'
+                        THEN 1 ELSE 0 END) AS qualified,
+                    MAX(score) AS top_score
+                FROM leads
+                WHERE source != 'whatsapp_inbound'
+                """
+            ).fetchone()
             response_counts = connection.execute(
                 """
                 WITH activity AS (
@@ -2426,7 +2439,15 @@ class SalesCRM:
             )
             waiting_drafts = int(
                 connection.execute(
-                    "SELECT COUNT(*) FROM outreach_drafts WHERE status = 'draft'"
+                    """
+                    SELECT COUNT(*)
+                    FROM outreach_drafts draft
+                    WHERE draft.status = 'draft'
+                      AND NOT EXISTS (
+                          SELECT 1 FROM agent_inbox_events inbox_event
+                          WHERE inbox_event.draft_id = draft.id
+                      )
+                    """
                 ).fetchone()[0]
             )
 
@@ -2486,13 +2507,12 @@ class SalesCRM:
                 },
                 "prospecting": {
                     "responsibility": "new companies, analysis, scoring and drafts only",
-                    "total_leads": int(overview.get("lead_count") or 0),
-                    "unreviewed": int(by_status.get("new", 0))
-                    + int(by_status.get("researching", 0)),
-                    "analyzed": int(by_status.get("analyzed", 0)),
-                    "qualified": int(by_status.get("qualified", 0)),
+                    "total_leads": int(prospecting_counts["total_leads"] or 0),
+                    "unreviewed": int(prospecting_counts["unreviewed"] or 0),
+                    "analyzed": int(prospecting_counts["analyzed"] or 0),
+                    "qualified": int(prospecting_counts["qualified"] or 0),
                     "drafts_waiting_review": waiting_drafts,
-                    "top_score": overview.get("top_score"),
+                    "top_score": prospecting_counts["top_score"],
                 },
             },
             "responses": {

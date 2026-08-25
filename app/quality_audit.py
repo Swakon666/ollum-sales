@@ -60,6 +60,7 @@ def build_safe_quality_audit(
                     THEN 1 ELSE 0 END) AS progressed_without_fresh_evidence,
                 SUM(CASE WHEN domain_key IS NULL OR domain_key = '' THEN 1 ELSE 0 END) AS missing_domain_key
             FROM leads
+            WHERE source != 'whatsapp_inbound'
             """,
             (now_text, now_text),
         ).fetchone()
@@ -68,7 +69,8 @@ def build_safe_quality_audit(
                 """
                 SELECT COUNT(*) FROM (
                     SELECT domain_key FROM leads
-                    WHERE domain_key IS NOT NULL AND domain_key != ''
+                    WHERE source != 'whatsapp_inbound'
+                      AND domain_key IS NOT NULL AND domain_key != ''
                     GROUP BY domain_key HAVING COUNT(*) > 1
                 )
                 """
@@ -79,7 +81,8 @@ def build_safe_quality_audit(
                 """
                 SELECT COUNT(*) FROM (
                     SELECT name_key, COALESCE(location_key, '') FROM leads
-                    WHERE name_key IS NOT NULL AND name_key != ''
+                    WHERE source != 'whatsapp_inbound'
+                      AND name_key IS NOT NULL AND name_key != ''
                     GROUP BY name_key, COALESCE(location_key, '') HAVING COUNT(*) > 1
                 )
                 """
