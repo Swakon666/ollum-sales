@@ -117,6 +117,21 @@ func TestPairingQRHandlerRejectsExpiredCode(t *testing.T) {
 	}
 }
 
+func TestNormalizedPairingQRTimeoutUsesServerValue(t *testing.T) {
+	want := 60 * time.Second
+	if got := normalizedPairingQRTimeout(want); got != want {
+		t.Fatalf("expected %s, got %s", want, got)
+	}
+}
+
+func TestNormalizedPairingQRTimeoutFallsBackForInvalidValues(t *testing.T) {
+	for _, value := range []time.Duration{0, -time.Second, pairingMaxQRTimeout + time.Second} {
+		if got := normalizedPairingQRTimeout(value); got != pairingFallbackQRTimeout {
+			t.Fatalf("expected fallback %s for %s, got %s", pairingFallbackQRTimeout, value, got)
+		}
+	}
+}
+
 func TestSendMessageHandlerBlocksWhenDisabled(t *testing.T) {
 	sendCalled := false
 	w := httptest.NewRecorder()

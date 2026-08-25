@@ -205,6 +205,7 @@ def bridge_pairing_status(timeout_seconds: float = 3.0) -> dict[str, Any]:
         "refreshing",
         "paired",
         "timed_out",
+        "restarting",
         "failed",
         "not_required",
     }

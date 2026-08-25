@@ -9,7 +9,7 @@ Use Ollum Sales MCP as the shared system of record. ChatGPT is the only reasonin
 
 ## Start and onboarding
 
-1. Call `ollum_status`, `ollum_whoami`, and `sales_get_agent_coordination` whenever a chat starts or resumes.
+1. Call `ollum_status`, `ollum_whoami`, `sales_get_agent_coordination`, and `sales_get_safe_quality_audit` whenever a chat starts or resumes.
 2. Confirm SAFE mode and `whatsapp_send_enabled=false`. Stop if either condition is not confirmed.
 3. If onboarding is incomplete, call `sales_agent_next_action(lane="inbox")` or `sales_get_company_onboarding`. Ask no more than the returned three questions per turn.
 4. Accept free-form answers or files visible to ChatGPT. Extract only explicit facts. Save company identity and sales rules with `sales_update_company_profile`; save every service, price, case, current client, closed client, objection, proof, constraint, FAQ, process, or document summary separately with `sales_save_company_knowledge`.
@@ -38,7 +38,7 @@ Use two separate ChatGPT chats connected to the same Ollum Sales MCP account. Th
 4. For each fresh lead, call `sales_analyze_lead`. Analyze only returned evidence and persist the exact grounded `LeadAnalysis` with `sales_save_analysis`.
 5. Refine fit, need, budget, timing, or confidence with `sales_score_lead` only when evidence justifies it, then call `sales_rank_leads`.
 6. Create at most one personalized draft for each qualified lead without a current draft. Never inspect private inbound history in this chat.
-7. Finish with `sales_get_agent_coordination` and report top five, replied, never replied, awaiting reply, drafts, and errors without message text.
+7. Finish with `sales_get_agent_coordination` and `sales_get_safe_quality_audit`; report top five, replied, never replied, awaiting reply, drafts, quality issues, and errors without message text.
 
 Use the exact prompts returned by `sales_get_chatgpt_agent_playbook`. The server synchronizes WhatsApp every 15 minutes. A normal dormant ChatGPT chat cannot be awakened by MCP; run each ChatGPT task hourly or on demand and stagger the two chats when useful.
 

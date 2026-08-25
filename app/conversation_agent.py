@@ -49,6 +49,15 @@ class ConversationDecision(BaseModel):
     ]
     intent: str = Field(default="unknown", max_length=160)
     sentiment: Literal["positive", "neutral", "negative", "unknown"] = "unknown"
+    message_quality: Literal[
+        "actionable",
+        "acknowledgement",
+        "ambiguous",
+        "noise",
+        "spam",
+        "system",
+    ]
+    quality_reason: str = Field(min_length=3, max_length=400)
     confidence: int = Field(ge=0, le=100)
     summary: str = Field(default="", max_length=1200)
     extracted_facts: list[ExtractedConversationFact] = Field(
@@ -70,18 +79,23 @@ _CHATGPT_DECISION_INSTRUCTIONS = """
 2. Используй только подтверждённые факты из company, lead, conversation_state и
    переписки. Не придумывай цены, скидки, сроки, кейсы, клиентов, технологии,
    сотрудников, бюджет или гарантированный результат.
-3. Если подтверждённого ответа нет, задай один короткий релевантный вопрос либо
+3. Обязательно классифицируй latest_inbound в message_quality и кратко объясни
+   quality_reason. ignore допустим только для явного noise/spam/system. Неоднозначное
+   сообщение нельзя молча игнорировать: задай один вопрос либо выбери escalate.
+4. Если подтверждённого ответа нет, задай один короткий релевантный вопрос либо
    выбери escalate. Не маскируй незнание уверенным утверждением.
-4. Учитывай нишу, этап, тон, цели и ограничения workspace. Отвечай на языке
+5. Учитывай нишу, этап, тон, цели и ограничения workspace. Отвечай на языке
    собеседника. Не более одного вопроса и не длиннее max_reply_chars.
-5. При просьбе не писать выбери acknowledge_opt_out, кратко подтверди прекращение
+6. При просьбе не писать выбери acknowledge_opt_out, кратко подтверди прекращение
    общения и ничего не предлагай.
-6. При юридических, финансовых или медицинских обещаниях, конфликте, запросе
+7. При юридических, финансовых или медицинских обещаниях, конфликте, запросе
    чувствительных персональных данных, нестандартной скидке/договоре либо совпадении
    с escalation_rules выбери escalate.
-7. Решение создаёт только черновик. Не утверждай, что сообщение отправлено или
+8. Перед submit проверь: ответ прямо относится к последнему сообщению, все факты
+   подтверждены, тон соответствует настройкам, confidence отражает сомнения.
+9. Решение создаёт только черновик. Не утверждай, что сообщение отправлено или
    одобрено. Не вызывай инструменты одобрения или отправки.
-8. Если submit вернул revision_required, исправь только указанные проблемы и один
+10. Если submit вернул revision_required, исправь только указанные проблемы и один
    раз повторно отправь решение. Если исправить без домыслов нельзя — escalate.
 """.strip()
 
@@ -565,6 +579,59 @@ class ConversationAgent:
                             "detail": "This action requires a non-empty reply_text.",
                         }
                     ],
+                    "approved": False,
+                    "sent": False,
+                }
+
+            ignorable_quality = {"noise", "spam", "system"}
+            classification_issues: list[dict[str, str]] = []
+            if (
+                parsed.action == "ignore"
+                and parsed.message_quality not in ignorable_quality
+            ):
+                classification_issues.append(
+                    {
+                        "code": "unsafe_ignore",
+                        "severity": "major",
+                        "detail": (
+                            "Only clear noise, spam or system messages may be ignored; "
+                            "ask one question or escalate when meaning is uncertain."
+                        ),
+                    }
+                )
+            if (
+                parsed.message_quality in ignorable_quality
+                and parsed.action != "ignore"
+            ):
+                classification_issues.append(
+                    {
+                        "code": "noise_action_mismatch",
+                        "severity": "major",
+                        "detail": "Clear noise, spam or system messages must use action=ignore.",
+                    }
+                )
+            if parsed.message_quality == "ambiguous" and parsed.action not in {
+                "ask_question",
+                "escalate",
+            }:
+                classification_issues.append(
+                    {
+                        "code": "ambiguous_message_requires_resolution",
+                        "severity": "major",
+                        "detail": (
+                            "An ambiguous message requires one clarifying question or escalation."
+                        ),
+                    }
+                )
+            if classification_issues:
+                return {
+                    "success": False,
+                    "revision_required": True,
+                    "reason": "message_classification_conflict",
+                    "issues": classification_issues,
+                    "message": (
+                        "Reclassify the inbound message and revise once; escalate if doubt remains."
+                    ),
                     "approved": False,
                     "sent": False,
                 }

@@ -44,6 +44,7 @@ from .outreach_quality import (
     compare_whatsapp_messages,
     evaluate_whatsapp_message,
 )
+from .quality_audit import build_safe_quality_audit
 from .schemas import LeadAnalysis
 from .security import untrusted_result, validate_public_http_url
 from .website_inspector import inspect_website
@@ -543,6 +544,18 @@ def sales_get_agent_coordination(
 
 
 @_read_tool()
+def sales_get_safe_quality_audit() -> dict[str, Any]:
+    """Audit company and inbox data quality using aggregates only; never return message text."""
+    member = _current_mcp_member(minimum_role="viewer")
+    return build_safe_quality_audit(
+        crm,
+        str(member["workspace_id"]),
+        whatsapp_send_enabled=settings.allow_whatsapp_send,
+        autopilot_send_enabled=settings.allow_autopilot_send,
+    )
+
+
+@_read_tool()
 def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
     """Return exact two-chat prompts and supported scheduling boundaries."""
     member = _current_mcp_member(minimum_role="viewer")
@@ -551,9 +564,10 @@ def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
     if selected_lane not in {"all", "inbox", "prospecting"}:
         raise ValueError("lane must be all, inbox, or prospecting")
     inbox_prompt = (
-        "Use Ollum Sales as the shared system of record. Call ollum_status and "
-        "sales_get_agent_coordination; stop if SAFE mode or disabled WhatsApp sending is "
-        "not confirmed. Call sales_agent_next_action(lane='inbox'). If onboarding is "
+        "Use Ollum Sales as the shared system of record. Call ollum_status, "
+        "sales_get_agent_coordination and sales_get_safe_quality_audit; stop if SAFE mode "
+        "or disabled WhatsApp sending is not confirmed. Call "
+        "sales_agent_next_action(lane='inbox'). If onboarding is "
         "incomplete, ask only its returned questions, save explicit user facts, and stop. "
         "Otherwise prepare up to three new events with sales_prepare_conversation_batch, "
         "reason only from each bounded payload, and submit one ConversationDecision per "
@@ -561,9 +575,10 @@ def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
         "prospecting, approve, send, create follow-ups, or change send flags in this chat."
     )
     prospecting_prompt = (
-        "Use Ollum Sales as the shared system of record. Call ollum_status and "
-        "sales_get_agent_coordination; stop if SAFE mode or disabled WhatsApp sending is "
-        "not confirmed. Call sales_agent_next_action(lane='prospecting'). If onboarding "
+        "Use Ollum Sales as the shared system of record. Call ollum_status, "
+        "sales_get_agent_coordination and sales_get_safe_quality_audit; stop if SAFE mode "
+        "or disabled WhatsApp sending is not confirmed. Call "
+        "sales_agent_next_action(lane='prospecting'). If onboarding "
         "is incomplete, ask only its returned questions, save explicit user facts, and "
         "stop. Otherwise review at most three fresh companies: inspect official public "
         "evidence, analyze, save grounded analysis, score, rank, and create at most one "

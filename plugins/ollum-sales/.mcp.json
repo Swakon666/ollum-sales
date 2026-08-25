@@ -71,6 +71,9 @@
         "sales_get_agent_coordination": {
           "approval_mode": "approve"
         },
+        "sales_get_safe_quality_audit": {
+          "approval_mode": "approve"
+        },
         "sales_get_chatgpt_agent_playbook": {
           "approval_mode": "approve"
         },

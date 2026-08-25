@@ -78,6 +78,8 @@ def _decision(**overrides) -> dict:
         "stage": "qualification",
         "intent": "price",
         "sentiment": "neutral",
+        "message_quality": "actionable",
+        "quality_reason": "Клиент задаёт конкретный вопрос о стоимости.",
         "confidence": 91,
         "summary": "Клиент уточняет стоимость и состав решения.",
         "extracted_facts": [
@@ -428,6 +430,65 @@ def test_invalid_schema_and_unprepared_event_are_blocked(tmp_path, monkeypatch) 
     rejected = agent.submit_decision(workspace_id, event_id, invalid)
     assert rejected["revision_required"] is True
     assert rejected["reason"] == "invalid_decision_schema"
+    assert crm.list_outreach_drafts() == []
+
+
+def test_clear_noise_can_be_ignored_and_is_persisted(tmp_path, monkeypatch) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    _queue(crm, workspace_id, lead, "incoming-noise", "<system notice>")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
+
+    result = agent.submit_decision(
+        workspace_id,
+        event_id,
+        _decision(
+            action="ignore",
+            reply_text="",
+            message_quality="system",
+            quality_reason="Техническое уведомление без запроса клиента.",
+            confidence=98,
+            unanswered_question="",
+            next_action="Ничего не отправлять.",
+        ),
+    )
+
+    assert result["ignored"] is True
+    assert result["sent"] is False
+    assert result["event"]["decision"]["message_quality"] == "system"
+    assert crm.list_outreach_drafts() == []
+
+
+def test_ambiguous_or_actionable_message_cannot_be_silently_ignored(
+    tmp_path, monkeypatch
+) -> None:
+    crm, lead, workspace_id = _ready_crm(tmp_path)
+    event = _queue(crm, workspace_id, lead, "incoming-ambiguous", "Это про что?")
+    monkeypatch.setattr(agent_module, "list_messages", lambda **_kwargs: [])
+    agent = ConversationAgent(crm, settings)
+    event_id = _prepare_one(agent, workspace_id)
+
+    result = agent.submit_decision(
+        workspace_id,
+        event_id,
+        _decision(
+            action="ignore",
+            reply_text="",
+            message_quality="ambiguous",
+            quality_reason="Неясно, к какому предложению относится вопрос.",
+        ),
+    )
+
+    assert result["revision_required"] is True
+    assert result["reason"] == "message_classification_conflict"
+    assert {issue["code"] for issue in result["issues"]} == {
+        "unsafe_ignore",
+        "ambiguous_message_requires_resolution",
+    }
+    assert (
+        crm.get_agent_inbox_event(workspace_id, event["id"])["status"] == "processing"
+    )
     assert crm.list_outreach_drafts() == []
 
 

@@ -204,6 +204,24 @@ class TestWhatsAppService(unittest.TestCase):
         self.assertNotIn("qr_code", result)
         self.assertNotIn("must-not-leak", repr(result))
 
+    def test_pairing_status_accepts_bridge_restart_state(self) -> None:
+        with patch.object(
+            whatsapp_service.requests,
+            "get",
+            return_value=FakeResponse(
+                200,
+                {
+                    "state": "restarting",
+                    "needs_pairing": True,
+                    "has_qr": False,
+                },
+            ),
+        ):
+            result = whatsapp_service.bridge_pairing_status()
+
+        self.assertEqual(result["state"], "restarting")
+        self.assertTrue(result["needs_pairing"])
+
     def test_pairing_qr_accepts_only_bounded_png_response(self) -> None:
         png = b"\x89PNG\r\n\x1a\nimage"
         with patch.object(
