@@ -132,6 +132,23 @@ func TestNormalizedPairingQRTimeoutFallsBackForInvalidValues(t *testing.T) {
 	}
 }
 
+func TestConnectionReadyTimeoutAllowsInitialAutoReconnect(t *testing.T) {
+	if connectionReadyTimeout < pairingConnectTimeout {
+		t.Fatalf(
+			"connection readiness timeout %s must not be shorter than connect timeout %s",
+			connectionReadyTimeout,
+			pairingConnectTimeout,
+		)
+	}
+	if connectionReadyTimeout >= connectionStallTimeout {
+		t.Fatalf(
+			"connection readiness timeout %s must leave time for the %s stall watchdog",
+			connectionReadyTimeout,
+			connectionStallTimeout,
+		)
+	}
+}
+
 func TestSendMessageHandlerBlocksWhenDisabled(t *testing.T) {
 	sendCalled := false
 	w := httptest.NewRecorder()
