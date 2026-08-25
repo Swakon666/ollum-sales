@@ -224,6 +224,22 @@ def test_next_action_moves_from_interview_to_inbound_reply_without_sending(
     assert idle["external_side_effect"] is False
 
 
+def test_inbox_lane_waits_for_primary_onboarding_without_asking_questions(
+    tmp_path,
+) -> None:
+    crm = SalesCRM(tmp_path / "inbox-onboarding-gate.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+
+    action = agent_inbox.next_agent_action(crm, "ollum-group", lane="inbox")
+
+    assert action["action"] == "wait_for_primary_onboarding"
+    assert action["lane"] == "inbox"
+    assert action["blocking_reason"] == "company_onboarding_incomplete"
+    assert "onboarding" not in action
+    assert "question" not in action["instruction"].lower()
+    assert action["external_side_effect"] is False
+
+
 def test_two_chat_lanes_never_cross_responsibilities(tmp_path) -> None:
     crm = SalesCRM(tmp_path / "two-chat.db")
     crm.ensure_workspace("ollum-group", "Ollum Group")
