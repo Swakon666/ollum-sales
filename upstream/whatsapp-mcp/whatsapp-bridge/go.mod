@@ -8,6 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/mdp/qrterminal v1.0.1
 	go.mau.fi/whatsmeow v0.0.0-20260821141805-33cfac511629
+	golang.org/x/net v0.58.0
 	google.golang.org/protobuf v1.36.12
 	rsc.io/qr v0.2.0
 )
@@ -27,7 +28,6 @@ require (
 	go.mau.fi/util v0.10.1-0.20260820140024-eb612d936fde // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297 // indirect
-	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
