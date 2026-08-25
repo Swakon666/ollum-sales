@@ -143,8 +143,10 @@ mcp = FastMCP(
         "ChatGPT calls sales_search_companies through MCP; it synchronizes WhatsApp and maintains "
         "durable state, but it must never choose a search strategy, analyze or score a lead, "
         "compose outreach, classify a conversation, or draft a reply. In the primary chat, "
-        "ChatGPT chooses the vertical, region and query, calls sales_search_companies when queue "
-        "capacity permits, then consumes prospecting records with sales_analyze_lead and saves the ChatGPT "
+        "ChatGPT first calls sales_search_performance, chooses the vertical, region and query "
+        "from quality-first reward and bounded exploration, and calls sales_search_companies "
+        "when queue capacity permits. Raw and reused result volume is never a success signal. "
+        "It then consumes prospecting records with sales_analyze_lead and saves the ChatGPT "
         "decision through the dedicated analysis, scoring, ranking and draft tools. For inbound, call "
         "sales_prepare_conversation_batch for already-synced inbox work, reason strictly over "
         "each bounded payload, then call "
@@ -861,20 +863,23 @@ def sales_search_companies(
             serper_api_key=settings.serper_api_key,
             timeout=settings.company_search_timeout,
         )
-        leads = [
-            crm.upsert_lead(
+        lead_by_id: dict[str, dict[str, Any]] = {}
+        for index, result in enumerate(discovery["results"], start=1):
+            lead = crm.upsert_lead(
                 result["company_name"],
                 result["website_url"],
                 industry=industry,
                 location=location,
-                source=discovery["provider"],
+                source=str(result.get("source_provider") or discovery["provider"]),
                 campaign_id=campaign["id"],
                 source_rank=index,
             )
-            for index, result in enumerate(discovery["results"], start=1)
-        ]
+            lead_by_id.setdefault(lead["id"], lead)
+        leads = list(lead_by_id.values())
+        measured_campaign = crm.get_campaign(campaign["id"])
         campaign = crm.set_campaign_status(
-            campaign["id"], "ready" if leads else "paused"
+            campaign["id"],
+            "ready" if measured_campaign["new_unique_count"] else "paused",
         )
     except Exception:
         crm.set_campaign_status(campaign["id"], "paused")
@@ -886,8 +891,26 @@ def sales_search_companies(
             "campaign": campaign,
             "query": discovery["query"],
             "provider": discovery["provider"],
+            "providers_used": discovery.get("providers_used", [discovery["provider"]]),
+            "source_breakdown": {
+                provider: sum(
+                    1
+                    for result in discovery["results"]
+                    if result.get("source_provider", discovery["provider"]) == provider
+                )
+                for provider in discovery.get("providers_used", [discovery["provider"]])
+            },
             "requested": limit,
-            "stored": len(leads),
+            "returned": len(discovery["results"]),
+            "stored": campaign["lead_count"],
+            "new_unique": campaign["new_unique_count"],
+            "reused": campaign["reused_count"],
+            "duplicate_rate": campaign["duplicate_rate"],
+            "query_fingerprint": campaign["query_fingerprint"],
+            "reward_note": (
+                "Raw results are not rewarded. Search reward is recalculated after "
+                "fresh evidence, grounded analysis and scoring are saved."
+            ),
             "leads": leads,
             "warning": discovery["warning"],
         },
@@ -1523,6 +1546,15 @@ def sales_vertical_performance(
 ) -> list[dict[str, Any]]:
     """Compare vertical qualification, outreach, reply, meeting, and deal performance."""
     return crm.vertical_performance(since=since)
+
+
+@_read_tool()
+def sales_search_performance(
+    since: str | None = None,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Rank search strategies by grounded quality, useful novelty, and outcomes."""
+    return crm.search_performance(since=since, limit=limit)
 
 
 @_read_tool()

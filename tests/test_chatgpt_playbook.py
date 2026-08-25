@@ -29,6 +29,10 @@ def test_selected_lane_gets_its_own_scheduled_prompt() -> None:
     assert "lane='inbox'" in inbox["scheduled_prompt"]
     assert prospecting["scheduled_prompt"] != inbox["scheduled_prompt"]
     assert "sales_search_companies" in prospecting["scheduled_prompt"]
+    assert "sales_search_performance" in prospecting["scheduled_prompt"]
+    assert "new unique" in prospecting["scheduled_prompt"]
+    assert "reward" in prospecting["scheduled_prompt"]
+    assert "repeated query" in prospecting["scheduled_prompt"]
     assert (
         "do not wait for a separate operator request" in prospecting["scheduled_prompt"]
     )
@@ -45,12 +49,18 @@ def test_selected_lane_gets_its_own_scheduled_prompt() -> None:
     assert "outreach_drafting" in boundary["chatgpt_only"]
     assert "lead_analysis" in boundary["server_forbidden"]
     assert "autonomous_company_discovery" in boundary["server_forbidden"]
-    assert prospecting["prospecting_queue"]["max_pending"] == 6
+    assert prospecting["prospecting_queue"]["max_pending"] == 12
     assert (
         prospecting["prospecting_queue"]["producer"]
         == "primary_chat_chatgpt_via_sales_search_companies"
     )
     assert prospecting["prospecting_queue"]["server_autonomous_discovery"] is False
+    assert "sales_search_performance" in prospecting["tools"]
+    assert (
+        prospecting["search_optimization"]["quality_weight"]
+        > prospecting["search_optimization"]["quantity_weight"]
+    )
+    assert prospecting["search_optimization"]["raw_result_count_rewarded"] is False
 
 
 def test_first_connection_moves_from_interview_to_review_and_handoff() -> None:

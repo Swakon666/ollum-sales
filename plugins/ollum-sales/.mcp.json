@@ -170,6 +170,9 @@
         "sales_search_companies": {
           "approval_mode": "approve"
         },
+        "sales_search_performance": {
+          "approval_mode": "approve"
+        },
         "sales_send_whatsapp_draft": {
           "approval_mode": "prompt"
         },

@@ -104,7 +104,7 @@ class Settings:
         os.getenv("OLLUM_CONVERSATION_AGENT_BATCH_SIZE", "3")
     )
     chatgpt_prospecting_queue_limit: int = int(
-        os.getenv("OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT", "6")
+        os.getenv("OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT", "12")
     )
     autopilot_server_discovery_enabled: bool = _env_bool(
         "OLLUM_AUTOPILOT_SERVER_DISCOVERY_ENABLED", False

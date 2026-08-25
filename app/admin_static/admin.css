@@ -1165,12 +1165,39 @@ td small {
   font-size: 11px;
 }
 
+.campaign-yield {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 20px;
+}
+
+.campaign-yield span {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.campaign-yield b {
+  color: var(--ink);
+}
+
+.campaign-yield .is-cooldown {
+  border-color: color-mix(in srgb, var(--red) 45%, var(--line));
+  color: var(--red);
+}
+
 .campaign-stats {
   margin-top: auto;
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  padding-top: 30px;
+  padding-top: 24px;
 }
 
 .campaign-stats strong {

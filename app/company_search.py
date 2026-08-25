@@ -411,8 +411,10 @@ def search_company_websites(
             api_key=serper_api_key,
             timeout=timeout,
         )
+        results = [dict(result, source_provider="serper") for result in results]
         return {
             "provider": "serper",
+            "providers_used": ["serper"] if results else [],
             "query": query,
             "requested": limit,
             "found": len(results),
@@ -422,54 +424,92 @@ def search_company_websites(
             else "Serper returned no relevant official websites.",
         }
 
-    maps_warning: str | None = None
+    maps_query = build_maps_query(industry, location)
+    maps_results: list[dict[str, Any]] = []
+    warnings: list[str] = []
     try:
         maps_query, maps_results = _yandex_maps_results(
             industry, location, limit=limit, timeout=timeout
         )
-        if maps_results:
-            return {
-                "provider": "yandex_maps",
-                "query": maps_query,
-                "requested": limit,
-                "found": len(maps_results),
-                "results": maps_results,
-                "warning": None,
-            }
-        maps_warning = "Yandex Maps returned no official company websites."
+        maps_results = [
+            dict(result, source_provider="yandex_maps") for result in maps_results
+        ]
+        if not maps_results:
+            warnings.append("Yandex Maps returned no official company websites.")
     except requests.RequestException as exc:
-        maps_warning = f"Yandex Maps discovery failed: {type(exc).__name__}."
+        warnings.append(f"Yandex Maps discovery failed: {type(exc).__name__}.")
 
     params = {"q": query, "count": min(50, max(10, limit * 2)), "setlang": "ru-RU"}
-    response = requests.get(
-        f"{SEARCH_URL}?{urlencode(params)}",
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
-            ),
-            "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7",
-        },
-        timeout=max(5, min(int(timeout), 60)),
-    )
-    response.raise_for_status()
-    parsed_results = parse_bing_results(response.text, limit=max(limit * 2, 10))
-    results = [
-        result for result in parsed_results if _is_relevant_result(result, tokens)
-    ][:limit]
+    bing_results: list[dict[str, Any]] = []
+    try:
+        response = requests.get(
+            f"{SEARCH_URL}?{urlencode(params)}",
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                ),
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.7",
+            },
+            timeout=max(5, min(int(timeout), 60)),
+        )
+        response.raise_for_status()
+        parsed_results = parse_bing_results(response.text, limit=max(limit * 2, 10))
+        bing_results = [
+            dict(result, source_provider="bing_html")
+            for result in parsed_results
+            if _is_relevant_result(result, tokens)
+        ]
+        if not bing_results:
+            warnings.append("Bing returned no relevant official websites.")
+    except requests.RequestException as exc:
+        warnings.append(f"Bing discovery failed: {type(exc).__name__}.")
+
+    # Interleave independent providers so one directory cannot monopolize the
+    # queue. When both providers found a domain, prefer Maps' structured company
+    # record before interleaving the remaining unique web results.
+    maps_websites = {str(result.get("website_url") or "") for result in maps_results}
+    bing_results = [
+        result
+        for result in bing_results
+        if str(result.get("website_url") or "") not in maps_websites
+    ]
+    results: list[dict[str, Any]] = []
+    seen_websites: set[str] = set()
+    for index in range(max(len(maps_results), len(bing_results))):
+        for source_results in (maps_results, bing_results):
+            if index >= len(source_results):
+                continue
+            result = source_results[index]
+            website_url = str(result.get("website_url") or "")
+            if not website_url or website_url in seen_websites:
+                continue
+            seen_websites.add(website_url)
+            results.append(result)
+            if len(results) >= limit:
+                break
+        if len(results) >= limit:
+            break
+
+    providers_used = [
+        provider
+        for provider in ("yandex_maps", "bing_html")
+        if any(result["source_provider"] == provider for result in results)
+    ]
+    provider = "+".join(providers_used) or "yandex_maps+bing_html"
+    warning = "; ".join(warnings) or None
+    if not results:
+        warning = (f"{' '.join(warnings)} " if warnings else "") + (
+            "No relevant official websites were found. Configure SERPER_API_KEY "
+            "or import agent-discovered candidates with sales_import_leads."
+        )
     return {
-        "provider": "bing_html",
+        "provider": provider,
+        "providers_used": providers_used,
         "query": query,
+        "provider_queries": {"yandex_maps": maps_query, "bing_html": query},
         "requested": limit,
         "found": len(results),
         "results": results,
-        "warning": (
-            None
-            if results
-            else (
-                f"{maps_warning or ''} Bing returned no relevant official websites. "
-                "Configure SERPER_API_KEY or import agent-discovered candidates with "
-                "sales_import_leads."
-            )
-        ),
+        "warning": warning,
     }

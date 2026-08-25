@@ -75,6 +75,8 @@ def test_codex_plugin_skill_preserves_chatgpt_brain_and_two_step_send() -> None:
     assert skill == canonical_skill
     assert "sales_prepare_conversation_batch" in skill
     assert "sales_submit_conversation_decision" in skill
+    assert "sales_search_performance" in skill
+    assert "Raw results" in skill
     assert 'sales_agent_next_action(lane="inbox")' in skill
     assert 'sales_agent_next_action(lane="prospecting")' in skill
     assert "two separate ChatGPT chats" in skill

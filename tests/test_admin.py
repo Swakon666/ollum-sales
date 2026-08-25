@@ -638,7 +638,7 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     assert payload["plugin"]["brain"] == "ChatGPT through Ollum Sales MCP"
     assert payload["plugin"]["server_llm_enabled"] is False
     assert payload["plugin"]["server_sync_interval_minutes"] == 15
-    assert payload["plugin"]["prospecting_queue"]["max_pending"] == 6
+    assert payload["plugin"]["prospecting_queue"]["max_pending"] == 12
     assert payload["plugin"]["reasoning_boundary"]["server_llm_api"] is False
     assert "lead_analysis" in payload["plugin"]["reasoning_boundary"]["chatgpt_only"]
     assert payload["plugin"]["recommended_chatgpt_schedule"] == "hourly_in_chat"
@@ -647,6 +647,20 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     assert "lane='prospecting'" in payload["plugin"]["scheduled_prompts"]["prospecting"]
     assert payload["plugin"]["chat_handoff"]["primary_chat"]["lane"] == "prospecting"
     assert payload["plugin"]["chat_handoff"]["monitoring_chat"]["lane"] == "inbox"
+    assert payload["search_performance"]["reward_contract"] == {
+        "quality_weight": 0.8,
+        "quantity_weight": 0.2,
+        "raw_result_count_rewarded": False,
+        "quantity_basis": "new unique leads with fresh evidence, grounded analysis and score",
+        "anti_gaming": [
+            "duplicate and reused results are penalized",
+            "repeated query fingerprints are penalized",
+            "zero-new searches are penalized and cooled down",
+            "small samples are shrunk toward a neutral prior",
+            "outcomes stay neutral until real outreach exists",
+            "source diversity is measured but cannot outweigh lead quality",
+        ],
+    }
 
 
 def test_oauth_stylesheet_is_served_from_one_public_route(admin_client) -> None:

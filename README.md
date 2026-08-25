@@ -42,11 +42,11 @@ audited compatibility/security adapters that cannot live outside the vendored se
 
 ## What the MCP exposes
 
-The server exposes 68 tools. Existing tools remain compatible, plus
+The server exposes 72 tools. Existing tools remain compatible, plus
 `ollum_whoami` reports the current OAuth workspace identity and role without exposing
 tokens or private conversation data:
 
-- campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
+- campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_search_performance`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_record_company_onboarding_answer`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding` with exact revision/hash confirmation;
 - closed-beta test resets: owner-only `sales_reset_prospecting_data` first returns aggregate counts, then requires an exact-count destructive confirmation, creates a restorable SQLite backup, and preserves company memory, OAuth, WhatsApp inbox/session state, inbound contacts, and vertical definitions;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_retry_agent_inbox_event`, `sales_agent_next_action` with isolated `inbox` and `prospecting` lanes;
@@ -59,7 +59,7 @@ tokens or private conversation data:
 - Autopilot: `autopilot_start`, `autopilot_stop`, `autopilot_status`, `autopilot_run_cycle`;
 - verticals: `vertical_create`, `vertical_list`, `vertical_update`;
 - Google Sheets: `google_sheets_sync`, `google_sheets_status`;
-- reports: `sales_daily_report`, `sales_vertical_performance`, `sales_conversion_report`.
+- reports: `sales_daily_report`, `sales_vertical_performance`, `sales_search_performance`, `sales_conversion_report`.
 
 `ollum_status` reports runtime readiness and CRM counts without exposing secrets.
 
@@ -150,7 +150,7 @@ CRM SQLite volume   website evidence        +--> Google Sheets panel
 cp .env.example .env
 ```
 
-2. Optionally add `SERPER_API_KEY` to `.env`. No LLM API key is accepted or required. Website evidence is returned to ChatGPT through MCP for grounded analysis. Without Serper, company search uses a best-effort public fallback and ChatGPT can import separately verified candidates.
+2. Optionally add `SERPER_API_KEY` to `.env`. No LLM API key is accepted or required. Website evidence is returned to ChatGPT through MCP for grounded analysis. Without Serper, each bounded search blends Yandex Maps and Bing public-web results, interleaves the sources and removes cross-source domain duplicates; ChatGPT can also import separately verified candidates.
 
 3. Build:
 
@@ -245,8 +245,14 @@ start unless all of these are true:
 
 The worker polls WhatsApp and synchronizes durable state every 15 minutes. With the safe default
 `OLLUM_AUTOPILOT_SERVER_DISCOVERY_ENABLED=false`, it never starts company discovery itself. The
-hourly ChatGPT task calls `sales_search_companies` only while the pending prospecting queue remains
-below `OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT` (six by default), so discovery remains reasoned and bounded.
+hourly ChatGPT task first calls `sales_search_performance`, then calls `sales_search_companies` only
+while the pending prospecting queue remains below `OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT` (twelve by
+default), so discovery remains reasoned and bounded. Search reward is 80% grounded quality and 20%
+useful quantity. Quantity counts only new unique leads with fresh evidence, grounded analysis and a
+score; raw results and reused companies earn no volume reward. Duplicate-heavy, zero-new and repeated
+queries are penalized, small samples are shrunk toward a neutral prior, and untested enabled verticals
+receive a bounded exploration bonus. Provider diversity is reported as a small quality component,
+but can never outweigh grounded lead quality or turn raw search volume into success.
 
 The worker never generates a reply. The primary ChatGPT chat completes fact-only onboarding and then
 calls `sales_agent_next_action(lane="prospecting")`; it cannot consume inbox work. After confirmation,
