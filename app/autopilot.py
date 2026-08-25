@@ -29,6 +29,7 @@ class SettingsLike(Protocol):
     autopilot_score_threshold: int
     autopilot_min_training_leads: int
     chatgpt_prospecting_queue_limit: int
+    autopilot_server_discovery_enabled: bool
     allow_autopilot_send: bool
     allow_whatsapp_send: bool
 
@@ -91,6 +92,9 @@ class AutopilotService:
         queue_limit = max(
             1, int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 6))
         )
+        server_discovery_enabled = bool(
+            getattr(self.settings, "autopilot_server_discovery_enabled", False)
+        )
         return {
             **state,
             "reasoning_engine": "chatgpt_mcp_only",
@@ -102,6 +106,12 @@ class AutopilotService:
                 self.crm.count_pending_chatgpt_prospecting_leads()
             ),
             "chatgpt_prospecting_queue_limit": queue_limit,
+            "server_discovery_enabled": server_discovery_enabled,
+            "discovery_controller": (
+                "server_autopilot"
+                if server_discovery_enabled
+                else "chatgpt_scheduled_task"
+            ),
             "minimum_training_leads_for_non_safe": self.settings.autopilot_min_training_leads,
             "non_safe_send_flag": self.settings.allow_autopilot_send,
             "whatsapp_send_flag": self.settings.allow_whatsapp_send,
@@ -110,9 +120,10 @@ class AutopilotService:
             ),
             "google_sheets": self.sheets.status(),
             "safe_behavior": (
-                "SAFE collects and inspects public evidence, queues bounded work for "
-                "ChatGPT, synchronizes state, and enforces safety. The server never "
-                "analyzes, scores, drafts, sends, or executes follow-ups."
+                "SAFE synchronizes state and enforces safety. Company discovery strategy "
+                "belongs to ChatGPT; the server executes bounded public search and website "
+                "inspection only after sales_search_companies is called through MCP. It "
+                "never analyzes, scores, drafts, sends, or executes follow-ups."
             ),
         }
 
@@ -270,6 +281,7 @@ class AutopilotService:
             "queue_after": 0,
             "queue_limit": 0,
             "discovery_skipped_queue_full": 0,
+            "discovery_skipped_chatgpt_directed": 0,
             "analyzed": 0,
             "qualified": 0,
             "drafts_created": 0,
@@ -520,7 +532,13 @@ class AutopilotService:
             queue_before = self.crm.count_pending_chatgpt_prospecting_leads()
             metrics["queue_before"] = queue_before
             metrics["queue_limit"] = queue_limit
-            if queue_before >= queue_limit:
+            server_discovery_enabled = bool(
+                getattr(self.settings, "autopilot_server_discovery_enabled", False)
+            )
+            if not server_discovery_enabled:
+                verticals = []
+                metrics["discovery_skipped_chatgpt_directed"] = 1
+            elif queue_before >= queue_limit:
                 verticals: list[dict[str, Any]] = []
                 metrics["discovery_skipped_queue_full"] = 1
             else:

@@ -12,7 +12,7 @@ def reasoning_boundary() -> dict[str, Any]:
     return {
         "server_llm_api": False,
         "server_only": [
-            "public_fact_collection",
+            "public_search_execution",
             "deduplication",
             "website_inspection",
             "bounded_queue",
@@ -22,6 +22,10 @@ def reasoning_boundary() -> dict[str, Any]:
             "safety_enforcement",
         ],
         "chatgpt_only": [
+            "search_strategy",
+            "vertical_selection",
+            "query_formulation",
+            "candidate_selection",
             "lead_analysis",
             "lead_scoring",
             "outreach_drafting",
@@ -29,6 +33,9 @@ def reasoning_boundary() -> dict[str, Any]:
             "reply_drafting",
         ],
         "server_forbidden": [
+            "autonomous_company_discovery",
+            "search_strategy",
+            "query_formulation",
             "lead_analysis",
             "lead_scoring",
             "outreach_drafting",
@@ -49,12 +56,19 @@ def lane_prompts() -> dict[str, str]:
         "save only explicit user facts or bounded file summaries, and persist an explicit "
         "not-applicable answer when the operator says there is no site, customer proof or "
         "active client. Then show the returned factual review and confirm its exact revision "
-        "and summary hash. After onboarding is confirmed, process at most three fresh "
-        "unreviewed companies already queued by the server: call sales_analyze_lead, reason "
-        "only from its bounded facts and evidence URLs, save grounded analysis, score, rank, "
-        "and create at most one personalized draft per qualified lead without a current "
-        "draft. Call sales_search_companies only after an explicit operator request, never "
-        "as part of scheduled work. Never inspect the inbound queue, "
+        "and summary hash. After onboarding is confirmed, ChatGPT owns the discovery "
+        "strategy. Inspect aggregate coordination, recent campaigns and vertical performance; "
+        "choose one relevant vertical and region from confirmed company facts and verified "
+        "outcomes, then formulate one specific public-web search hypothesis. When fewer than "
+        "three fresh unreviewed companies are available and the bounded queue is below its "
+        "limit, call sales_search_companies once with a limit of at most five; do not wait for "
+        "a separate operator request. Reject directories, aggregators, social profiles and "
+        "unrelated results. If the search yields no relevant official websites, revise the "
+        "query once using the observed failure, then stop searching for this run. Process at "
+        "most three fresh unreviewed companies: call sales_analyze_lead, reason only from its "
+        "bounded facts and evidence URLs, save grounded analysis, score, rank, and create at "
+        "most one personalized draft per qualified lead without a current draft. Never inspect "
+        "the inbound queue, "
         "approve, send, create follow-ups, or change send flags in this chat. Finish with "
         "aggregate statistics and the top five without private message text."
     )
@@ -200,10 +214,12 @@ def build_chatgpt_agent_playbook(
         "api_key_required": False,
         "reasoning_boundary": reasoning_boundary(),
         "prospecting_queue": {
-            "producer": "server_public_fact_collector",
+            "producer": "primary_chat_chatgpt_via_sales_search_companies",
             "consumer": "primary_chat_chatgpt",
             "max_pending": max(1, int(prospecting_queue_limit)),
-            "backpressure": "pause_discovery_when_full",
+            "backpressure": "skip_search_when_pending_at_limit",
+            "server_autonomous_discovery": False,
+            "server_role": "execute_bounded_search_and_inspection_after_mcp_tool_call",
         },
         "tenant_mode": "single_company_closed_beta",
         "external_tenant_onboarding_supported": False,
@@ -239,6 +255,15 @@ def build_chatgpt_agent_playbook(
             "sales_get_agent_coordination",
             "sales_get_safe_quality_audit",
             "sales_agent_next_action",
+            "sales_search_companies",
+            "sales_list_campaigns",
+            "vertical_list",
+            "sales_vertical_performance",
+            "sales_analyze_lead",
+            "sales_save_analysis",
+            "sales_score_lead",
+            "sales_rank_leads",
+            "sales_save_outreach_draft",
             "sales_get_conversation_agent_status",
             "sales_prepare_conversation_batch",
             "sales_submit_conversation_decision",

@@ -24,7 +24,7 @@ Use two separate ChatGPT chats connected to the same Ollum Sales MCP account. Th
 ### Chat 1 — Setup and prospecting
 
 1. Call `sales_agent_next_action(lane="prospecting")`. This lane may return onboarding or lead work only and must never inspect or process the inbound queue.
-2. Create a campaign with `sales_search_companies`, or use `sales_create_campaign` plus `sales_import_leads` for verified candidates found through agent research.
+2. ChatGPT owns discovery strategy. Review recent campaigns and outcomes, choose one relevant vertical, region and grounded query, then create a campaign with `sales_search_companies`; scheduled work does not wait for a separate operator request when the bounded queue has capacity. Use `sales_create_campaign` plus `sales_import_leads` only for verified candidates found through agent research.
 3. Verify official public websites. Reject directories, aggregators, social profiles, and unrelated results.
 4. For each fresh lead, call `sales_analyze_lead`. Analyze only returned evidence and persist the exact grounded `LeadAnalysis` with `sales_save_analysis`.
 5. Refine fit, need, budget, timing, or confidence with `sales_score_lead` only when evidence justifies it, then call `sales_rank_leads`.
@@ -42,9 +42,9 @@ After the factual onboarding summary is explicitly confirmed, keep this chat for
 5. If an event is unmatched, call `sales_link_agent_inbox_lead` only when confirmed contact facts identify one existing lead. Never guess.
 6. Report counts, drafts, SLA risk, and escalations without quoting private messages. Never perform lead discovery in this chat.
 
-Use the exact prompts returned by `sales_get_chatgpt_agent_playbook`. The server synchronizes WhatsApp every 15 minutes. A normal dormant ChatGPT chat cannot be awakened by MCP; run each ChatGPT task hourly or on demand and stagger the two chats when useful.
+Use the exact prompts returned by `sales_get_chatgpt_agent_playbook`. The server synchronizes WhatsApp every 15 minutes and executes bounded public search only after ChatGPT calls `sales_search_companies`; it does not autonomously choose companies or queries. A normal dormant ChatGPT chat cannot be awakened by MCP; run each ChatGPT task hourly or on demand and stagger the two chats when useful.
 
-Treat the reasoning boundary as an invariant. The autonomous server worker may discover and deduplicate public companies, inspect official evidence, synchronize sources, and fill a bounded queue. It must never initiate lead analysis or scoring, compose outreach, classify inbound messages, or draft replies. MCP may mechanically validate and persist an explicit ChatGPT tool decision, but never originate it. The primary ChatGPT chat consumes the prospecting queue; the WhatsApp monitoring chat consumes the inbox queue. Any autonomous server-side semantic decision is a defect, even in SAFE mode.
+Treat the reasoning boundary as an invariant. The server worker may synchronize sources and maintain durable queues, but it must not autonomously choose a vertical, query, or company. After ChatGPT calls `sales_search_companies`, MCP may execute bounded public retrieval, deduplication and inspection, then mechanically validate and persist the explicit ChatGPT decisions. It must never initiate lead analysis or scoring, compose outreach, classify inbound messages, or draft replies. The primary ChatGPT chat controls prospecting; the WhatsApp monitoring chat consumes the inbox queue. Any autonomous server-side search strategy or semantic decision is a defect, even in SAFE mode.
 
 ## Durable learning
 

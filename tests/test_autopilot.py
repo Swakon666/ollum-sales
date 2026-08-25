@@ -37,6 +37,7 @@ def settings(**overrides: object) -> SimpleNamespace:
         "autopilot_score_threshold": 60,
         "autopilot_min_training_leads": 100,
         "chatgpt_prospecting_queue_limit": 6,
+        "autopilot_server_discovery_enabled": True,
         "allow_autopilot_send": False,
         "allow_whatsapp_send": False,
     }
@@ -242,6 +243,37 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(metrics["queue_limit"], 2)
         self.assertEqual(metrics["discovery_skipped_queue_full"], 1)
         self.assertEqual(metrics["queued_for_chatgpt"], 0)
+
+    def test_chatgpt_directed_mode_never_runs_server_discovery(self) -> None:
+        self.crm.create_vertical(
+            "ventilation", region="Moscow", daily_target=5, min_score=60
+        )
+        discover_calls = 0
+
+        def discoverer(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal discover_calls
+            discover_calls += 1
+            raise AssertionError("scheduled server discovery must remain disabled")
+
+        sheets = FakeSheets()
+        service = AutopilotService(
+            self.crm,
+            settings(autopilot_server_discovery_enabled=False),
+            sheets,
+            discoverer=discoverer,
+        )
+        self.assertTrue(service.start(mode="safe")["success"])
+        result = service.run_cycle(force=True)
+
+        self.assertTrue(result["success"])
+        metrics = result["cycle"]["metrics"]
+        self.assertEqual(discover_calls, 0)
+        self.assertEqual(metrics["discovery_skipped_chatgpt_directed"], 1)
+        self.assertEqual(metrics["queued_for_chatgpt"], 0)
+        self.assertEqual(sheets.sync_calls, 1)
+        status = service.status()
+        self.assertFalse(status["server_discovery_enabled"])
+        self.assertEqual(status["discovery_controller"], "chatgpt_scheduled_task")
 
     def test_autopilot_retries_transient_discovery_idempotently(self) -> None:
         self.crm.create_vertical(

@@ -28,17 +28,29 @@ def test_selected_lane_gets_its_own_scheduled_prompt() -> None:
     assert "lane='inbox'" not in prospecting["scheduled_prompt"]
     assert "lane='inbox'" in inbox["scheduled_prompt"]
     assert prospecting["scheduled_prompt"] != inbox["scheduled_prompt"]
-    assert "already queued by the server" in prospecting["scheduled_prompt"]
-    assert "explicit operator request" in prospecting["scheduled_prompt"]
+    assert "sales_search_companies" in prospecting["scheduled_prompt"]
+    assert (
+        "do not wait for a separate operator request" in prospecting["scheduled_prompt"]
+    )
+    assert "already queued by the server" not in prospecting["scheduled_prompt"]
+    assert "never as part of scheduled work" not in prospecting["scheduled_prompt"]
 
     boundary = prospecting["reasoning_boundary"]
     assert boundary["server_llm_api"] is False
-    assert "public_fact_collection" in boundary["server_only"]
+    assert "public_search_execution" in boundary["server_only"]
+    assert "search_strategy" in boundary["chatgpt_only"]
+    assert "query_formulation" in boundary["chatgpt_only"]
     assert "lead_analysis" in boundary["chatgpt_only"]
     assert "lead_scoring" in boundary["chatgpt_only"]
     assert "outreach_drafting" in boundary["chatgpt_only"]
     assert "lead_analysis" in boundary["server_forbidden"]
+    assert "autonomous_company_discovery" in boundary["server_forbidden"]
     assert prospecting["prospecting_queue"]["max_pending"] == 6
+    assert (
+        prospecting["prospecting_queue"]["producer"]
+        == "primary_chat_chatgpt_via_sales_search_companies"
+    )
+    assert prospecting["prospecting_queue"]["server_autonomous_discovery"] is False
 
 
 def test_first_connection_moves_from_interview_to_review_and_handoff() -> None:
