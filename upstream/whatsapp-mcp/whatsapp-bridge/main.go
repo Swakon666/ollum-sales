@@ -232,6 +232,7 @@ type PairingState struct {
 
 const (
 	pairingConnectTimeout    = 30 * time.Second
+	connectionReadyTimeout   = 30 * time.Second
 	pairingFirstEventTimeout = 45 * time.Second
 	pairingFallbackQRTimeout = 20 * time.Second
 	pairingMaxQRTimeout      = 2 * time.Minute
@@ -1270,6 +1271,10 @@ func main() {
 			pairingState.update("connected", false, "", time.Time{})
 			logger.Infof("Connected to WhatsApp")
 
+		case *events.Disconnected:
+			pairingState.update("reconnecting", client.Store.ID == nil, "", time.Time{})
+			logger.Warnf("WhatsApp connection interrupted; automatic reconnect is running")
+
 		case *events.LoggedOut:
 			pairingState.update("restarting", true, "", time.Time{})
 			logger.Warnf("Device logged out; restarting bridge to request a fresh QR code")
@@ -1432,12 +1437,14 @@ func main() {
 		}
 	}
 
-	// Wait a moment for connection to stabilize
-	time.Sleep(2 * time.Second)
-
-	if !client.IsConnected() {
-		logger.Errorf("Failed to establish stable connection")
-		return
+	// ConnectContext may return nil after scheduling Whatsmeow's initial
+	// automatic reconnect. Keep the REST API and QR surface alive while that
+	// reconnect runs instead of exiting after a brittle two-second snapshot.
+	if client.WaitForConnection(connectionReadyTimeout) {
+		pairingState.update("connected", false, "", time.Time{})
+	} else {
+		pairingState.update("reconnecting", client.Store.ID == nil, "", time.Time{})
+		logger.Warnf("Initial WhatsApp connection is still unavailable; keeping bridge online while automatic reconnect continues")
 	}
 
 	// Whatsmeow normally reconnects on its own. If the bridge remains detached
