@@ -71,6 +71,31 @@ def test_server_preflight_is_scoped_and_reports_capacity() -> None:
     assert "ss -lntup" not in preflight
 
 
+def test_prospecting_reset_workflow_requires_exact_counts_and_backup() -> None:
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
+        encoding="utf-8"
+    )
+    reset = (REPOSITORY_ROOT / "deploy" / "reset_prospecting.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "- reset-prospecting" in workflow
+    assert (
+        "RESET ${RESET_PROSPECTING_LEADS} ${RESET_CAMPAIGNS} "
+        "PRESERVE ${RESET_INBOX_EVENTS}"
+    ) in workflow
+    assert "Reset approved prospecting data with a restorable backup" in workflow
+    assert "crm.preview_prospecting_reset()" in reset
+    assert "crm.reset_prospecting_data(" in reset
+    assert "if settings.allow_whatsapp_send or settings.allow_autopilot_send:" in reset
+    assert 'if preview["inbox_events"] != expected_inbox:' in reset
+    assert 'if not onboarding["sales_ready"]:' in reset
+    assert '"restorable": result["restorable"]' in reset
+    assert "docker compose down" not in reset
+    assert "docker compose restart" not in reset
+    assert "docker system prune" not in reset
+
+
 def test_public_verification_uses_local_oauth_issuer_when_dcr_is_enabled() -> None:
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"

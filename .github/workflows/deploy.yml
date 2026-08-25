@@ -20,6 +20,7 @@ on:
           - verify-autopilot
           - verify-whatsapp
           - report-autopilot
+          - reset-prospecting
           - connect-whatsapp
           - deploy-whatsapp-prebuilt
           - rollback-whatsapp
@@ -57,6 +58,22 @@ on:
         required: false
       whatsapp_prebuilt_sha256:
         description: Expected SHA-256 of the prebuilt WhatsApp binary asset
+        type: string
+        required: false
+      reset_prospecting_leads:
+        description: Exact prospecting lead count from the approved reset preview
+        type: string
+        required: false
+      reset_campaigns:
+        description: Exact campaign count from the approved reset preview
+        type: string
+        required: false
+      reset_inbox_events:
+        description: Exact inbound event count that must be preserved
+        type: string
+        required: false
+      reset_confirmation:
+        description: Exact phrase RESET <leads> <campaigns> PRESERVE <inbox>
         type: string
         required: false
 
@@ -126,6 +143,10 @@ jobs:
       WHATSAPP_PREBUILT_RELEASE_TAG: ${{ inputs.whatsapp_prebuilt_release_tag }}
       WHATSAPP_PREBUILT_ASSET_NAME: ${{ inputs.whatsapp_prebuilt_asset_name }}
       WHATSAPP_PREBUILT_SHA256: ${{ inputs.whatsapp_prebuilt_sha256 }}
+      RESET_PROSPECTING_LEADS: ${{ inputs.reset_prospecting_leads }}
+      RESET_CAMPAIGNS: ${{ inputs.reset_campaigns }}
+      RESET_INBOX_EVENTS: ${{ inputs.reset_inbox_events }}
+      RESET_CONFIRMATION: ${{ inputs.reset_confirmation }}
 
     steps:
       - name: Check out repository
@@ -200,6 +221,25 @@ jobs:
             [[ "$WHATSAPP_PREBUILT_RELEASE_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'Invalid WhatsApp prebuilt release tag' >&2; exit 1; }
             [[ "$WHATSAPP_PREBUILT_ASSET_NAME" =~ ^[A-Za-z0-9._-]+$ ]] || { echo 'Invalid WhatsApp prebuilt asset name' >&2; exit 1; }
             [[ "$WHATSAPP_PREBUILT_SHA256" =~ ^[A-Fa-f0-9]{64}$ ]] || { echo 'Invalid WhatsApp prebuilt SHA-256' >&2; exit 1; }
+          fi
+          if [ "$DEPLOY_MODE" = reset-prospecting ]; then
+            [[ "${RESET_PROSPECTING_LEADS:-}" =~ ^[0-9]+$ ]] || {
+              echo 'reset_prospecting_leads must be an exact non-negative integer' >&2
+              exit 1
+            }
+            [[ "${RESET_CAMPAIGNS:-}" =~ ^[0-9]+$ ]] || {
+              echo 'reset_campaigns must be an exact non-negative integer' >&2
+              exit 1
+            }
+            [[ "${RESET_INBOX_EVENTS:-}" =~ ^[0-9]+$ ]] || {
+              echo 'reset_inbox_events must be an exact non-negative integer' >&2
+              exit 1
+            }
+            expected_confirmation="RESET ${RESET_PROSPECTING_LEADS} ${RESET_CAMPAIGNS} PRESERVE ${RESET_INBOX_EVENTS}"
+            [ "${RESET_CONFIRMATION:-}" = "$expected_confirmation" ] || {
+              echo 'reset_confirmation does not match the exact approved counts' >&2
+              exit 1
+            }
           fi
           [[ "$SSH_PORT" =~ ^[0-9]{2,5}$ ]] || { echo 'Invalid SSH port' >&2; exit 1; }
           [[ "$SSH_USER" =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo 'Invalid SSH user' >&2; exit 1; }
@@ -831,6 +871,23 @@ jobs:
             -p "$SSH_PORT" \
             "$SSH_USER@$SSH_HOST" \
             "sudo -S -p '' bash -s -- '$SSH_USER'"
+
+      - name: Reset approved prospecting data with a restorable backup
+        if: ${{ env.DEPLOY_MODE == 'reset-prospecting' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            printf '%s\n' "$SSH_PASSWORD"
+            cat deploy/reset_prospecting.sh
+          } | sshpass -e ssh \
+            -o BatchMode=no \
+            -o ConnectTimeout=20 \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "sudo -S -p '' bash -s -- '$SSH_USER' '$RESET_PROSPECTING_LEADS' '$RESET_CAMPAIGNS' '$RESET_INBOX_EVENTS' '$RESET_CONFIRMATION'"
 
       - name: Connect WhatsApp with a one-time QR code
         if: ${{ env.DEPLOY_MODE == 'connect-whatsapp' }}
