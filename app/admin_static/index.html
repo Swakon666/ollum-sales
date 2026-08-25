@@ -108,7 +108,21 @@
             <div><p class="eyebrow">Agent memory</p><h2>Профиль компании</h2><p class="muted">Единая память для ChatGPT, кабинета, scoring и персональных ответов.</p></div>
             <span class="readiness-badge" id="onboarding-readiness">Не заполнено</span>
           </div>
-          <div class="onboarding-progress" aria-label="Прогресс настройки"><span id="onboarding-progress-bar"></span></div>
+          <div class="onboarding-progress" id="onboarding-progress" role="progressbar" aria-label="Прогресс настройки" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span id="onboarding-progress-bar"></span></div>
+          <article class="card setup-card" aria-live="polite">
+            <div class="card-header"><div><p class="eyebrow">First run</p><h3>Один следующий шаг</h3></div><span class="readiness-badge" id="setup-current-step">Проверка…</span></div>
+            <p class="setup-next-action" id="setup-next-action">Определяем состояние подключения.</p>
+            <div class="setup-journey" id="setup-journey"></div>
+          </article>
+          <article class="card onboarding-review-card" id="onboarding-review-card">
+            <div class="card-header"><div><p class="eyebrow">Factual review</p><h3>Проверка перед запуском</h3></div><span class="timestamp" id="onboarding-review-revision">—</span></div>
+            <p class="muted">Проверьте сводку: подтверждение привязывается к её точной версии и автоматически сбрасывается после любого изменения.</p>
+            <pre class="review-summary" id="onboarding-review-summary">Сначала заполните обязательные факты.</pre>
+            <form id="onboarding-confirm-form" class="confirm-review-form">
+              <label class="check-row"><input id="onboarding-confirm-check" type="checkbox" required> Я проверил факты и подтверждаю эту версию профиля</label>
+              <button class="primary-button" id="onboarding-confirm-button" type="submit">Подтвердить профиль</button>
+            </form>
+          </article>
           <div class="dashboard-grid company-workspace">
             <article class="card span-2">
               <div class="card-header"><div><p class="eyebrow">Profile</p><h3>Основные параметры</h3></div><span class="timestamp" id="company-profile-updated">—</span></div>
@@ -151,13 +165,13 @@
           <div class="agent-lanes-grid" aria-label="Два рабочих чата ChatGPT">
             <article class="card agent-lane-card">
               <div class="lane-number">Чат 01</div>
-              <div><p class="eyebrow">Inbound lane</p><h3>Входящие</h3><p>Читает только новые обращения, ведёт память диалога и готовит ответы. Поиск компаний сюда не попадает.</p></div>
-              <dl><div><dt>Ждут ChatGPT</dt><dd id="agent-lane-inbox-waiting">0</dd></div><div><dt>Эскалации</dt><dd id="agent-lane-inbox-review">0</dd></div><div><dt>SLA</dt><dd id="agent-lane-inbox-sla">0</dd></div></dl>
+              <div><p class="eyebrow">Primary lane</p><h3>Настройка и новые компании</h3><p>Сначала проводит интервью и собирает память компании, затем проверяет сайты, оценивает лиды и готовит первые черновики. Входящие сюда не попадают.</p></div>
+              <dl><div><dt>Не проверены</dt><dd id="agent-lane-prospecting-new">0</dd></div><div><dt>Qualified</dt><dd id="agent-lane-prospecting-qualified">0</dd></div><div><dt>Черновики</dt><dd id="agent-lane-prospecting-drafts">0</dd></div></dl>
             </article>
             <article class="card agent-lane-card">
               <div class="lane-number">Чат 02</div>
-              <div><p class="eyebrow">Prospecting lane</p><h3>Новые компании</h3><p>Проверяет сайты, анализирует, оценивает и создаёт первые черновики. Входящие сообщения не забирает.</p></div>
-              <dl><div><dt>Не проверены</dt><dd id="agent-lane-prospecting-new">0</dd></div><div><dt>Qualified</dt><dd id="agent-lane-prospecting-qualified">0</dd></div><div><dt>Черновики</dt><dd id="agent-lane-prospecting-drafts">0</dd></div></dl>
+              <div><p class="eyebrow">Monitoring lane</p><h3>WhatsApp</h3><p>Читает только новые обращения, ведёт память диалога и готовит ответы. Поиск компаний сюда не попадает.</p></div>
+              <dl><div><dt>Ждут ChatGPT</dt><dd id="agent-lane-inbox-waiting">0</dd></div><div><dt>Эскалации</dt><dd id="agent-lane-inbox-review">0</dd></div><div><dt>SLA</dt><dd id="agent-lane-inbox-sla">0</dd></div></dl>
             </article>
           </div>
 
@@ -317,9 +331,14 @@
         <section class="view" data-panel="plugin" data-section="10">
           <div class="section-heading"><div><p class="eyebrow">ChatGPT</p><h2>GPT-плагин</h2><p class="muted">OAuth 2.1 + PKCE, HTTPS и MCP Streamable HTTP.</p></div><span class="readiness-badge" id="plugin-readiness">Проверка…</span></div>
           <div class="dashboard-grid">
+            <article class="card span-3">
+              <div class="card-header"><div><p class="eyebrow">Two-chat setup</p><h3>Основной чат и WhatsApp-мониторинг</h3></div><span class="safety-chip">Manual handoff</span></div>
+              <p class="muted">MCP не может создать или переименовать чат автоматически. Скопируйте точный промпт в два чата одного Project.</p>
+              <div class="chat-handoff-grid" id="chat-handoff-grid"></div>
+            </article>
             <article class="card span-2"><div class="card-header"><div><p class="eyebrow">Connection</p><h3>Параметры подключения</h3></div></div><div class="copy-fields" id="plugin-fields"></div></article>
             <article class="card"><div class="card-header"><div><p class="eyebrow">Readiness</p><h3>Чек-лист</h3></div></div><div class="safety-list" id="plugin-checks"></div></article>
-            <article class="card span-3 notice-card"><strong>Закрытое тестирование</strong><p>Добавляйте плагин только в Developer mode. Доступ выдаётся через OIDC allowlist; каждый вызов MCP проверяет подпись, issuer, audience, срок действия и scopes.</p></article>
+            <article class="card span-3 notice-card"><strong>Закрытое тестирование · одна компания</strong><p>Текущая beta использует одно общее рабочее пространство Ollum Group. Приглашённые участники видят данные этой же компании; изолированное подключение внешних компаний будет включено только после отдельной multi-tenant миграции.</p></article>
           </div>
         </section>
 

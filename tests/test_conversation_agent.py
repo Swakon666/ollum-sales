@@ -40,7 +40,13 @@ def _ready_crm(tmp_path) -> tuple[SalesCRM, dict, str]:
         title="Custom estimate",
         content={"details": "Стоимость рассчитывается после короткого брифа"},
     )
-    crm.complete_company_onboarding(workspace_id, confirm_ready=True)
+    onboarding = crm.get_company_onboarding_state(workspace_id)
+    crm.complete_company_onboarding(
+        workspace_id,
+        confirm_ready=True,
+        confirmed_revision=onboarding["confirmation"]["required_revision"],
+        summary_hash=onboarding["confirmation"]["summary_hash"],
+    )
     lead = crm.upsert_lead(
         "Prospect",
         "https://conversation-prospect.test",
@@ -111,7 +117,8 @@ def test_runtime_uses_chatgpt_mcp_and_never_requires_an_api_key(tmp_path) -> Non
     assert status["runtime"]["server_llm_enabled"] is False
     assert status["runtime"]["requires_api_key"] is False
     assert status["runtime"]["openai_api_key_used"] is False
-    assert status["runtime"]["chatgpt_schedule_recommended_seconds"] == 900
+    assert status["runtime"]["server_inbox_sync_seconds"] == 900
+    assert status["runtime"]["chatgpt_schedule_recommended_seconds"] == 3600
     assert status["safety"]["draft_only"] is True
 
 
@@ -219,7 +226,7 @@ def test_prepare_exact_contact_never_falls_back_to_another_queue_item(
     assert crm.get_agent_inbox_event(workspace_id, other_event["id"])["status"] == "new"
 
 
-def test_partial_company_profile_does_not_block_chatgpt_reasoning(
+def test_partial_company_profile_blocks_chatgpt_reasoning_without_leasing(
     tmp_path, monkeypatch
 ) -> None:
     crm = SalesCRM(tmp_path / "partial.db")
@@ -236,10 +243,14 @@ def test_partial_company_profile_does_not_block_chatgpt_reasoning(
     status = agent.status(workspace_id)
     batch = agent.prepare_pending(workspace_id, limit=1)
 
-    assert status["runtime"]["ready"] is True
+    assert status["runtime"]["ready"] is False
     assert status["runtime"]["company_ready"] is False
-    assert batch["prepared"] == 1
-    assert batch["items"][0]["payload"]["company"]["ready_for_sales"] is False
+    assert batch["blocked"] is True
+    assert batch["reason"] == "company_onboarding_incomplete"
+    assert batch["prepared"] == 0
+    queued = crm.list_agent_inbox_events(workspace_id, status="new", limit=10)
+    assert len(queued) == 1
+    assert queued[0]["agent_attempts"] == 0
 
 
 def test_submit_creates_only_grounded_draft_and_persists_session(

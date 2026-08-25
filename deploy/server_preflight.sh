@@ -13,7 +13,12 @@ if [[ -r /etc/os-release ]]; then
 fi
 
 section capacity
-df -hT / "$HOME" 2>/dev/null || df -hT /
+printf 'cpu_online=%s\n' "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo unknown)"
+if [[ -r /proc/loadavg ]]; then
+  printf 'loadavg=%s\n' "$(cut -d' ' -f1-3 /proc/loadavg)"
+fi
+df -hT /
+df -ih /
 free -h 2>/dev/null || true
 
 section privileges
@@ -33,7 +38,7 @@ command -v nginx >/dev/null && nginx -v 2>&1 || echo 'nginx=absent'
 command -v certbot >/dev/null && certbot --version 2>&1 || echo 'certbot=absent'
 
 section existing_services
-for unit in docker caddy nginx apache2 traefik; do
+for unit in docker nginx; do
   if command -v systemctl >/dev/null; then
     printf '%s=' "$unit"
     systemctl is-active "$unit" 2>/dev/null || true
@@ -41,22 +46,40 @@ for unit in docker caddy nginx apache2 traefik; do
 done
 
 section containers
+deploy_root="$HOME/ollum-sales"
+current_release=""
+docker_cmd=()
 if command -v docker >/dev/null; then
-  docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' 2>&1 || true
-  docker compose ls 2>&1 || true
-else
-  echo 'docker=absent'
+  if docker info >/dev/null 2>&1; then
+    docker_cmd=(docker)
+  elif sudo -n docker info >/dev/null 2>&1; then
+    docker_cmd=(sudo -n docker)
+  fi
 fi
-
-section listeners
-if command -v ss >/dev/null; then
-  ss -lntup 2>/dev/null || ss -lnt 2>/dev/null || true
+if [[ -L "$deploy_root/current" ]]; then
+  current_release="$(readlink -f "$deploy_root/current" 2>/dev/null || true)"
 fi
+case "$current_release" in
+  "$deploy_root"/releases/*)
+    printf 'current_release=%s\n' "$(basename "$current_release")"
+    if ((${#docker_cmd[@]})); then
+      (
+        cd "$current_release" &&
+          "${docker_cmd[@]}" compose config --quiet &&
+          "${docker_cmd[@]}" compose ps
+      ) || true
+    else
+      echo 'ollum_compose_access=unavailable'
+    fi
+    ;;
+  "") echo 'current_release=absent' ;;
+  *) echo 'current_release=unsafe-target' ;;
+esac
 
 section target
-if [[ -e "$HOME/ollum-sales" ]]; then
+if [[ -e "$deploy_root" ]]; then
   echo 'target_exists=yes'
-  ls -ld "$HOME/ollum-sales"
+  ls -ld "$deploy_root"
 else
   echo 'target_exists=no'
 fi

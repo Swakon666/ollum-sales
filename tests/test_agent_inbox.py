@@ -6,6 +6,16 @@ from app import agent_inbox
 from app.crm import SalesCRM
 
 
+def _confirm_onboarding(crm: SalesCRM, workspace_id: str = "ollum-group") -> dict:
+    state = crm.get_company_onboarding_state(workspace_id)
+    return crm.complete_company_onboarding(
+        workspace_id,
+        confirm_ready=True,
+        confirmed_revision=state["confirmation"]["required_revision"],
+        summary_hash=state["confirmation"]["summary_hash"],
+    )
+
+
 def test_sync_whatsapp_inbox_queues_only_latest_unanswered_private_chats(
     tmp_path, monkeypatch
 ) -> None:
@@ -187,7 +197,7 @@ def test_next_action_moves_from_interview_to_inbound_reply_without_sending(
     )
     review = agent_inbox.next_agent_action(crm, "ollum-group")
     assert review["action"] == "review_company_onboarding"
-    crm.complete_company_onboarding("ollum-group", confirm_ready=True)
+    _confirm_onboarding(crm)
 
     lead = crm.upsert_lead(
         "Prospect",
@@ -235,7 +245,7 @@ def test_two_chat_lanes_never_cross_responsibilities(tmp_path) -> None:
             title=title,
             content={"details": "confirmed by operator"},
         )
-    crm.complete_company_onboarding("ollum-group", confirm_ready=True)
+    _confirm_onboarding(crm)
     lead = crm.upsert_lead(
         "Prospect", "https://lane-prospect.test", phones=["+7 999 111-22-33"]
     )
@@ -262,6 +272,66 @@ def test_two_chat_lanes_never_cross_responsibilities(tmp_path) -> None:
     clear = agent_inbox.next_agent_action(crm, "ollum-group", lane="inbox")
     assert clear["action"] == "inbox_clear"
     assert "qualified_leads" not in clear
+
+
+def test_ready_status_cannot_bypass_missing_required_knowledge(tmp_path) -> None:
+    crm = SalesCRM(tmp_path / "onboarding-gate.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    crm.update_company_profile(
+        "ollum-group",
+        company_name="Example Studio",
+        industry="Digital services",
+        target_customer="B2B companies",
+        positioning="Grounded sales automation",
+    )
+    crm.save_company_knowledge(
+        "ollum-group",
+        category="service",
+        title="Sales agent",
+        content={"details": "Research and drafts"},
+    )
+    price = crm.save_company_knowledge(
+        "ollum-group",
+        category="price",
+        title="Custom quote",
+        content={"details": "Calculated after discovery"},
+    )
+    _confirm_onboarding(crm)
+    crm.archive_company_knowledge("ollum-group", price["id"])
+
+    blocked = agent_inbox.next_agent_action(crm, "ollum-group", lane="prospecting")
+
+    assert blocked["action"] == "continue_company_onboarding"
+    assert blocked["onboarding"]["sales_ready"] is False
+    assert blocked["external_side_effect"] is False
+
+
+def test_completed_onboarding_lane_returns_two_chat_handoff(tmp_path) -> None:
+    crm = SalesCRM(tmp_path / "onboarding-handoff.db")
+    crm.ensure_workspace("ollum-group", "Ollum Group")
+    crm.update_company_profile(
+        "ollum-group",
+        company_name="Example Studio",
+        industry="Digital services",
+        target_customer="B2B companies",
+        positioning="Grounded sales automation",
+    )
+    for category, title in (("service", "Sales agent"), ("price", "Quote")):
+        crm.save_company_knowledge(
+            "ollum-group",
+            category=category,
+            title=title,
+            content={"details": "Confirmed by operator"},
+        )
+    _confirm_onboarding(crm)
+
+    handoff = agent_inbox.next_agent_action(crm, "ollum-group", lane="onboarding")
+
+    assert handoff["action"] == "setup_two_chat_operation"
+    assert handoff["handoff"]["primary_chat"]["lane"] == "prospecting"
+    assert handoff["handoff"]["monitoring_chat"]["lane"] == "inbox"
+    assert handoff["handoff"]["operator_action_required"] is True
+    assert handoff["external_side_effect"] is False
 
 
 def test_lane_validation_rejects_cross_lane_contact_targeting(tmp_path) -> None:

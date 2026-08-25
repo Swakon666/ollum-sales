@@ -460,7 +460,52 @@ function renderCompany() {
   readiness.textContent = onboarding.onboarding_status === "ready" ? "Готово к работе" : `Заполнено ${percent}%`;
   readiness.classList.toggle("is-ready", onboarding.onboarding_status === "ready");
   $("#onboarding-progress-bar").style.width = `${Math.max(0, Math.min(percent, 100))}%`;
+  $("#onboarding-progress").setAttribute("aria-valuenow", String(Math.max(0, Math.min(percent, 100))));
   $("#company-profile-updated").textContent = formatDate(profile.updated_at, "Ещё не сохранено");
+
+  const setup = state.data.plugin?.first_connection || {};
+  const stepLabels = {
+    company_interview: "Интервью",
+    profile_review: "Проверка профиля",
+    whatsapp_pairing: "Подключение WhatsApp",
+    two_chat_handoff: "Настройка двух чатов",
+  };
+  const actionLabels = {
+    ask_returned_onboarding_questions: "Ответьте в основном чате только на вопросы ниже. ChatGPT сохранит подтверждённые факты и продолжит интервью.",
+    show_factual_summary_and_request_confirmation: "Попросите ChatGPT показать итоговый профиль и подтвердите его перед запуском рабочих зон.",
+    connect_whatsapp_in_dashboard: "Откройте раздел WhatsApp и привяжите устройство. SAFE и отправка останутся выключены.",
+    keep_primary_chat_and_create_whatsapp_monitoring_chat: "Оставьте текущий чат для настройки и новых компаний, затем создайте второй чат только для мониторинга WhatsApp.",
+  };
+  $("#setup-current-step").textContent = stepLabels[setup.current_step] || "Настройка";
+  $("#setup-next-action").textContent = actionLabels[setup.next_action] || "Продолжите настройку в ChatGPT.";
+  $("#setup-journey").innerHTML = (setup.steps || []).map((item, index) => `
+    <div class="setup-step is-${escapeHtml(item.status)}">
+      <span>${String(index + 1).padStart(2, "0")}</span>
+      <strong>${escapeHtml(item.title)}</strong>
+      <small>${item.status === "complete" ? "Готово" : item.status === "current" ? "Сейчас" : "Позже"}</small>
+    </div>
+  `).join("");
+
+  const review = onboarding.review_summary || {};
+  const confirmation = onboarding.confirmation || {};
+  const profileFacts = Object.entries(review.profile || {})
+    .map(([name, value]) => `${label(name)}: ${String(value)}`);
+  const knowledgeFacts = (review.knowledge || [])
+    .map((item) => `${label(item.category)} · ${item.title}: ${knowledgeText(item.content)}`);
+  const explicitAnswers = (review.explicit_answers || [])
+    .map((item) => `${label(item.question_id)}: ${item.status === "not_applicable" ? "не применимо" : knowledgeText(item.answer)}`);
+  const summaryLines = [...profileFacts, ...knowledgeFacts, ...explicitAnswers];
+  $("#onboarding-review-summary").textContent = summaryLines.length
+    ? summaryLines.join("\n")
+    : "Сначала заполните обязательные факты.";
+  $("#onboarding-review-revision").textContent = `Версия ${Number(confirmation.required_revision || 0)}`;
+  const canConfirm = Boolean(onboarding.ready_for_sales && !onboarding.sales_ready);
+  const confirmCheck = $("#onboarding-confirm-check");
+  const confirmButton = $("#onboarding-confirm-button");
+  confirmCheck.disabled = !canConfirm;
+  if (!canConfirm) confirmCheck.checked = false;
+  confirmButton.disabled = !canConfirm;
+  confirmButton.textContent = onboarding.sales_ready ? "Профиль подтверждён" : "Подтвердить профиль";
 
   const form = $("#company-profile-form");
   if (!state.profileDirty && !form.contains(document.activeElement)) {
@@ -670,6 +715,16 @@ function renderPlugin() {
     ["Protected resource metadata", plugin.protected_resource_metadata],
   ];
   $("#plugin-fields").innerHTML = fields.map(([name, value]) => `<div class="copy-field"><label>${escapeHtml(name)}</label><div class="copy-row"><code translate="no">${escapeHtml(value || "Не настроено")}</code><button class="icon-button copy-value" data-copy="${escapeHtml(value || "")}" aria-label="Копировать">⧉</button></div></div>`).join("");
+  const handoff = plugin.chat_handoff || {};
+  const chats = [handoff.primary_chat, handoff.monitoring_chat].filter(Boolean);
+  $("#chat-handoff-grid").innerHTML = chats.map((chat, index) => `
+    <article class="prompt-panel">
+      <div class="prompt-panel-header"><span>Чат ${String(index + 1).padStart(2, "0")}</span><strong>${escapeHtml(chat.title)}</strong></div>
+      <p>${escapeHtml(chat.responsibility)}</p>
+      <div class="prompt-box"><code>${escapeHtml(chat.prompt)}</code></div>
+      <button class="secondary-button copy-value" type="button" data-copy="${escapeHtml(chat.prompt)}">Скопировать промпт</button>
+    </article>
+  `).join("");
   const names = {
     https_resource_url: "Публичный HTTPS /mcp", oidc_mode: "Режим OIDC",
     issuer_configured: "OIDC issuer", audience_configured: "Audience API",
@@ -701,8 +756,8 @@ function renderView(view) {
   else if (view === "plugin") renderPlugin();
   else if (view === "audit") renderAudit();
   const canWrite = Boolean(state.data.user.capabilities?.write);
-  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft, #company-profile-form input, #company-profile-form textarea, #company-profile-form button, #conversation-agent-form input, #conversation-agent-form textarea, #conversation-agent-form select, #conversation-agent-form button, #process-conversations-button, #knowledge-form input, #knowledge-form textarea, #knowledge-form select, #knowledge-form button, #sync-inbox-button, .inbox-status-action, .archive-knowledge').forEach((control) => {
-    control.disabled = !canWrite;
+  $$('[data-action], #new-campaign-button, .lead-status-select, .toggle[data-vertical-id], .review-draft, #company-profile-form input, #company-profile-form textarea, #company-profile-form button, #conversation-agent-form input, #conversation-agent-form textarea, #conversation-agent-form select, #conversation-agent-form button, #process-conversations-button, #knowledge-form input, #knowledge-form textarea, #knowledge-form select, #knowledge-form button, #onboarding-confirm-form input, #onboarding-confirm-form button, #sync-inbox-button, .inbox-status-action, .archive-knowledge').forEach((control) => {
+    if (!canWrite) control.disabled = true;
   });
 }
 
@@ -792,6 +847,30 @@ async function saveCompanyProfile(event) {
     await api("/api/v1/company/profile", { method: "PATCH", body });
     state.profileDirty = false;
     showToast("Профиль сохранён и доступен ChatGPT");
+    await refreshAll({ quiet: true, force: true });
+  } catch (error) {
+    showToast(error.message, true);
+  }
+}
+
+async function confirmCompanyOnboarding(event) {
+  event.preventDefault();
+  const onboarding = state.data.company_onboarding || {};
+  const confirmation = onboarding.confirmation || {};
+  if (!$("#onboarding-confirm-check").checked) {
+    showToast("Сначала подтвердите, что проверили факты", true);
+    return;
+  }
+  try {
+    await api("/api/v1/company/onboarding/complete", {
+      method: "POST",
+      body: {
+        confirm_ready: true,
+        confirmed_revision: confirmation.required_revision,
+        summary_hash: confirmation.summary_hash,
+      },
+    });
+    showToast("Профиль подтверждён. Можно подключать WhatsApp и второй чат.");
     await refreshAll({ quiet: true, force: true });
   } catch (error) {
     showToast(error.message, true);
@@ -969,6 +1048,7 @@ function bindEvents() {
   $("#invite-form").addEventListener("submit", inviteMember);
   $("#company-profile-form").addEventListener("input", () => { state.profileDirty = true; });
   $("#company-profile-form").addEventListener("submit", saveCompanyProfile);
+  $("#onboarding-confirm-form").addEventListener("submit", confirmCompanyOnboarding);
   $("#conversation-agent-form").addEventListener("input", () => { state.agentDirty = true; });
   $("#conversation-agent-form").addEventListener("submit", saveConversationAgent);
   $("#process-conversations-button").addEventListener("click", processConversations);
@@ -1103,6 +1183,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   const initialView = Object.entries(VIEW_HASHES).find(([, hash]) => hash === window.location.hash)?.[0] || "overview";
   navigate(initialView);
   await refreshAll();
+  if (initialView === "overview" && !state.data?.company_onboarding?.sales_ready) {
+    navigate("company");
+  }
   window.setInterval(() => {
     if (!document.hidden && !state.loading) refreshAll({ quiet: true });
   }, 30000);

@@ -4,6 +4,7 @@ import hashlib
 from datetime import UTC, datetime
 from typing import Any
 
+from .chatgpt_playbook import two_chat_handoff
 from .crm import SalesCRM, utc_now
 from .data_quality import (
     is_technical_whatsapp_jid,
@@ -182,7 +183,7 @@ def next_agent_action(
             "phone/chat_jid targeting is available only for the inbox lane"
         )
     onboarding = crm.get_company_onboarding_state(workspace_id)
-    if onboarding["onboarding_status"] != "ready":
+    if not onboarding["sales_ready"]:
         return {
             "action": (
                 "review_company_onboarding"
@@ -201,16 +202,19 @@ def next_agent_action(
 
     if lane == "onboarding":
         return {
-            "action": "onboarding_complete",
+            "action": "setup_two_chat_operation",
             "priority": 1,
             "lane": lane,
             "onboarding": onboarding,
             "company_knowledge_count": len(
                 crm.list_company_knowledge(workspace_id, limit=1000)
             ),
+            "handoff": two_chat_handoff(),
             "instruction": (
-                "The shared company profile is ready. Add or correct only user-confirmed "
-                "facts; do not start inbox or prospecting work in this lane."
+                "The shared company profile is ready. Keep this chat for setup and "
+                "prospecting, then ask the operator to create the separate WhatsApp "
+                "monitoring chat using the exact returned handoff. Do not claim that MCP "
+                "created or verified a ChatGPT chat automatically."
             ),
             "external_side_effect": False,
         }

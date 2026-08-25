@@ -143,6 +143,7 @@ class ConversationAgent:
         summary = self.crm.conversation_agent_summary(workspace_id)
         agent_settings = summary.pop("settings")
         onboarding = self.crm.get_company_onboarding_state(workspace_id)
+        company_ready = bool(onboarding["sales_ready"])
         runtime_enabled = bool(self.settings.conversation_agent_enabled)
         workspace_enabled = bool(agent_settings["enabled"])
         inbox = summary.get("inbox", {})
@@ -153,14 +154,14 @@ class ConversationAgent:
             health_reasons.append("stale_inbound_requires_review")
         if int(inbox.get("sla_overdue") or 0):
             health_reasons.append("response_sla_breached")
-        if onboarding["onboarding_status"] != "ready":
+        if not company_ready:
             health_reasons.append("company_onboarding_incomplete")
         return {
             "settings": agent_settings,
             "summary": summary,
             "runtime": {
                 "enabled": runtime_enabled,
-                "ready": runtime_enabled and workspace_enabled,
+                "ready": runtime_enabled and workspace_enabled and company_ready,
                 "health": "degraded" if health_reasons else "healthy",
                 "health_reasons": health_reasons,
                 "execution_mode": "chatgpt_mcp",
@@ -168,14 +169,12 @@ class ConversationAgent:
                 "server_llm_enabled": False,
                 "requires_api_key": False,
                 "openai_api_key_used": False,
-                "company_ready": onboarding["onboarding_status"] == "ready",
+                "company_ready": company_ready,
                 "company_onboarding_status": onboarding["onboarding_status"],
                 "server_inbox_sync_seconds": int(
                     self.settings.conversation_agent_poll_seconds
                 ),
-                "chatgpt_schedule_recommended_seconds": int(
-                    self.settings.conversation_agent_poll_seconds
-                ),
+                "chatgpt_schedule_recommended_seconds": 3600,
             },
             "safety": {
                 "approves": False,
@@ -408,6 +407,7 @@ class ConversationAgent:
         """Lease inbound work and return bounded facts for reasoning inside ChatGPT."""
 
         agent_settings = self.crm.get_conversation_agent_settings(workspace_id)
+        onboarding = self.crm.get_company_onboarding_state(workspace_id)
         if not self.settings.conversation_agent_enabled:
             return {
                 "success": False,
@@ -424,6 +424,16 @@ class ConversationAgent:
                 "reason": "workspace_disabled",
                 "prepared": 0,
                 "items": [],
+                "sent": False,
+            }
+        if not onboarding["sales_ready"]:
+            return {
+                "success": False,
+                "blocked": True,
+                "reason": "company_onboarding_incomplete",
+                "prepared": 0,
+                "items": [],
+                "onboarding": onboarding,
                 "sent": False,
             }
 

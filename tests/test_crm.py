@@ -16,6 +16,15 @@ class SalesCRMTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def _complete_onboarding(self, workspace_id: str = "ollum-group") -> dict:
+        state = self.crm.get_company_onboarding_state(workspace_id)
+        return self.crm.complete_company_onboarding(
+            workspace_id,
+            confirm_ready=True,
+            confirmed_revision=state["confirmation"]["required_revision"],
+            summary_hash=state["confirmation"]["summary_hash"],
+        )
+
     def test_campaign_lead_analysis_scoring_and_overview(self) -> None:
         campaign = self.crm.create_campaign(
             "Logistics Moscow",
@@ -175,7 +184,7 @@ class SalesCRMTests(unittest.TestCase):
         )
         with self.crm.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 12
+                connection.execute("PRAGMA user_version").fetchone()[0], 14
             )
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
@@ -474,7 +483,10 @@ class SalesCRMTests(unittest.TestCase):
         state = self.crm.get_company_onboarding_state("ollum-group")
         self.assertTrue(state["ready_for_sales"])
         completed = self.crm.complete_company_onboarding(
-            "ollum-group", confirm_ready=True
+            "ollum-group",
+            confirm_ready=True,
+            confirmed_revision=state["confirmation"]["required_revision"],
+            summary_hash=state["confirmation"]["summary_hash"],
         )
         self.assertEqual(completed["onboarding_status"], "ready")
 
@@ -485,6 +497,178 @@ class SalesCRMTests(unittest.TestCase):
         )
         archived = reopened.archive_company_knowledge("ollum-group", service["id"])
         self.assertEqual(archived["status"], "archived")
+
+    def test_onboarding_confirmation_is_bound_to_exact_reviewed_revision(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        self.crm.update_company_profile(
+            "ollum-group",
+            company_name="Example Studio",
+            industry="Digital services",
+            target_customer="B2B companies",
+            positioning="Grounded sales automation",
+        )
+        for category, title in (("service", "Sales agent"), ("price", "Quote")):
+            self.crm.save_company_knowledge(
+                "ollum-group",
+                category=category,
+                title=title,
+                content={"details": "Confirmed by operator"},
+            )
+        review = self.crm.get_company_onboarding_state("ollum-group")
+        self.assertEqual(
+            review["review_summary"]["profile"]["company_name"], "Example Studio"
+        )
+        self.assertEqual(len(review["confirmation"]["summary_hash"]), 64)
+
+        self.crm.update_company_profile(
+            "ollum-group", positioning="Updated grounded positioning"
+        )
+        with self.assertRaisesRegex(ValueError, "stale onboarding revision"):
+            self.crm.complete_company_onboarding(
+                "ollum-group",
+                confirm_ready=True,
+                confirmed_revision=review["confirmation"]["required_revision"],
+                summary_hash=review["confirmation"]["summary_hash"],
+            )
+
+        current = self.crm.get_company_onboarding_state("ollum-group")
+        completed = self.crm.complete_company_onboarding(
+            "ollum-group",
+            confirm_ready=True,
+            confirmed_revision=current["confirmation"]["required_revision"],
+            summary_hash=current["confirmation"]["summary_hash"],
+        )
+        self.assertTrue(completed["sales_ready"])
+        self.assertEqual(
+            completed["confirmation"]["confirmed_revision"],
+            completed["profile"]["revision"],
+        )
+        self.assertEqual(
+            completed["next_step"],
+            "configure_primary_prospecting_and_create_whatsapp_monitor",
+        )
+        settings = self.crm.get_conversation_agent_settings("ollum-group")
+        self.assertEqual(settings["niche"], "Digital services")
+        self.assertEqual(settings["objective"], None)
+        reopened = SalesCRM(self.crm.db_path).get_company_onboarding_state(
+            "ollum-group"
+        )
+        self.assertTrue(reopened["sales_ready"])
+        self.assertEqual(
+            reopened["confirmation"]["confirmed_summary_hash"],
+            current["confirmation"]["summary_hash"],
+        )
+
+    def test_required_knowledge_changes_reopen_completed_onboarding(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        self.crm.update_company_profile(
+            "ollum-group",
+            company_name="Example Studio",
+            industry="Digital services",
+            target_customer="B2B companies",
+            positioning="Grounded sales automation",
+        )
+        self.crm.save_company_knowledge(
+            "ollum-group",
+            category="service",
+            title="Sales agent",
+            content={"details": "Research and drafts"},
+        )
+        price = self.crm.save_company_knowledge(
+            "ollum-group",
+            category="price",
+            title="Custom quote",
+            content={"details": "Calculated after discovery"},
+        )
+        ready = self._complete_onboarding()
+        self.assertTrue(ready["sales_ready"])
+
+        self.crm.archive_company_knowledge("ollum-group", price["id"])
+        reopened = self.crm.get_company_onboarding_state("ollum-group")
+
+        self.assertFalse(reopened["ready_for_sales"])
+        self.assertFalse(reopened["sales_ready"])
+        self.assertEqual(reopened["onboarding_status"], "in_progress")
+        self.assertIn("prices", reopened["missing"])
+
+    def test_noop_profile_save_preserves_completed_onboarding(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        profile = self.crm.update_company_profile(
+            "ollum-group",
+            company_name="Example Studio",
+            industry="Digital services",
+            target_customer="B2B companies",
+            positioning="Grounded sales automation",
+        )
+        for category, title in (("service", "Sales agent"), ("price", "Quote")):
+            self.crm.save_company_knowledge(
+                "ollum-group",
+                category=category,
+                title=title,
+                content={"details": "Confirmed by operator"},
+            )
+        ready = self._complete_onboarding()
+
+        unchanged = self.crm.update_company_profile(
+            "ollum-group",
+            company_name=profile["company_name"],
+            industry=profile["industry"],
+            target_customer=profile["target_customer"],
+            positioning=profile["positioning"],
+        )
+
+        self.assertEqual(unchanged["onboarding_status"], "ready")
+        self.assertEqual(unchanged["revision"], ready["profile"]["revision"])
+        self.assertEqual(unchanged["completed_at"], ready["profile"]["completed_at"])
+
+    def test_empty_company_knowledge_cannot_satisfy_readiness(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        for empty in (None, "", [], {}):
+            with (
+                self.subTest(empty=empty),
+                self.assertRaisesRegex(ValueError, "grounded fact"),
+            ):
+                self.crm.save_company_knowledge(
+                    "ollum-group",
+                    category="price",
+                    title="Placeholder",
+                    content=empty,
+                )
+
+    def test_explicit_absence_answers_stop_optional_questions_repeating(self) -> None:
+        self.crm.ensure_workspace("ollum-group", "Ollum Group")
+        self.crm.update_company_profile(
+            "ollum-group",
+            company_name="Example Studio",
+            industry="Digital services",
+            geography="Worldwide",
+            target_customer="B2B companies",
+            positioning="Grounded sales automation",
+            sales_process="Discovery, qualification, proposal",
+            tone_of_voice="Concise",
+            primary_goal="Qualified conversations",
+        )
+        for question_id in ("website", "customer_proof", "active_clients"):
+            self.crm.record_company_onboarding_answer(
+                "ollum-group",
+                question_id=question_id,
+                status="not_applicable",
+                answer={"operator_confirmed": True},
+            )
+
+        state = self.crm.get_company_onboarding_state("ollum-group")
+        question_ids = {item["id"] for item in state["next_questions"]}
+        self.assertNotIn("website", question_ids)
+        self.assertNotIn("closed_clients", question_ids)
+        self.assertNotIn("pipeline", question_ids)
+        self.assertNotIn("customer_proof", state["missing"])
+        self.assertNotIn("active_clients", state["missing"])
+        self.assertEqual(
+            SalesCRM(self.crm.db_path).get_company_onboarding_state("ollum-group")[
+                "answers"
+            ]["website"]["status"],
+            "not_applicable",
+        )
 
     def test_agent_inbox_is_idempotent_and_tracks_draft_state(self) -> None:
         self.crm.ensure_workspace("ollum-group", "Ollum Group")
@@ -823,7 +1007,7 @@ class SalesCRMTests(unittest.TestCase):
         )
         with migrated.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 12
+                connection.execute("PRAGMA user_version").fetchone()[0], 14
             )
 
     def test_conversation_queue_watchdog_recovers_and_quarantines_safely(

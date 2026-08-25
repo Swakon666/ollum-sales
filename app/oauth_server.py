@@ -688,7 +688,7 @@ async def oauth_authorize_page(request: Request) -> Response:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Подключение Ollum Sales</title>
-  <link rel="stylesheet" href="/assets/oauth.css">
+  <link rel="stylesheet" href="/oauth-assets/oauth.css">
 </head>
 <body>
   <main class="oauth-shell">
@@ -765,7 +765,7 @@ async def oauth_authorize_complete(request: Request) -> Response:
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{title} — Ollum Sales</title>
-  <link rel="stylesheet" href="/admin-assets/oauth.css">
+  <link rel="stylesheet" href="/oauth-assets/oauth.css">
 </head>
 <body>
   <main class="oauth-shell">
