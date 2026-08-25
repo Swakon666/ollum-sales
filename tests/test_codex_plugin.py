@@ -55,6 +55,7 @@ def test_codex_plugin_prompts_for_external_send_and_operational_gates() -> None:
         "autopilot_stop",
         "google_sheets_sync",
         "sales_approve_outreach_draft",
+        "sales_reset_prospecting_data",
         "sales_send_whatsapp_draft",
         "whatsapp_send_message",
     }

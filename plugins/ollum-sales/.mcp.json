@@ -44,6 +44,9 @@
         "sales_archive_company_knowledge": {
           "approval_mode": "approve"
         },
+        "sales_reset_prospecting_data": {
+          "approval_mode": "prompt"
+        },
         "sales_compare_whatsapp_replies": {
           "approval_mode": "approve"
         },

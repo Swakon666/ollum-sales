@@ -436,6 +436,51 @@ def sales_archive_company_knowledge(item_id: str) -> dict[str, Any]:
     return crm.archive_company_knowledge(str(member["workspace_id"]), item_id)
 
 
+@_write_tool(destructive=True)
+def sales_reset_prospecting_data(
+    confirm_reset: bool = False,
+    expected_prospecting_leads: int | None = None,
+    expected_campaigns: int | None = None,
+) -> dict[str, Any]:
+    """Back up and clear old prospecting while preserving company and inbox memory."""
+    member = _current_mcp_member(minimum_role="owner")
+    preview = crm.preview_prospecting_reset()
+    if not confirm_reset:
+        return {
+            "success": False,
+            "blocked": True,
+            "message": (
+                "Review the aggregate reset scope, stop Autopilot, then call again with "
+                "confirm_reset=true and the exact prospecting lead and campaign counts."
+            ),
+            "preview": preview,
+            "preserves": [
+                "company profile and knowledge",
+                "workspace members and OAuth",
+                "WhatsApp session and inbox events",
+                "conversation settings and sessions",
+                "whatsapp_inbound leads and their drafts",
+                "vertical definitions",
+            ],
+        }
+    if expected_prospecting_leads is None or expected_campaigns is None:
+        raise ValueError(
+            "expected_prospecting_leads and expected_campaigns are required"
+        )
+    result = crm.reset_prospecting_data(
+        expected_prospecting_leads=expected_prospecting_leads,
+        expected_campaigns=expected_campaigns,
+        actor=str(member.get("email") or member.get("subject") or "owner"),
+    )
+    return {
+        **result,
+        "company_memory_preserved": True,
+        "whatsapp_inbox_preserved": True,
+        "approved": False,
+        "sent": False,
+    }
+
+
 @_write_tool()
 def sales_complete_company_onboarding(
     confirm_ready: bool = False,

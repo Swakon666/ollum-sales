@@ -3065,6 +3065,240 @@ class SalesCRM:
                 ).fetchone()[0],
             }
 
+    @staticmethod
+    def _prospecting_reset_counts(
+        connection: sqlite3.Connection,
+    ) -> dict[str, int | bool]:
+        return {
+            "prospecting_leads": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM leads WHERE source != 'whatsapp_inbound'"
+                ).fetchone()[0]
+            ),
+            "preserved_inbound_leads": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM leads WHERE source = 'whatsapp_inbound'"
+                ).fetchone()[0]
+            ),
+            "campaigns": int(
+                connection.execute("SELECT COUNT(*) FROM campaigns").fetchone()[0]
+            ),
+            "prospecting_drafts": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM outreach_drafts AS drafts
+                    JOIN leads ON leads.id = drafts.lead_id
+                    WHERE leads.source != 'whatsapp_inbound'
+                    """
+                ).fetchone()[0]
+            ),
+            "prospecting_interactions": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM interactions
+                    JOIN leads ON leads.id = interactions.lead_id
+                    WHERE leads.source != 'whatsapp_inbound'
+                    """
+                ).fetchone()[0]
+            ),
+            "prospecting_followups": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM followups
+                    JOIN leads ON leads.id = followups.lead_id
+                    WHERE leads.source != 'whatsapp_inbound'
+                    """
+                ).fetchone()[0]
+            ),
+            "pending_prospecting_sends": int(
+                connection.execute(
+                    """
+                    SELECT COUNT(*) FROM outreach_send_requests AS requests
+                    JOIN outreach_drafts AS drafts ON drafts.id = requests.draft_id
+                    JOIN leads ON leads.id = drafts.lead_id
+                    WHERE leads.source != 'whatsapp_inbound'
+                      AND requests.status = 'pending'
+                    """
+                ).fetchone()[0]
+            ),
+            "autopilot_cycles": int(
+                connection.execute("SELECT COUNT(*) FROM autopilot_cycles").fetchone()[
+                    0
+                ]
+            ),
+            "inbox_events": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM agent_inbox_events"
+                ).fetchone()[0]
+            ),
+            "conversation_sessions": int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM conversation_sessions"
+                ).fetchone()[0]
+            ),
+            "autopilot_running": bool(
+                connection.execute(
+                    "SELECT running FROM autopilot_state WHERE id = 1"
+                ).fetchone()[0]
+            ),
+        }
+
+    def preview_prospecting_reset(self) -> dict[str, int | bool]:
+        """Count the reset scope without exposing lead or conversation content."""
+        with self.connect() as connection:
+            return self._prospecting_reset_counts(connection)
+
+    def reset_prospecting_data(
+        self,
+        *,
+        expected_prospecting_leads: int,
+        expected_campaigns: int,
+        actor: str,
+    ) -> dict[str, Any]:
+        """Back up and clear prospecting while preserving company and inbox memory."""
+        expected_prospecting_leads = int(expected_prospecting_leads)
+        expected_campaigns = int(expected_campaigns)
+        if expected_prospecting_leads < 0 or expected_campaigns < 0:
+            raise ValueError("expected counts must not be negative")
+        clean_actor = " ".join(str(actor).split())[:320]
+        if not clean_actor:
+            raise ValueError("reset actor is required")
+
+        preview = self.preview_prospecting_reset()
+        if preview["autopilot_running"]:
+            raise ValueError(
+                "Autopilot must be stopped before resetting prospecting data"
+            )
+        if preview["pending_prospecting_sends"]:
+            raise ValueError("pending prospecting send requests must be resolved first")
+        if preview["prospecting_leads"] != expected_prospecting_leads:
+            raise ValueError("prospecting lead count changed; request a fresh preview")
+        if preview["campaigns"] != expected_campaigns:
+            raise ValueError("campaign count changed; request a fresh preview")
+
+        backup_id = (
+            "prospecting-reset-"
+            f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}-"
+            f"{uuid.uuid4().hex[:8]}.sqlite3"
+        )
+        backup_dir = self.db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / backup_id
+        source = sqlite3.connect(self.db_path, timeout=15)
+        destination = sqlite3.connect(backup_path, timeout=15)
+        try:
+            source.execute("PRAGMA busy_timeout = 15000")
+            source.backup(destination)
+            if destination.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("prospecting reset backup failed SQLite quick_check")
+        except Exception:
+            destination.close()
+            source.close()
+            backup_path.unlink(missing_ok=True)
+            raise
+        else:
+            destination.close()
+            source.close()
+
+        try:
+            with self.connect() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                current = self._prospecting_reset_counts(connection)
+                if current["autopilot_running"]:
+                    raise ValueError(
+                        "Autopilot restarted while preparing the prospecting reset"
+                    )
+                if current["pending_prospecting_sends"]:
+                    raise ValueError("pending prospecting send requests appeared")
+                if current["prospecting_leads"] != expected_prospecting_leads:
+                    raise ValueError(
+                        "prospecting lead count changed; request a fresh preview"
+                    )
+                if current["campaigns"] != expected_campaigns:
+                    raise ValueError("campaign count changed; request a fresh preview")
+
+                connection.execute(
+                    "DELETE FROM leads WHERE source != 'whatsapp_inbound'"
+                )
+                connection.execute("DELETE FROM campaigns")
+                connection.execute("DELETE FROM autopilot_cycles")
+                connection.execute(
+                    """
+                    UPDATE autopilot_state
+                    SET running = 0, last_cycle_at = NULL, next_cycle_at = NULL,
+                        lock_until = NULL, current_cycle_id = NULL, last_error = NULL,
+                        updated_at = ?
+                    WHERE id = 1
+                    """,
+                    (utc_now(),),
+                )
+                audit_id = str(uuid.uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO admin_audit_log (
+                        id, actor, action, target_type, target_id,
+                        outcome, details_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        audit_id,
+                        clean_actor,
+                        "reset_prospecting_data",
+                        "prospecting_pipeline",
+                        backup_id,
+                        "success",
+                        _json(
+                            {
+                                "deleted": {
+                                    "prospecting_leads": current["prospecting_leads"],
+                                    "campaigns": current["campaigns"],
+                                    "prospecting_drafts": current["prospecting_drafts"],
+                                    "prospecting_interactions": current[
+                                        "prospecting_interactions"
+                                    ],
+                                    "prospecting_followups": current[
+                                        "prospecting_followups"
+                                    ],
+                                    "autopilot_cycles": current["autopilot_cycles"],
+                                },
+                                "preserved": {
+                                    "inbound_leads": current["preserved_inbound_leads"],
+                                    "inbox_events": current["inbox_events"],
+                                    "conversation_sessions": current[
+                                        "conversation_sessions"
+                                    ],
+                                },
+                            }
+                        ),
+                        utc_now(),
+                    ),
+                )
+        except Exception as error:
+            error.add_note(
+                f"Prospecting reset failed after backup; backup retained as {backup_id}"
+            )
+            raise
+
+        return {
+            "success": True,
+            "backup_id": backup_id,
+            "audit_id": audit_id,
+            "deleted": {
+                "prospecting_leads": int(preview["prospecting_leads"]),
+                "campaigns": int(preview["campaigns"]),
+                "prospecting_drafts": int(preview["prospecting_drafts"]),
+                "prospecting_interactions": int(preview["prospecting_interactions"]),
+                "prospecting_followups": int(preview["prospecting_followups"]),
+                "autopilot_cycles": int(preview["autopilot_cycles"]),
+            },
+            "preserved": {
+                "inbound_leads": int(preview["preserved_inbound_leads"]),
+                "inbox_events": int(preview["inbox_events"]),
+                "conversation_sessions": int(preview["conversation_sessions"]),
+            },
+            "restorable": True,
+        }
+
     def remove_production_safe_check_artifacts(self) -> int:
         """Delete legacy synthetic verification leads and their cascaded records."""
         with self.connect() as connection:
