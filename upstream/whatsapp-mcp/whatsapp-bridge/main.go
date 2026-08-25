@@ -246,6 +246,19 @@ func normalizedPairingQRTimeout(value time.Duration) time.Duration {
 	return value
 }
 
+func normalizedWhatsAppLogLevel(raw string) string {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "DEBUG":
+		return "DEBUG"
+	case "WARN":
+		return "WARN"
+	case "ERROR":
+		return "ERROR"
+	default:
+		return "INFO"
+	}
+}
+
 func resetTimer(timer *time.Timer, duration time.Duration) {
 	if !timer.Stop() {
 		select {
@@ -1196,7 +1209,8 @@ func startRESTServer(client *whatsmeow.Client, messageStore *MessageStore, pairi
 
 func main() {
 	// Set up logger
-	logger := waLog.Stdout("Client", "INFO", true)
+	logLevel := normalizedWhatsAppLogLevel(os.Getenv("WHATSAPP_LOG_LEVEL"))
+	logger := waLog.Stdout("Client", logLevel, true)
 	logger.Infof("Starting WhatsApp client...")
 
 	// Create database connection for storing session data
@@ -1274,6 +1288,22 @@ func main() {
 		case *events.Disconnected:
 			pairingState.update("reconnecting", client.Store.ID == nil, "", time.Time{})
 			logger.Warnf("WhatsApp connection interrupted; automatic reconnect is running")
+
+		case *events.ConnectFailure:
+			pairingState.update("connection_failed", client.Store.ID == nil, "", time.Time{})
+			logger.Warnf("WhatsApp connection rejected; reason=%v", v.Reason)
+
+		case *events.StreamError:
+			pairingState.update("stream_error", client.Store.ID == nil, "", time.Time{})
+			logger.Warnf("WhatsApp stream error; code=%s", v.Code)
+
+		case *events.StreamReplaced:
+			pairingState.update("session_replaced", false, "", time.Time{})
+			logger.Warnf("WhatsApp session was replaced by another active bridge")
+
+		case *events.KeepAliveTimeout:
+			pairingState.update("reconnecting", client.Store.ID == nil, "", time.Time{})
+			logger.Warnf("WhatsApp keepalive timed out; consecutive_errors=%d", v.ErrorCount)
 
 		case *events.LoggedOut:
 			pairingState.update("restarting", true, "", time.Time{})
@@ -1476,7 +1506,11 @@ func main() {
 		}
 	}()
 
-	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	if client.IsConnected() && client.IsLoggedIn() {
+		fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
+	} else {
+		fmt.Println("\nBridge API is online; WhatsApp reconnect is still in progress.")
+	}
 
 	fmt.Println("REST server is running. Press Ctrl+C to disconnect and exit.")
 
