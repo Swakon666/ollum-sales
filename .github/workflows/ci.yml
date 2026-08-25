@@ -95,7 +95,7 @@ jobs:
             --entrypoint /bin/sh \
             --volume "$PWD:/workspace:ro" \
             koalaman/shellcheck-alpine:v0.11.0 \
-            -c 'shellcheck /workspace/deploy/backup_data.sh /workspace/deploy/restore_data.sh /workspace/deploy/remote_deploy.sh'
+            -c 'shellcheck /workspace/deploy/backup_data.sh /workspace/deploy/restore_data.sh /workspace/deploy/remote_deploy.sh /workspace/deploy/reset_prospecting.sh'
 
       - name: Validate Docker Compose
         env:
