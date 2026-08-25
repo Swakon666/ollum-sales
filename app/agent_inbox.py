@@ -183,6 +183,20 @@ def next_agent_action(
             "phone/chat_jid targeting is available only for the inbox lane"
         )
     onboarding = crm.get_company_onboarding_state(workspace_id)
+    if not onboarding["sales_ready"] and lane == "inbox":
+        return {
+            "action": "wait_for_primary_onboarding",
+            "priority": 1,
+            "lane": lane,
+            "blocking_reason": "company_onboarding_incomplete",
+            "onboarding_status": onboarding["onboarding_status"],
+            "instruction": (
+                "Company setup is incomplete. Tell the operator to finish setup in the "
+                "primary setup and prospecting chat, then stop. Do not inspect the inbound "
+                "queue or switch to prospecting work in this chat."
+            ),
+            "external_side_effect": False,
+        }
     if not onboarding["sales_ready"]:
         return {
             "action": (
