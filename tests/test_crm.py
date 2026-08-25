@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
@@ -66,6 +67,162 @@ class SalesCRMTests(unittest.TestCase):
         self.assertEqual(scored["status"], "qualified")
         self.assertGreater(scored["score"], 0)
         self.assertEqual(self.crm.overview(campaign["id"])["lead_count"], 1)
+
+    def test_reset_prospecting_data_is_backed_up_and_preserves_inbox_memory(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        self.crm.update_company_profile(
+            workspace_id,
+            company_name="Ollum Group",
+            website_url="https://ollumgroup.ru/",
+        )
+        knowledge = self.crm.save_company_knowledge(
+            workspace_id,
+            category="service",
+            title="Web development",
+            content={"fact": "Verified service"},
+        )
+        campaign = self.crm.create_campaign(
+            "Old prospecting",
+            industry="retail",
+            location="Moscow",
+        )
+        prospect = self.crm.upsert_lead(
+            "Old Prospect",
+            "https://old-prospect.test",
+            source="agent_research_verified_official_sites",
+            campaign_id=campaign["id"],
+        )
+        inbound = self.crm.upsert_lead(
+            "Inbound Contact",
+            "https://whatsapp.invalid/inbound-contact",
+            source="whatsapp_inbound",
+        )
+        prospect_draft = self.crm.save_outreach_draft(
+            prospect["id"],
+            channel="whatsapp",
+            recipient="79990000001",
+            message="Grounded old prospecting draft",
+        )
+        inbound_draft = self.crm.save_outreach_draft(
+            inbound["id"],
+            channel="whatsapp",
+            recipient="79990000002",
+            message="Preserved inbound draft",
+        )
+        self.crm.record_interaction(
+            prospect["id"],
+            channel="whatsapp",
+            direction="outbound",
+            content="Old test interaction",
+        )
+        self.crm.schedule_followup(
+            prospect["id"],
+            due_at="2026-08-26T10:00:00+00:00",
+            action="Old test follow-up",
+        )
+        event, _ = self.crm.upsert_agent_inbox_event(
+            workspace_id,
+            external_id="preserved-event",
+            chat_jid="79990000001@s.whatsapp.net",
+            message_text="Preserved private inbox event",
+            received_at="2026-08-25T10:00:00+00:00",
+            lead_id=prospect["id"],
+        )
+        self.crm.update_agent_inbox_event(
+            workspace_id,
+            event["id"],
+            status="drafted",
+            draft_id=prospect_draft["id"],
+        )
+        session = self.crm.upsert_conversation_session(
+            workspace_id,
+            "79990000001@s.whatsapp.net",
+            lead_id=prospect["id"],
+            last_draft_id=prospect_draft["id"],
+        )
+        self.crm.start_autopilot(mode="safe", interval_minutes=60)
+        cycle = self.crm.begin_autopilot_cycle(force=True)
+        self.assertIsNotNone(cycle)
+        self.crm.complete_autopilot_cycle(cycle["id"], metrics={"leads_found": 1})
+
+        preview = self.crm.preview_prospecting_reset()
+        self.assertEqual(preview["prospecting_leads"], 1)
+        self.assertEqual(preview["preserved_inbound_leads"], 1)
+        self.assertEqual(preview["campaigns"], 1)
+        self.assertEqual(preview["prospecting_drafts"], 1)
+        self.assertEqual(preview["inbox_events"], 1)
+
+        with self.assertRaisesRegex(ValueError, "Autopilot must be stopped"):
+            self.crm.reset_prospecting_data(
+                expected_prospecting_leads=1,
+                expected_campaigns=1,
+                actor="owner@example.com",
+            )
+
+        self.crm.stop_autopilot()
+        with self.assertRaisesRegex(ValueError, "prospecting lead count changed"):
+            self.crm.reset_prospecting_data(
+                expected_prospecting_leads=2,
+                expected_campaigns=1,
+                actor="owner@example.com",
+            )
+
+        result = self.crm.reset_prospecting_data(
+            expected_prospecting_leads=1,
+            expected_campaigns=1,
+            actor="owner@example.com",
+        )
+
+        self.assertEqual(result["deleted"]["prospecting_leads"], 1)
+        self.assertEqual(result["deleted"]["campaigns"], 1)
+        self.assertEqual(result["preserved"]["inbound_leads"], 1)
+        backup_path = Path(self.tempdir.name) / "backups" / result["backup_id"]
+        self.assertTrue(backup_path.is_file())
+        backup = sqlite3.connect(backup_path)
+        try:
+            self.assertEqual(
+                backup.execute(
+                    "SELECT COUNT(*) FROM leads WHERE source != 'whatsapp_inbound'"
+                ).fetchone()[0],
+                1,
+            )
+        finally:
+            backup.close()
+
+        with self.assertRaisesRegex(ValueError, "lead not found"):
+            self.crm.get_lead(prospect["id"])
+        self.assertEqual(self.crm.get_lead(inbound["id"])["id"], inbound["id"])
+        self.assertEqual(
+            self.crm.get_outreach_draft(inbound_draft["id"])["id"],
+            inbound_draft["id"],
+        )
+        preserved_event = self.crm.get_agent_inbox_event(workspace_id, event["id"])
+        self.assertIsNone(preserved_event["lead_id"])
+        self.assertIsNone(preserved_event["draft_id"])
+        preserved_session = self.crm.get_conversation_session(
+            workspace_id,
+            "79990000001@s.whatsapp.net",
+        )
+        self.assertEqual(preserved_session["id"], session["id"])
+        self.assertIsNone(preserved_session["lead_id"])
+        self.assertIsNone(preserved_session["last_draft_id"])
+        self.assertEqual(
+            self.crm.list_company_knowledge(workspace_id)[0]["id"], knowledge["id"]
+        )
+        self.assertEqual(self.crm.stats()["campaigns"], 0)
+        self.assertEqual(self.crm.stats()["leads"], 1)
+        self.assertEqual(self.crm.stats()["outreach_drafts"], 1)
+        self.assertFalse(self.crm.get_autopilot_state()["running"])
+        with self.crm.connect() as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM autopilot_cycles").fetchone()[
+                    0
+                ],
+                0,
+            )
 
     def test_overview_excludes_technical_whatsapp_contacts(self) -> None:
         self.crm.upsert_lead(

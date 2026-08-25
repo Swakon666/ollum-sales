@@ -47,6 +47,7 @@ tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
 - company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_record_company_onboarding_answer`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding` with exact revision/hash confirmation;
+- closed-beta test resets: owner-only `sales_reset_prospecting_data` first returns aggregate counts, then requires an exact-count destructive confirmation, creates a restorable SQLite backup, and preserves company memory, OAuth, WhatsApp inbox/session state, inbound contacts, and vertical definitions;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_retry_agent_inbox_event`, `sales_agent_next_action` with isolated `inbox` and `prospecting` lanes;
 - shared two-chat coordination: `sales_get_agent_coordination` reports onboarding, lane progress, replied, never replied, awaiting reply, and durable memory without private message text;
 - privacy-safe quality auditing: `sales_get_safe_quality_audit` reports stale evidence, duplicate companies, stuck inbox work, retry exhaustion, legacy classifications, and draft/send safety using aggregate counts only;

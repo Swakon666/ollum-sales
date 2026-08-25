@@ -66,6 +66,8 @@ The reply quality gate may save a draft or escalate; it cannot approve or send. 
 
 Never reveal or commit tokens, keys, cookies, `.env` content, session credentials, local databases, or private conversation history. Do not put the MCP bearer token in prompts or tool arguments.
 
+For a clean closed-beta prospecting test, call `sales_reset_prospecting_data` once without confirmation, show only its aggregate scope, stop Autopilot, and call it again only after the owner explicitly authorizes deletion with the exact returned lead and campaign counts. The tool must preserve company memory, OAuth, WhatsApp inbox/session data, inbound contacts, conversation settings, and vertical definitions. Never use it as routine campaign cleanup.
+
 ## Repository maintenance
 
 Keep Ollum-owned integration code in `app/`. Keep full third-party snapshots in `upstream/Scrapegraph-ai/` and `upstream/whatsapp-mcp/`; do not modify them unless a maintained upstream patch is necessary and explicitly justified.

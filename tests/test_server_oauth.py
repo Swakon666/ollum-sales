@@ -31,6 +31,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     onboarding_tool = server.mcp._tool_manager._tools["sales_get_company_onboarding"]
     update_profile_tool = server.mcp._tool_manager._tools["sales_update_company_profile"]
     archive_knowledge_tool = server.mcp._tool_manager._tools["sales_archive_company_knowledge"]
+    reset_prospecting_tool = server.mcp._tool_manager._tools["sales_reset_prospecting_data"]
     link_inbox_tool = server.mcp._tool_manager._tools["sales_link_agent_inbox_lead"]
     retry_inbox_tool = server.mcp._tool_manager._tools["sales_retry_agent_inbox_event"]
     next_action_tool = server.mcp._tool_manager._tools["sales_agent_next_action"]
@@ -60,6 +61,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "onboarding_annotations": onboarding_tool.annotations.model_dump(by_alias=True),
         "update_profile_annotations": update_profile_tool.annotations.model_dump(by_alias=True),
         "archive_knowledge_annotations": archive_knowledge_tool.annotations.model_dump(by_alias=True),
+        "reset_prospecting_annotations": reset_prospecting_tool.annotations.model_dump(by_alias=True),
         "link_inbox_annotations": link_inbox_tool.annotations.model_dump(by_alias=True),
         "retry_inbox_annotations": retry_inbox_tool.annotations.model_dump(by_alias=True),
         "retry_inbox_meta": retry_inbox_tool.meta,
@@ -108,7 +110,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 70
+    assert payload["tool_count"] == 71
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
@@ -133,6 +135,9 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["update_profile_annotations"]["readOnlyHint"] is False
     assert payload["update_profile_annotations"]["destructiveHint"] is False
     assert payload["archive_knowledge_annotations"]["destructiveHint"] is True
+    assert payload["reset_prospecting_annotations"]["readOnlyHint"] is False
+    assert payload["reset_prospecting_annotations"]["destructiveHint"] is True
+    assert payload["reset_prospecting_annotations"]["openWorldHint"] is False
     assert payload["link_inbox_annotations"]["readOnlyHint"] is False
     assert payload["link_inbox_annotations"]["destructiveHint"] is False
     assert payload["retry_inbox_annotations"]["readOnlyHint"] is False
