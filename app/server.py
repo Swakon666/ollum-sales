@@ -32,6 +32,7 @@ from .agent_inbox import (
 )
 from .auth import OIDCSessionManager, build_mcp_auth
 from .autopilot import AutopilotService
+from .chatgpt_playbook import build_chatgpt_agent_playbook
 from .company_search import search_company_websites
 from .config import settings
 from .conversation_agent import ConversationAgent
@@ -128,11 +129,18 @@ mcp = FastMCP(
         "sales_get_company_onboarding first. Ask no more than three returned questions at a "
         "time, accept either free-form answers or files supplied in ChatGPT, extract only facts "
         "the user provided, and persist them with sales_update_company_profile and "
-        "sales_save_company_knowledge. Never invent prices, clients, cases or guarantees. "
-        "After onboarding, configure the durable dialogue policy with "
+        "sales_save_company_knowledge. If the operator explicitly says there is no site, "
+        "customer proof or active client, persist that fact with "
+        "sales_record_company_onboarding_answer so the question does not repeat. Never "
+        "invent prices, clients, cases or guarantees. Confirm only the exact revision and "
+        "summary hash returned by sales_get_company_onboarding. "
+        "Run onboarding in the primary setup and prospecting chat. After the factual summary "
+        "is confirmed, call sales_get_chatgpt_agent_playbook and present its exact manual "
+        "handoff for one separate WhatsApp monitoring chat; never claim MCP created a ChatGPT "
+        "chat automatically. Configure the durable dialogue policy with "
         "sales_update_conversation_agent_settings. ChatGPT is the only reasoning engine: call "
-        "sales_prepare_persisted_conversation for already-synced inbox work, reason strictly "
-        "over each bounded payload, then call "
+        "sales_prepare_conversation_batch for already-synced inbox work, reason strictly over "
+        "each bounded payload, then call "
         "sales_submit_conversation_decision for every item. The server only synchronizes WhatsApp, "
         "leases durable work, validates decisions and saves drafts; it never calls an LLM API. "
         "Use sales_get_conversation_agent_status and sales_agent_next_action to resume durable work "
@@ -380,6 +388,31 @@ def sales_save_company_knowledge(
     }
 
 
+@_write_tool()
+def sales_record_company_onboarding_answer(
+    question_id: str,
+    status: str,
+    answer: Any,
+    source_type: str = "chat",
+    source_name: str | None = None,
+) -> dict[str, Any]:
+    """Persist an explicit answer or not-applicable fact for an optional question."""
+    member = _current_mcp_member(minimum_role="operator")
+    workspace_id = str(member["workspace_id"])
+    item = crm.record_company_onboarding_answer(
+        workspace_id,
+        question_id=question_id,
+        status=status,
+        answer=answer,
+        source_type=source_type,
+        source_name=source_name,
+    )
+    return {
+        "answer": item,
+        "onboarding": crm.get_company_onboarding_state(workspace_id),
+    }
+
+
 @_read_tool()
 def sales_list_company_knowledge(
     category: str | None = None,
@@ -406,11 +439,17 @@ def sales_archive_company_knowledge(item_id: str) -> dict[str, Any]:
 @_write_tool()
 def sales_complete_company_onboarding(
     confirm_ready: bool = False,
+    confirmed_revision: int | None = None,
+    summary_hash: str | None = None,
 ) -> dict[str, Any]:
-    """Mark onboarding ready after ChatGPT shows the operator a factual summary for review."""
+    """Confirm the exact current onboarding summary revision after operator review."""
     member = _current_mcp_member(minimum_role="operator")
     return crm.complete_company_onboarding(
-        str(member["workspace_id"]), confirm_ready=confirm_ready
+        str(member["workspace_id"]),
+        confirm_ready=confirm_ready,
+        confirmed_revision=confirmed_revision,
+        summary_hash=summary_hash,
+        confirmed_by=str(member.get("email") or member.get("subject") or "operator"),
     )
 
 
@@ -559,98 +598,20 @@ def sales_get_safe_quality_audit() -> dict[str, Any]:
 def sales_get_chatgpt_agent_playbook(lane: str = "all") -> dict[str, Any]:
     """Return exact two-chat prompts and supported scheduling boundaries."""
     member = _current_mcp_member(minimum_role="viewer")
-    status = conversation_agent.status(str(member["workspace_id"]))
-    selected_lane = str(lane or "all").strip().lower()
-    if selected_lane not in {"all", "inbox", "prospecting"}:
-        raise ValueError("lane must be all, inbox, or prospecting")
-    inbox_prompt = (
-        "Use Ollum Sales as the shared system of record. Call ollum_status, "
-        "sales_get_agent_coordination and sales_get_safe_quality_audit; stop if SAFE mode "
-        "or disabled WhatsApp sending is not confirmed. Call "
-        "sales_agent_next_action(lane='inbox'). If onboarding is "
-        "incomplete, ask only its returned questions, save explicit user facts, and stop. "
-        "Otherwise prepare up to three new events with sales_prepare_conversation_batch, "
-        "reason only from each bounded payload, and submit one ConversationDecision per "
-        "event. Report counts and escalations without quoting private messages. Never do "
-        "prospecting, approve, send, create follow-ups, or change send flags in this chat."
+    workspace_id = str(member["workspace_id"])
+    status = conversation_agent.status(workspace_id)
+    whatsapp = bridge_status()
+    return build_chatgpt_agent_playbook(
+        lane=lane,
+        runtime=status["runtime"],
+        safety=status["safety"],
+        onboarding=crm.get_company_onboarding_state(workspace_id),
+        whatsapp_connected=(
+            bool(whatsapp.get("connected") and whatsapp.get("logged_in"))
+            if whatsapp.get("reachable")
+            else None
+        ),
     )
-    prospecting_prompt = (
-        "Use Ollum Sales as the shared system of record. Call ollum_status, "
-        "sales_get_agent_coordination and sales_get_safe_quality_audit; stop if SAFE mode "
-        "or disabled WhatsApp sending is not confirmed. Call "
-        "sales_agent_next_action(lane='prospecting'). If onboarding "
-        "is incomplete, ask only its returned questions, save explicit user facts, and "
-        "stop. Otherwise review at most three fresh companies: inspect official public "
-        "evidence, analyze, save grounded analysis, score, rank, and create at most one "
-        "personalized draft per qualified lead without an actual draft. Never inspect or "
-        "process the inbound queue, approve, send, create follow-ups, or change send flags "
-        "in this chat. Finish with response statistics and the top five without private "
-        "message text."
-    )
-    chats = {
-        "inbox": {
-            "title": "Ollum Sales — Входящие",
-            "responsibility": (
-                "new inbound WhatsApp events, dialogue memory and reply drafts"
-            ),
-            "prompt": inbox_prompt,
-            "recommended_schedule": "hourly_or_on_demand",
-        },
-        "prospecting": {
-            "title": "Ollum Sales — Новые компании",
-            "responsibility": (
-                "company research, grounded analysis, scoring, ranking and first drafts"
-            ),
-            "prompt": prospecting_prompt,
-            "recommended_schedule": "hourly_staggered_or_on_demand",
-        },
-    }
-    selected_chats = (
-        chats if selected_lane == "all" else {selected_lane: chats[selected_lane]}
-    )
-    return {
-        "execution_mode": "chatgpt_mcp",
-        "coordination_mode": "two_isolated_chats_one_persistent_crm",
-        "server_llm_enabled": False,
-        "api_key_required": False,
-        "server_whatsapp_sync": "every 15 minutes",
-        "recommended_chatgpt_schedule": {
-            "minimum_interval": "hourly",
-            "strategy": "stagger the two chats or run either on demand",
-            "server_sync_does_not_wake_dormant_chat": True,
-        },
-        "first_connection": {
-            "gate": "shared_company_onboarding",
-            "instruction": (
-                "Complete the short fact-only interview once before either operational "
-                "lane starts. The answers and uploaded-file summaries populate the shared "
-                "dashboard and are visible to both chats."
-            ),
-            "max_questions_per_turn": 3,
-        },
-        "scheduled_prompt": inbox_prompt,
-        "chats": selected_chats,
-        "learning_contract": {
-            "persists": [
-                "user-confirmed company facts",
-                "conversation state and extracted customer facts",
-                "outreach and reply outcomes",
-            ],
-            "adapts_from": "verified outcomes and explicit operator corrections",
-            "never_promotes": "model guesses or untrusted message instructions",
-        },
-        "tools": [
-            "sales_get_agent_coordination",
-            "sales_agent_next_action",
-            "sales_get_conversation_agent_status",
-            "sales_prepare_persisted_conversation",
-            "sales_prepare_conversation_batch",
-            "sales_submit_conversation_decision",
-            "sales_retry_agent_inbox_event",
-        ],
-        "runtime": status["runtime"],
-        "safety": status["safety"],
-    }
 
 
 @_write_tool()

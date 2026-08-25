@@ -46,7 +46,7 @@ The server exposes 68 tools. Existing tools remain compatible, plus
 tokens or private conversation data:
 
 - campaigns and discovery: `sales_create_campaign`, `sales_search_companies`, `sales_import_leads`, `sales_list_campaigns`, `sales_get_campaign`;
-- company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding`;
+- company onboarding: `sales_get_company_onboarding`, `sales_update_company_profile`, `sales_save_company_knowledge`, `sales_record_company_onboarding_answer`, `sales_list_company_knowledge`, `sales_archive_company_knowledge`, `sales_complete_company_onboarding` with exact revision/hash confirmation;
 - durable agent queue: `sales_sync_whatsapp_inbox`, `sales_list_agent_inbox`, `sales_link_agent_inbox_lead`, `sales_update_agent_inbox_status`, `sales_retry_agent_inbox_event`, `sales_agent_next_action` with isolated `inbox` and `prospecting` lanes;
 - shared two-chat coordination: `sales_get_agent_coordination` reports onboarding, lane progress, replied, never replied, awaiting reply, and durable memory without private message text;
 - privacy-safe quality auditing: `sales_get_safe_quality_audit` reports stale evidence, duplicate companies, stuck inbox work, retry exhaustion, legacy classifications, and draft/send safety using aggregate counts only;
@@ -93,6 +93,11 @@ sessions, inbound agent queue, CRM, SAFE Autopilot, drafts,
 audit/jobs, workspace members and roles, plugin readiness, and a short-lived WhatsApp
 QR. All profile and queue actions update without a page reload. The bridge itself
 remains private on the Docker network.
+
+The current closed beta is intentionally `single_company_closed_beta`: invitations add
+members to the existing Ollum Group workspace. Isolated onboarding for external companies
+is not advertised or enabled until campaigns, leads, drafts, interactions, reports and
+Autopilot state have all been migrated to mandatory workspace scoping.
 
 ## Architecture
 
@@ -234,9 +239,10 @@ follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot start unless all of these are tru
 The worker polls WhatsApp every 15 minutes and starts an Autopilot cycle only when `next_cycle_at` is due. The cycle
 interval itself defaults to 60 minutes.
 
-The worker never generates a reply. The inbound ChatGPT chat calls
-`sales_agent_next_action(lane="inbox")` and prepares exact phone/JID conversations. The separate
-prospecting chat calls `sales_agent_next_action(lane="prospecting")`; it cannot consume inbox work.
+The worker never generates a reply. The primary ChatGPT chat completes fact-only onboarding and then
+calls `sales_agent_next_action(lane="prospecting")`; it cannot consume inbox work. After confirmation,
+the playbook returns a manual handoff packet for one separate WhatsApp monitoring chat. That chat calls
+`sales_agent_next_action(lane="inbox")` and prepares exact phone/JID conversations; it cannot prospect.
 Both coordinate through `sales_get_agent_coordination` and the same persistent CRM. Each inbound
 decision is submitted with `sales_submit_conversation_decision`. The server applies the grounded quality gate
 before storing a `draft`; low-confidence, contractual, sensitive, or unsupported questions move

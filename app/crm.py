@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
@@ -67,6 +68,12 @@ COMPANY_KNOWLEDGE_CATEGORIES = {
     "sales_process",
 }
 COMPANY_KNOWLEDGE_STATUSES = {"active", "archived"}
+COMPANY_ONBOARDING_ANSWER_STATUSES = {"answered", "not_applicable"}
+COMPANY_ONBOARDING_QUESTION_IDS = {
+    "website",
+    "customer_proof",
+    "active_clients",
+}
 AGENT_INBOX_STATUSES = {
     "new",
     "acknowledged",
@@ -138,6 +145,24 @@ def normalize_datetime(value: str | None) -> str:
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _has_grounded_knowledge_content(value: Any) -> bool:
+    """Reject placeholders while allowing explicit boolean/zero-valued facts."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, bool | int | float):
+        return True
+    if isinstance(value, dict):
+        return any(
+            bool(str(key).strip()) and _has_grounded_knowledge_content(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_grounded_knowledge_content(item) for item in value)
+    return bool(str(value).strip())
 
 
 def _load_json(value: str | None, default: Any) -> Any:
@@ -398,7 +423,11 @@ class SalesCRM:
                     revision INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    completed_at TEXT
+                    completed_at TEXT,
+                    confirmed_revision INTEGER,
+                    confirmed_summary_hash TEXT,
+                    confirmed_by TEXT,
+                    confirmed_at TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS company_knowledge_items (
@@ -412,6 +441,18 @@ class SalesCRM:
                     status TEXT NOT NULL DEFAULT 'active',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS company_onboarding_answers (
+                    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+                    question_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    answer_json TEXT NOT NULL DEFAULT '{}',
+                    source_type TEXT NOT NULL DEFAULT 'chat',
+                    source_name TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (workspace_id, question_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS agent_inbox_events (
@@ -501,6 +542,8 @@ class SalesCRM:
                     ON workspace_members(subject, status);
                 CREATE INDEX IF NOT EXISTS idx_company_knowledge_workspace
                     ON company_knowledge_items(workspace_id, status, category, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_company_onboarding_answers_workspace
+                    ON company_onboarding_answers(workspace_id, updated_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_workspace
                     ON agent_inbox_events(workspace_id, status, received_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_chat
@@ -559,6 +602,22 @@ class SalesCRM:
                     "ALTER TABLE conversation_agent_settings "
                     "ADD COLUMN response_sla_minutes INTEGER NOT NULL DEFAULT 60"
                 )
+            company_profile_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(company_profiles)"
+                ).fetchall()
+            }
+            for name, column_type in (
+                ("confirmed_revision", "INTEGER"),
+                ("confirmed_summary_hash", "TEXT"),
+                ("confirmed_by", "TEXT"),
+                ("confirmed_at", "TEXT"),
+            ):
+                if name not in company_profile_columns:
+                    connection.execute(
+                        f"ALTER TABLE company_profiles ADD COLUMN {name} {column_type}"
+                    )
             connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_agent_inbox_claim
@@ -587,7 +646,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 12")
+            connection.execute("PRAGMA user_version = 14")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -1018,6 +1077,10 @@ class SalesCRM:
             "created_at": None,
             "updated_at": None,
             "completed_at": None,
+            "confirmed_revision": None,
+            "confirmed_summary_hash": None,
+            "confirmed_by": None,
+            "confirmed_at": None,
         }
 
     def update_company_profile(
@@ -1066,6 +1129,13 @@ class SalesCRM:
                 """,
                 (workspace_id, timestamp, timestamp),
             )
+            existing = connection.execute(
+                "SELECT * FROM company_profiles WHERE workspace_id = ?",
+                (workspace_id,),
+            ).fetchone()
+            assert existing is not None
+            if all(existing[name] == value for name, value in clean.items()):
+                return self._company_profile_from_row(existing)
             connection.execute(
                 f"""
                 UPDATE company_profiles
@@ -1076,7 +1146,11 @@ class SalesCRM:
                     END,
                     revision = revision + 1,
                     updated_at = ?,
-                    completed_at = NULL
+                    completed_at = NULL,
+                    confirmed_revision = NULL,
+                    confirmed_summary_hash = NULL,
+                    confirmed_by = NULL,
+                    confirmed_at = NULL
                 WHERE workspace_id = ?
                 """,
                 (*values, timestamp, workspace_id),
@@ -1115,6 +1189,10 @@ class SalesCRM:
             raise ValueError("source_type exceeds 80 characters")
         if clean_source_name and len(clean_source_name) > 500:
             raise ValueError("source_name exceeds 500 characters")
+        if not _has_grounded_knowledge_content(content):
+            raise ValueError(
+                "knowledge content must contain at least one explicit grounded fact"
+            )
         encoded = _json(content)
         if len(encoded.encode("utf-8")) > 64_000:
             raise ValueError(
@@ -1126,13 +1204,45 @@ class SalesCRM:
         with self.connect() as connection:
             existing = connection.execute(
                 """
-                SELECT id FROM company_knowledge_items
+                SELECT * FROM company_knowledge_items
                 WHERE id = ? AND workspace_id = ?
                 """,
                 (knowledge_id, workspace_id),
             ).fetchone()
+            if item_id is None and existing is None:
+                existing = connection.execute(
+                    """
+                    SELECT * FROM company_knowledge_items
+                    WHERE workspace_id = ? AND category = ? AND title = ?
+                      AND content_json = ? AND source_type = ?
+                      AND COALESCE(source_name, '') = COALESCE(?, '')
+                      AND status = 'active'
+                    ORDER BY created_at LIMIT 1
+                    """,
+                    (
+                        workspace_id,
+                        clean_category,
+                        clean_title,
+                        encoded,
+                        clean_source_type,
+                        clean_source_name,
+                    ),
+                ).fetchone()
+                if existing is not None:
+                    return self._company_knowledge_from_row(existing)
             if item_id and existing is None:
                 raise ValueError("company knowledge item not found")
+            if existing is not None and all(
+                (
+                    existing["category"] == clean_category,
+                    existing["title"] == clean_title,
+                    existing["content_json"] == encoded,
+                    existing["source_type"] == clean_source_type,
+                    existing["source_name"] == clean_source_name,
+                    existing["status"] == "active",
+                )
+            ):
+                return self._company_knowledge_from_row(existing)
             if existing is None:
                 connection.execute(
                     """
@@ -1172,6 +1282,25 @@ class SalesCRM:
                         workspace_id,
                     ),
                 )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO company_profiles (
+                    workspace_id, onboarding_status, revision, created_at, updated_at
+                ) VALUES (?, 'not_started', 0, ?, ?)
+                """,
+                (workspace_id, timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE company_profiles
+                SET onboarding_status = 'in_progress', revision = revision + 1,
+                    updated_at = ?, completed_at = NULL,
+                    confirmed_revision = NULL, confirmed_summary_hash = NULL,
+                    confirmed_by = NULL, confirmed_at = NULL
+                WHERE workspace_id = ?
+                """,
+                (timestamp, workspace_id),
+            )
             row = connection.execute(
                 "SELECT * FROM company_knowledge_items WHERE id = ?",
                 (knowledge_id,),
@@ -1227,15 +1356,150 @@ class SalesCRM:
             )
             if cursor.rowcount != 1:
                 raise ValueError("active company knowledge item not found")
+            connection.execute(
+                """
+                UPDATE company_profiles
+                SET onboarding_status = 'in_progress', revision = revision + 1,
+                    updated_at = ?, completed_at = NULL,
+                    confirmed_revision = NULL, confirmed_summary_hash = NULL,
+                    confirmed_by = NULL, confirmed_at = NULL
+                WHERE workspace_id = ?
+                """,
+                (timestamp, workspace_id),
+            )
             row = connection.execute(
                 "SELECT * FROM company_knowledge_items WHERE id = ?", (item_id,)
             ).fetchone()
         assert row is not None
         return self._company_knowledge_from_row(row)
 
+    def list_company_onboarding_answers(
+        self, workspace_id: str
+    ) -> dict[str, dict[str, Any]]:
+        workspace_id = self._workspace_id(workspace_id)
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM company_onboarding_answers
+                WHERE workspace_id = ? ORDER BY question_id
+                """,
+                (workspace_id,),
+            ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            item["answer"] = _load_json(item.pop("answer_json"), {})
+            result[str(row["question_id"])] = item
+        return result
+
+    def record_company_onboarding_answer(
+        self,
+        workspace_id: str,
+        *,
+        question_id: str,
+        status: str,
+        answer: Any,
+        source_type: str = "chat",
+        source_name: str | None = None,
+    ) -> dict[str, Any]:
+        workspace_id = self._workspace_id(workspace_id)
+        self.get_workspace(workspace_id)
+        clean_question_id = self._validate_status(
+            question_id,
+            COMPANY_ONBOARDING_QUESTION_IDS,
+            "onboarding question",
+        )
+        clean_status = self._validate_status(
+            status,
+            COMPANY_ONBOARDING_ANSWER_STATUSES,
+            "onboarding answer status",
+        )
+        if not _has_grounded_knowledge_content(answer):
+            raise ValueError("onboarding answer must contain an explicit operator fact")
+        clean_source_type = " ".join(str(source_type or "chat").split()) or "chat"
+        clean_source_name = " ".join(str(source_name or "").split()) or None
+        encoded = _json(answer)
+        if len(encoded.encode("utf-8")) > 16_000:
+            raise ValueError("onboarding answer exceeds 16 KB")
+        timestamp = utc_now()
+        with self.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT * FROM company_onboarding_answers
+                WHERE workspace_id = ? AND question_id = ?
+                """,
+                (workspace_id, clean_question_id),
+            ).fetchone()
+            if existing is not None and all(
+                (
+                    existing["status"] == clean_status,
+                    existing["answer_json"] == encoded,
+                    existing["source_type"] == clean_source_type,
+                    existing["source_name"] == clean_source_name,
+                )
+            ):
+                result = dict(existing)
+                result["answer"] = _load_json(result.pop("answer_json"), {})
+                return result
+            connection.execute(
+                """
+                INSERT INTO company_onboarding_answers (
+                    workspace_id, question_id, status, answer_json, source_type,
+                    source_name, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(workspace_id, question_id) DO UPDATE SET
+                    status = excluded.status,
+                    answer_json = excluded.answer_json,
+                    source_type = excluded.source_type,
+                    source_name = excluded.source_name,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    workspace_id,
+                    clean_question_id,
+                    clean_status,
+                    encoded,
+                    clean_source_type,
+                    clean_source_name,
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO company_profiles (
+                    workspace_id, onboarding_status, revision, created_at, updated_at
+                ) VALUES (?, 'not_started', 0, ?, ?)
+                """,
+                (workspace_id, timestamp, timestamp),
+            )
+            connection.execute(
+                """
+                UPDATE company_profiles
+                SET onboarding_status = 'in_progress', revision = revision + 1,
+                    updated_at = ?, completed_at = NULL,
+                    confirmed_revision = NULL, confirmed_summary_hash = NULL,
+                    confirmed_by = NULL, confirmed_at = NULL
+                WHERE workspace_id = ?
+                """,
+                (timestamp, workspace_id),
+            )
+            row = connection.execute(
+                """
+                SELECT * FROM company_onboarding_answers
+                WHERE workspace_id = ? AND question_id = ?
+                """,
+                (workspace_id, clean_question_id),
+            ).fetchone()
+        assert row is not None
+        result = dict(row)
+        result["answer"] = _load_json(result.pop("answer_json"), {})
+        return result
+
     def get_company_onboarding_state(self, workspace_id: str) -> dict[str, Any]:
         workspace_id = self._workspace_id(workspace_id)
         profile = self.get_company_profile(workspace_id)
+        answers = self.list_company_onboarding_answers(workspace_id)
         with self.connect() as connection:
             rows = connection.execute(
                 """
@@ -1262,9 +1526,13 @@ class SalesCRM:
         knowledge_checks = {
             "services": counts.get("service", 0) > 0,
             "prices": counts.get("price", 0) > 0,
-            "customer_proof": counts.get("case", 0) + counts.get("closed_client", 0)
-            > 0,
-            "active_clients": counts.get("current_client", 0) > 0,
+            "customer_proof": (
+                counts.get("case", 0) + counts.get("closed_client", 0) > 0
+                or "customer_proof" in answers
+            ),
+            "active_clients": (
+                counts.get("current_client", 0) > 0 or "active_clients" in answers
+            ),
         }
         missing.extend(
             name for name, complete in knowledge_checks.items() if not complete
@@ -1287,12 +1555,21 @@ class SalesCRM:
         ready = all(ready_requirements)
 
         questions: list[dict[str, Any]] = []
-        if not profile.get("company_name") or not profile.get("website_url"):
+        if not profile.get("company_name"):
             questions.append(
                 {
                     "id": "identity",
                     "prompt": "Как называется компания и какой у неё основной сайт? Если сайта нет, так и скажите.",
                     "accepts": ["free_text", "url"],
+                }
+            )
+        elif not profile.get("website_url") and "website" not in answers:
+            questions.append(
+                {
+                    "id": "website",
+                    "prompt": "Какой у компании основной сайт? Если сайта нет, подтвердите это прямо — такой ответ сохранится и вопрос не повторится.",
+                    "accepts": ["free_text", "url"],
+                    "allows_not_applicable": True,
                 }
             )
         if not profile.get("industry") or not profile.get("geography"):
@@ -1360,18 +1637,114 @@ class SalesCRM:
                 }
             )
 
+        profile_summary_fields = (
+            "company_name",
+            "website_url",
+            "industry",
+            "geography",
+            "positioning",
+            "target_customer",
+            "sales_process",
+            "tone_of_voice",
+            "primary_goal",
+            "constraints",
+            "language",
+        )
+        review_summary = {
+            "profile": {
+                name: profile.get(name)
+                for name in profile_summary_fields
+                if profile.get(name) is not None
+            },
+            "knowledge": [
+                {
+                    "category": item["category"],
+                    "title": item["title"],
+                    "content": item["content"],
+                    "source_type": item["source_type"],
+                    "source_name": item["source_name"],
+                }
+                for item in sorted(
+                    self.list_company_knowledge(workspace_id, limit=500),
+                    key=lambda item: (
+                        str(item["category"]),
+                        str(item["title"]),
+                        str(item["id"]),
+                    ),
+                )
+            ],
+            "explicit_answers": [
+                {
+                    "question_id": item["question_id"],
+                    "status": item["status"],
+                    "answer": item["answer"],
+                    "source_type": item["source_type"],
+                    "source_name": item["source_name"],
+                }
+                for item in answers.values()
+            ],
+        }
+        required_revision = int(profile["revision"])
+        summary_hash = hashlib.sha256(
+            _json(
+                {
+                    "revision": required_revision,
+                    "review_summary": review_summary,
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        confirmed_revision = profile.get("confirmed_revision")
+        confirmed_summary_hash = profile.get("confirmed_summary_hash")
+        confirmation_current = (
+            confirmed_revision == required_revision
+            and confirmed_summary_hash == summary_hash
+        )
+        sales_ready = (
+            profile["onboarding_status"] == "ready" and ready and confirmation_current
+        )
         return {
             "profile": profile,
             "knowledge_counts": counts,
             "completion_percent": completion_percent,
             "ready_for_sales": ready,
+            "sales_ready": sales_ready,
+            "review_summary": review_summary,
+            "answers": answers,
+            "confirmation": {
+                "required_revision": required_revision,
+                "summary_hash": summary_hash,
+                "confirmed_revision": confirmed_revision,
+                "confirmed_summary_hash": confirmed_summary_hash,
+                "confirmed_by": profile.get("confirmed_by"),
+                "confirmed_at": profile.get("confirmed_at"),
+                "current": confirmation_current,
+            },
+            "readiness": {
+                "minimum_ready": ready,
+                "confirmed": profile["onboarding_status"] == "ready",
+                "operational_ready": sales_ready,
+                "enrichment_complete": not missing,
+            },
             "missing": missing,
             "next_questions": questions[:3],
             "onboarding_status": profile["onboarding_status"],
+            "next_step": (
+                "configure_primary_prospecting_and_create_whatsapp_monitor"
+                if sales_ready
+                else "review_and_confirm_company_profile"
+                if ready
+                else "continue_company_interview"
+            ),
         }
 
     def complete_company_onboarding(
-        self, workspace_id: str, *, confirm_ready: bool
+        self,
+        workspace_id: str,
+        *,
+        confirm_ready: bool,
+        confirmed_revision: int | None,
+        summary_hash: str | None,
+        confirmed_by: str | None = None,
     ) -> dict[str, Any]:
         if not confirm_ready:
             raise ValueError(
@@ -1381,19 +1754,73 @@ class SalesCRM:
         state = self.get_company_onboarding_state(workspace_id)
         if not state["ready_for_sales"]:
             raise ValueError("onboarding is incomplete: " + ", ".join(state["missing"]))
+        required_revision = int(state["confirmation"]["required_revision"])
+        if confirmed_revision != required_revision:
+            raise ValueError(
+                "stale onboarding revision; review the latest factual summary"
+            )
+        expected_hash = str(state["confirmation"]["summary_hash"])
+        if summary_hash != expected_hash:
+            raise ValueError(
+                "onboarding summary hash mismatch; review the latest factual summary"
+            )
         timestamp = utc_now()
+        clean_confirmer = " ".join(str(confirmed_by or "operator").split())[:320]
         with self.connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE company_profiles
                 SET onboarding_status = 'ready', completed_at = ?, updated_at = ?,
-                    revision = revision + 1
-                WHERE workspace_id = ?
+                    confirmed_revision = ?, confirmed_summary_hash = ?,
+                    confirmed_by = ?, confirmed_at = ?
+                WHERE workspace_id = ? AND revision = ?
                 """,
-                (timestamp, timestamp, workspace_id),
+                (
+                    timestamp,
+                    timestamp,
+                    required_revision,
+                    expected_hash,
+                    clean_confirmer,
+                    timestamp,
+                    workspace_id,
+                    required_revision,
+                ),
             )
             if cursor.rowcount != 1:
-                raise ValueError("company profile not found")
+                raise ValueError(
+                    "stale onboarding revision; review the latest factual summary"
+                )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO conversation_agent_settings (
+                    workspace_id, created_at, updated_at
+                ) VALUES (?, ?, ?)
+                """,
+                (workspace_id, timestamp, timestamp),
+            )
+            profile = state["profile"]
+            connection.execute(
+                """
+                UPDATE conversation_agent_settings
+                SET niche = CASE
+                        WHEN niche = 'auto' AND ? IS NOT NULL THEN ? ELSE niche
+                    END,
+                    objective = COALESCE(objective, ?),
+                    tone = COALESCE(tone, ?),
+                    instructions = COALESCE(instructions, ?),
+                    updated_at = ?
+                WHERE workspace_id = ?
+                """,
+                (
+                    profile.get("industry"),
+                    profile.get("industry"),
+                    profile.get("primary_goal"),
+                    profile.get("tone_of_voice"),
+                    profile.get("constraints"),
+                    timestamp,
+                    workspace_id,
+                ),
+            )
         return self.get_company_onboarding_state(workspace_id)
 
     def get_conversation_agent_settings(self, workspace_id: str) -> dict[str, Any]:

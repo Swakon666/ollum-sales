@@ -24,6 +24,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .agent_inbox import resolve_target_chat_jid, sync_whatsapp_inbox
 from .auth import AuthenticationError, OIDCSessionManager
 from .autopilot import AutopilotService
+from .chatgpt_playbook import first_connection_plan, lane_prompts, two_chat_handoff
 from .config import Settings
 from .conversation_agent import ConversationAgent
 from .crm import SalesCRM, utc_now
@@ -37,6 +38,7 @@ from .whatsapp_service import (
 
 logger = logging.getLogger("ollum-sales-admin")
 STATIC_ROOT = Path(__file__).with_name("admin_static")
+OAUTH_STATIC_ROOT = Path(__file__).with_name("admin_assets")
 ROLE_RANK = {"viewer": 0, "operator": 1, "owner": 2}
 mimetypes.add_type("font/woff2", ".woff2")
 
@@ -271,6 +273,18 @@ def _public_user(user: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _require_operational_company(
+    context: AdminContext, user: dict[str, Any]
+) -> dict[str, Any]:
+    onboarding = context.crm.get_company_onboarding_state(str(user["workspace_id"]))
+    if not onboarding["sales_ready"]:
+        raise AdminRequestError(
+            409,
+            "Complete and confirm the company onboarding before starting operational work",
+        )
+    return onboarding
+
+
 def _require_user(request: Request) -> dict[str, Any]:
     user = _get_user(request)
     if user is None:
@@ -373,7 +387,12 @@ def _metadata_url(resource_url: str | None) -> str | None:
     )
 
 
-def _plugin_status(settings: Settings) -> dict[str, Any]:
+def _plugin_status(
+    settings: Settings,
+    *,
+    onboarding: dict[str, Any] | None = None,
+    whatsapp_connected: bool | None = None,
+) -> dict[str, Any]:
     resource_url = settings.mcp_resource_url
     if not resource_url and settings.public_base_url:
         resource_url = f"{settings.public_base_url.rstrip('/')}/mcp"
@@ -390,6 +409,7 @@ def _plugin_status(settings: Settings) -> dict[str, Any]:
         "beta_allowlist_configured": bool(settings.admin_allowed_emails),
         "session_secret_configured": bool(settings.admin_session_secret),
     }
+    prompts = lane_prompts()
     return {
         "name": "Ollum Sales",
         "description": (
@@ -400,13 +420,20 @@ def _plugin_status(settings: Settings) -> dict[str, Any]:
         "server_llm_enabled": False,
         "server_sync_interval_minutes": 15,
         "recommended_chatgpt_schedule": "hourly_in_chat",
-        "scheduled_prompt": (
-            "Используй Ollum Sales. Проверь статус, получи до трёх новых событий через "
-            "sales_list_agent_inbox и для каждого отдельно вызови "
-            "sales_prepare_persisted_conversation с точным chat_jid. Рассуждай только "
-            "по возвращённым фактам и передай один строгий ConversationDecision через "
-            "sales_submit_conversation_decision. Покажи черновики и эскалации без "
-            "цитирования входящих сообщений. Ничего не одобряй и не отправляй."
+        "tenant_mode": "single_company_closed_beta",
+        "external_tenant_onboarding_supported": False,
+        "scheduled_prompt": prompts["inbox"],
+        "scheduled_prompts": prompts,
+        "chat_handoff": two_chat_handoff(),
+        "first_connection": first_connection_plan(
+            onboarding
+            or {
+                "ready_for_sales": False,
+                "sales_ready": False,
+                "onboarding_status": "not_started",
+                "next_questions": [],
+            },
+            whatsapp_connected=whatsapp_connected,
         ),
         "server_url": resource_url,
         "authentication": "OAuth",
@@ -528,6 +555,7 @@ async def api_bootstrap(
     wa = bridge_status()
     pairing = bridge_pairing_status()
     workspace_id = str(user["workspace_id"])
+    company_onboarding = context.crm.get_company_onboarding_state(workspace_id)
     workspace = context.crm.get_workspace(workspace_id)
     members = context.crm.list_workspace_members(workspace_id)
     invitations = context.crm.list_workspace_invitations(workspace_id)
@@ -541,9 +569,7 @@ async def api_bootstrap(
                 ),
                 "pending_invitations": len(invitations),
             },
-            "company_onboarding": context.crm.get_company_onboarding_state(
-                workspace_id
-            ),
+            "company_onboarding": company_onboarding,
             "agent_inbox": context.crm.agent_inbox_summary(workspace_id),
             "agent_coordination": context.crm.agent_coordination_summary(
                 workspace_id, include_leads=True, limit=12
@@ -588,7 +614,11 @@ async def api_bootstrap(
             "cycles": context.crm.list_autopilot_cycles(limit=12),
             "audit": context.crm.list_admin_audit(limit=20),
             "jobs": context.jobs.list(limit=20),
-            "plugin": _plugin_status(context.settings),
+            "plugin": _plugin_status(
+                context.settings,
+                onboarding=company_onboarding,
+                whatsapp_connected=bool(wa.get("connected") and wa.get("logged_in")),
+            ),
             "safety": {
                 "safe_mode": state.get("mode") == "safe",
                 "whatsapp_send_enabled": bool(context.settings.allow_whatsapp_send),
@@ -683,6 +713,30 @@ async def api_update_company_profile(
         details={"fields": sorted(body)},
     )
     return JSONResponse(context.crm.get_company_onboarding_state(workspace_id))
+
+
+@admin_endpoint(write=True)
+async def api_complete_company_onboarding(
+    request: Request, context: AdminContext, user: dict[str, Any]
+) -> Response:
+    body = await _read_json(request)
+    workspace_id = str(user["workspace_id"])
+    result = context.crm.complete_company_onboarding(
+        workspace_id,
+        confirm_ready=body.get("confirm_ready") is True,
+        confirmed_revision=int(body["confirmed_revision"]),
+        summary_hash=str(body.get("summary_hash") or ""),
+        confirmed_by=str(user["email"]),
+    )
+    context.crm.record_admin_audit(
+        actor=str(user["email"]),
+        action="company.onboarding_confirm",
+        target_type="workspace",
+        target_id=workspace_id,
+        outcome="success",
+        details={"confirmed_revision": result["profile"]["revision"]},
+    )
+    return JSONResponse(result)
 
 
 @admin_endpoint()
@@ -1131,6 +1185,7 @@ async def api_autopilot_start(
     requested_mode = str(body.get("mode") or "safe").strip().lower()
     if requested_mode != "safe":
         raise AdminRequestError(409, "Closed beta only permits SAFE mode")
+    _require_operational_company(context, user)
     result = context.autopilot.start(
         mode="safe",
         interval_minutes=_bounded_int(
@@ -1196,6 +1251,7 @@ async def api_autopilot_run(
     state = context.autopilot.status()
     if state.get("mode") != "safe":
         raise AdminRequestError(409, "Manual beta cycles require SAFE mode")
+    _require_operational_company(context, user)
     job = context.jobs.create(name="autopilot.run_cycle", actor=str(user["email"]))
     context.crm.record_admin_audit(
         actor=str(user["email"]),
@@ -1396,6 +1452,11 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             api_update_company_profile,
             methods=["PATCH"],
         ),
+        Route(
+            "/api/admin/company/onboarding/complete",
+            api_complete_company_onboarding,
+            methods=["POST"],
+        ),
         Route("/api/admin/company/knowledge", api_company_knowledge, methods=["GET"]),
         Route(
             "/api/admin/company/knowledge",
@@ -1483,6 +1544,11 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
             api_update_company_profile,
             methods=["PATCH"],
         ),
+        Route(
+            "/api/v1/company/onboarding/complete",
+            api_complete_company_onboarding,
+            methods=["POST"],
+        ),
         Route("/api/v1/company/knowledge", api_company_knowledge, methods=["GET"]),
         Route(
             "/api/v1/company/knowledge",
@@ -1560,5 +1626,10 @@ def create_admin_routes(context: AdminContext) -> list[Any]:
         Route("/api/v1/autopilot/stop", api_autopilot_stop, methods=["POST"]),
         Route("/api/v1/autopilot/run", api_autopilot_run, methods=["POST"]),
         Route("/api/v1/sheets/sync", api_sheets_sync, methods=["POST"]),
+        Mount(
+            "/oauth-assets",
+            app=StaticFiles(directory=OAUTH_STATIC_ROOT),
+            name="oauth-assets",
+        ),
         Mount("/assets", app=StaticFiles(directory=STATIC_ROOT), name="admin-assets"),
     ]

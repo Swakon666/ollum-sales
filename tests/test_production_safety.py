@@ -55,6 +55,22 @@ def test_production_deployment_requires_manual_dispatch() -> None:
     assert "DEPLOY_MODE: ${{ inputs.mode }}" in workflow
 
 
+def test_server_preflight_is_scoped_and_reports_capacity() -> None:
+    preflight = (REPOSITORY_ROOT / "deploy" / "server_preflight.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "getconf _NPROCESSORS_ONLN" in preflight
+    assert "/proc/loadavg" in preflight
+    assert "df -ih /" in preflight
+    assert "current_release=" in preflight
+    assert "sudo -n docker info" in preflight
+    assert '"${docker_cmd[@]}" compose ps' in preflight
+    assert "docker ps --format" not in preflight
+    assert "docker compose ls" not in preflight
+    assert "ss -lntup" not in preflight
+
+
 def test_public_verification_uses_local_oauth_issuer_when_dcr_is_enabled() -> None:
     workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "deploy.yml").read_text(
         encoding="utf-8"

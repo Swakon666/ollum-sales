@@ -149,6 +149,9 @@
         "sales_save_company_knowledge": {
           "approval_mode": "approve"
         },
+        "sales_record_company_onboarding_answer": {
+          "approval_mode": "approve"
+        },
         "sales_save_outreach_draft": {
           "approval_mode": "approve"
         },

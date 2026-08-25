@@ -163,6 +163,27 @@ class FakeSessions:
 def admin_client(tmp_path, monkeypatch):
     crm = SalesCRM(tmp_path / "admin.db")
     crm.ensure_workspace("ollum-group", "Ollum Group")
+    crm.update_company_profile(
+        "ollum-group",
+        company_name="Ollum Group",
+        industry="Digital services",
+        target_customer="B2B companies",
+        positioning="Grounded sales automation",
+    )
+    for category, title in (("service", "Sales agent"), ("price", "Quote")):
+        crm.save_company_knowledge(
+            "ollum-group",
+            category=category,
+            title=title,
+            content={"details": "Confirmed by operator"},
+        )
+    onboarding = crm.get_company_onboarding_state("ollum-group")
+    crm.complete_company_onboarding(
+        "ollum-group",
+        confirm_ready=True,
+        confirmed_revision=onboarding["confirmation"]["required_revision"],
+        summary_hash=onboarding["confirmation"]["summary_hash"],
+    )
     autopilot = FakeAutopilot()
     sheets = FakeSheets()
     beta_settings = replace(
@@ -407,7 +428,20 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     assert 'id="conversation-agent-form"' in page.text
     assert 'name="response_sla_minutes"' in page.text
     assert 'id="agent-sessions-table"' in page.text
+    assert 'id="setup-journey"' in page.text
+    assert 'id="chat-handoff-grid"' in page.text
+    assert 'id="onboarding-review-summary"' in page.text
+    assert 'id="onboarding-confirm-form"' in page.text
+    assert 'id="onboarding-progress" role="progressbar"' in page.text
     assert "function renderConversationAgent(" in script.text
+    assert "keep_primary_chat_and_create_whatsapp_monitoring_chat" in script.text
+    assert "function confirmCompanyOnboarding(" in script.text
+    assert '"/api/v1/company/onboarding/complete"' in script.text
+    assert (
+        'initialView === "overview" && !state.data?.company_onboarding?.sales_ready'
+        in script.text
+    )
+    assert "plugin.chat_handoff" in script.text
     assert "function retryInboxEvent(" in script.text
     assert "transition: all" not in stylesheet.text
     assert "background-image: none" in stylesheet.text
@@ -601,9 +635,20 @@ def test_bootstrap_reports_safe_guards_and_no_send_control(admin_client) -> None
     assert payload["plugin"]["server_llm_enabled"] is False
     assert payload["plugin"]["server_sync_interval_minutes"] == 15
     assert payload["plugin"]["recommended_chatgpt_schedule"] == "hourly_in_chat"
-    assert (
-        "sales_prepare_persisted_conversation" in payload["plugin"]["scheduled_prompt"]
-    )
+    assert "sales_prepare_conversation_batch" in payload["plugin"]["scheduled_prompt"]
+    assert "lane='inbox'" in payload["plugin"]["scheduled_prompts"]["inbox"]
+    assert "lane='prospecting'" in payload["plugin"]["scheduled_prompts"]["prospecting"]
+    assert payload["plugin"]["chat_handoff"]["primary_chat"]["lane"] == "prospecting"
+    assert payload["plugin"]["chat_handoff"]["monitoring_chat"]["lane"] == "inbox"
+
+
+def test_oauth_stylesheet_is_served_from_one_public_route(admin_client) -> None:
+    client, _context, _autopilot, _sheets = admin_client
+
+    response = client.get("/oauth-assets/oauth.css")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/css")
 
 
 def test_write_routes_require_scope_and_csrf(admin_client) -> None:
@@ -629,6 +674,55 @@ def test_write_routes_require_scope_and_csrf(admin_client) -> None:
     )
     assert safe.status_code == 200
     assert autopilot.start_calls[0]["mode"] == "safe"
+
+
+def test_operational_actions_wait_for_confirmed_onboarding(admin_client) -> None:
+    client, context, autopilot, _sheets = admin_client
+    _login(client)
+    price = context.crm.list_company_knowledge(
+        "ollum-group", category="price", limit=10
+    )[0]
+    context.crm.archive_company_knowledge("ollum-group", price["id"])
+
+    response = client.post(
+        "/api/v1/autopilot/start",
+        json={"mode": "safe"},
+        headers=_csrf_headers(),
+    )
+
+    assert response.status_code == 409
+    assert "onboarding" in response.json()["error"]
+    assert autopilot.start_calls == []
+
+
+def test_dashboard_confirms_only_exact_onboarding_revision(admin_client) -> None:
+    client, context, _autopilot, _sheets = admin_client
+    _login(client)
+    state = context.crm.get_company_onboarding_state("ollum-group")
+
+    stale = client.post(
+        "/api/v1/company/onboarding/complete",
+        json={
+            "confirm_ready": True,
+            "confirmed_revision": state["confirmation"]["required_revision"],
+            "summary_hash": "0" * 64,
+        },
+        headers=_csrf_headers(),
+    )
+    exact = client.post(
+        "/api/v1/company/onboarding/complete",
+        json={
+            "confirm_ready": True,
+            "confirmed_revision": state["confirmation"]["required_revision"],
+            "summary_hash": state["confirmation"]["summary_hash"],
+        },
+        headers=_csrf_headers(),
+    )
+
+    assert stale.status_code == 400
+    assert exact.status_code == 200
+    assert exact.json()["sales_ready"] is True
+    assert exact.json()["confirmation"]["current"] is True
 
 
 def test_workspace_viewer_cannot_mutate_even_with_write_scope(admin_client) -> None:
@@ -801,7 +895,10 @@ def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) 
         },
     )
     assert knowledge.status_code == 201
-    assert client.get("/api/v1/company/knowledge").json()[0]["category"] == "service"
+    categories = {
+        item["category"] for item in client.get("/api/v1/company/knowledge").json()
+    }
+    assert "service" in categories
 
     event, _created = context.crm.upsert_agent_inbox_event(
         "ollum-group",
@@ -833,6 +930,8 @@ def test_company_memory_and_agent_inbox_apis_are_workspace_scoped(admin_client) 
 
     bootstrap = client.get("/api/v1/bootstrap").json()
     assert bootstrap["company_onboarding"]["profile"]["company_name"] == "Ollum Group"
+    assert bootstrap["plugin"]["tenant_mode"] == "single_company_closed_beta"
+    assert bootstrap["plugin"]["external_tenant_onboarding_supported"] is False
     assert bootstrap["agent_inbox"]["acknowledged"] == 1
 
     retry_event, _created = context.crm.upsert_agent_inbox_event(
