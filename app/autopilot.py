@@ -9,9 +9,8 @@ from .company_search import search_company_websites
 from .crm import SalesCRM
 from .data_quality import candidate_phones, retry_call
 from .google_sheets import GoogleSheetsSync
-from .outreach_quality import compose_grounded_first_touch, evaluate_whatsapp_message
 from .website_inspector import inspect_website
-from .whatsapp_service import normalize_recipient, send_message
+from .whatsapp_service import send_message
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +28,7 @@ class SettingsLike(Protocol):
     autopilot_leads_per_vertical: int
     autopilot_score_threshold: int
     autopilot_min_training_leads: int
+    chatgpt_prospecting_queue_limit: int
     allow_autopilot_send: bool
     allow_whatsapp_send: bool
 
@@ -47,145 +47,6 @@ DEFAULT_VERTICALS = [
     ("автосервисы", ["saturday"]),
     ("юридические компании", ["saturday"]),
 ]
-
-
-def grounded_analysis(lead: dict[str, Any], snapshot: dict[str, Any]) -> dict[str, Any]:
-    """Create bounded deterministic analysis from explicit website-inspector fields."""
-    text = str(snapshot.get("visible_text") or "")
-    lower = text.lower()
-    forms = int((snapshot.get("forms") or {}).get("count") or 0)
-    mobile = bool(snapshot.get("mobile_viewport"))
-    contacts = snapshot.get("contacts") or {}
-    social_links = list(contacts.get("social_links") or [])
-    messenger_links = [
-        link
-        for link in social_links
-        if any(
-            marker in str(link).lower()
-            for marker in ("t.me", "max.ru", "wa.me", "whatsapp")
-        )
-    ]
-    catalog_markers = sum(
-        lower.count(marker)
-        for marker in ("каталог", "продукц", "услуг", "прайс", "цены", "товар")
-    )
-    substantial_catalog = len(text) >= 1800 and catalog_markers >= 4
-    industry = str(lead.get("industry") or "").lower()
-
-    strengths = [f"Официальный сайт доступен: {lead['website_url']}"]
-    if mobile:
-        strengths.append("На странице задан mobile viewport.")
-    if forms:
-        strengths.append(f"На проверенной странице обнаружено форм: {forms}.")
-    if substantial_catalog:
-        strengths.append(
-            "На странице подтверждён разветвлённый каталог услуг или продукции."
-        )
-    if messenger_links:
-        strengths.append("На странице есть публичный вход в мессенджер.")
-
-    problems: list[str] = []
-    if not mobile:
-        problems.append(
-            "На странице не задан mobile viewport — это конкретный риск для мобильного сценария."
-        )
-    if forms == 0:
-        problems.append(
-            "На проверенной странице не обнаружена структурированная форма заявки."
-        )
-    if substantial_catalog and forms == 0:
-        problems.append(
-            "Большой каталог не сопровождается подтверждённым пошаговым подбором или конфигуратором."
-        )
-    if not messenger_links:
-        problems.append(
-            "Публичный вход в Telegram, MAX или WhatsApp на проверенной странице не обнаружен."
-        )
-    if not problems:
-        problems.append(
-            "Критическая проблема не подтверждена; глубину конверсии и автоматизации нужно проверять отдельно."
-        )
-
-    if any(marker in industry for marker in ("мебел", "производ", "вентил")):
-        services = [
-            "web-конфигуратор и структурированный запрос расчёта",
-            "AI-помощник по подтверждённому каталогу",
-            "Telegram/MAX-бот для сбора параметров заявки",
-        ]
-        opportunities = [
-            "Собирать параметры, количество, размеры и файлы до первого ответа менеджера.",
-            "Маршрутизировать полный запрос ответственному специалисту.",
-        ]
-    elif any(marker in industry for marker in ("стомат", "медицин", "клиник")):
-        services = [
-            "Telegram/MAX-бот для записи",
-            "web-сценарий выбора направления услуги",
-            "автоматизация маршрутизации и не-клинических напоминаний",
-        ]
-        opportunities = [
-            "Собирать понятный запрос на запись без автоматизации медицинских решений.",
-            "Передавать обращение в подходящий сценарий записи.",
-        ]
-    elif any(
-        marker in industry for marker in ("логист", "перевоз", "клининг", "строит")
-    ):
-        services = [
-            "калькулятор и web-бриф заявки",
-            "Telegram/MAX-бот квалификации",
-            "автоматизация подтверждения и маршрутизации обращения",
-        ]
-        opportunities = [
-            "Собирать обязательные параметры объекта или услуги до обратного звонка.",
-            "Сократить число первичных уточнений перед расчётом.",
-        ]
-    else:
-        services = [
-            "мобильный конверсионный сценарий сайта",
-            "Telegram/MAX-бот квалификации",
-            "AI-помощник по подтверждённым материалам компании",
-        ]
-        opportunities = [
-            "Сделать первый цифровой шаг понятнее и структурировать обращение.",
-            "Собирать данные заявки в едином формате.",
-        ]
-
-    fit = 82
-    need = min(95, 35 + len(problems) * 14)
-    score = round(fit * 0.35 + need * 0.30 + 50 * 0.20 + 40 * 0.15)
-    return {
-        "company_name": lead["company_name"],
-        "industry": lead.get("industry"),
-        "location": lead.get("location"),
-        "summary": (
-            f"Проведена ограниченная проверка официального сайта {lead['website_url']}. "
-            "Выводы основаны только на доступной странице и технических полях снимка."
-        ),
-        "contacts": {
-            "phones": list(contacts.get("phones") or []),
-            "emails": list(contacts.get("emails") or []),
-            "messengers": messenger_links,
-            "social_links": social_links,
-        },
-        "website_strengths": strengths,
-        "website_problems": problems,
-        "detected_tools": list(snapshot.get("technologies") or []),
-        "opportunities": opportunities,
-        "recommended_ollum_services": services,
-        "outreach_angles": [
-            f"Начать разговор с проверенного наблюдения: {problems[0]}",
-            f"Предложить первый ограниченный этап: {services[0]}.",
-        ],
-        "lead_score": score,
-        "score_reason": (
-            f"Детерминированная оценка по видимым сигналам: fit={fit}, need={need}, "
-            "budget proxy=50, timing=40. Реальный бюджет и сроки покупки неизвестны."
-        ),
-    }
-
-
-def draft_message(lead: dict[str, Any]) -> str | None:
-    """Build a first-touch message only when concrete evidence and a service exist."""
-    return compose_grounded_first_touch(lead)
 
 
 class AutopilotService:
@@ -227,10 +88,20 @@ class AutopilotService:
     def status(self) -> dict[str, Any]:
         state = self.crm.get_autopilot_state()
         stats = self.crm.stats()
+        queue_limit = max(
+            1, int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 6))
+        )
         return {
             **state,
+            "reasoning_engine": "chatgpt_mcp_only",
+            "server_llm_enabled": False,
+            "server_analysis_enabled": False,
             "vertical_count": len(self.crm.list_verticals(enabled=True, limit=500)),
             "training_leads": stats["leads"],
+            "pending_chatgpt_prospecting": (
+                self.crm.count_pending_chatgpt_prospecting_leads()
+            ),
+            "chatgpt_prospecting_queue_limit": queue_limit,
             "minimum_training_leads_for_non_safe": self.settings.autopilot_min_training_leads,
             "non_safe_send_flag": self.settings.allow_autopilot_send,
             "whatsapp_send_flag": self.settings.allow_whatsapp_send,
@@ -239,8 +110,9 @@ class AutopilotService:
             ),
             "google_sheets": self.sheets.status(),
             "safe_behavior": (
-                "SAFE may discover, analyze, score, and prepare drafts. It never sends or "
-                "executes follow-ups."
+                "SAFE collects and inspects public evidence, queues bounded work for "
+                "ChatGPT, synchronizes state, and enforces safety. The server never "
+                "analyzes, scores, drafts, sends, or executes follow-ups."
             ),
         }
 
@@ -312,58 +184,6 @@ class AutopilotService:
             return (-effective, str(item.get("last_selected_at") or ""))
 
         return sorted(candidates, key=priority)[: max(1, limit)]
-
-    @staticmethod
-    def _recipient(lead: dict[str, Any]) -> str | None:
-        contacts = lead.get("contacts") or {}
-        candidates = [
-            *(contacts.get("messengers") or []),
-            *(contacts.get("phones") or []),
-            *(contacts.get("emails") or []),
-        ]
-        for candidate in candidates:
-            value = str(candidate).strip()
-            if not value:
-                continue
-            if "@" in value and not value.endswith(
-                ("@s.whatsapp.net", "@g.us", "@lid")
-            ):
-                return value
-            try:
-                return normalize_recipient(value)
-            except ValueError:
-                continue
-        return None
-
-    def _create_draft_if_needed(
-        self, lead: dict[str, Any], *, threshold: int
-    ) -> dict[str, Any] | None:
-        if int(lead.get("score") or 0) < threshold:
-            return None
-        if self.crm.list_outreach_drafts(lead_id=lead["id"], limit=1):
-            return None
-        recipient = self._recipient(lead)
-        if not recipient:
-            return None
-        channel = "email" if "@" in recipient else "whatsapp"
-        message = draft_message(lead)
-        if not message:
-            return None
-        if channel == "whatsapp":
-            quality = evaluate_whatsapp_message(lead, message, mode="first_touch")
-            if quality["verdict"] != "pass":
-                logger.warning(
-                    "Skipped unsafe WhatsApp draft for lead %s: %s",
-                    lead["id"],
-                    quality["issues"],
-                )
-                return None
-        return self.crm.save_outreach_draft(
-            lead["id"],
-            channel=channel,
-            recipient=recipient,
-            message=message,
-        )
 
     def _process_send_requests(self, *, mode: str) -> dict[str, Any]:
         requests = self.crm.list_pending_send_requests(limit=50)
@@ -445,6 +265,11 @@ class AutopilotService:
             "stale_evidence_refreshed": 0,
             "rejection_reasons": {},
             "leads_found": 0,
+            "queued_for_chatgpt": 0,
+            "queue_before": 0,
+            "queue_after": 0,
+            "queue_limit": 0,
+            "discovery_skipped_queue_full": 0,
             "analyzed": 0,
             "qualified": 0,
             "drafts_created": 0,
@@ -600,45 +425,19 @@ class AutopilotService:
                 )
         return leads
 
-    def _analyze_vertical_leads(
-        self,
-        *,
-        leads: list[tuple[dict[str, Any], dict[str, Any]]],
-        vertical: dict[str, Any],
-        threshold: int,
-        metrics: dict[str, Any],
-    ) -> None:
-        for lead, snapshot in leads:
-            try:
-                analysis = grounded_analysis(lead, snapshot)
-                saved = self.crm.save_analysis(lead["id"], analysis)
-                scored = self.crm.score_lead(
-                    saved["id"],
-                    rationale=analysis["score_reason"],
-                    qualify_at=threshold,
-                )
-                metrics["analyzed"] += 1
-                if int(scored.get("score") or 0) >= threshold:
-                    metrics["qualified"] += 1
-                if self._create_draft_if_needed(scored, threshold=threshold):
-                    metrics["drafts_created"] += 1
-            except Exception as exc:  # noqa: BLE001 - isolate one lead failure
-                self._record_vertical_error(metrics, vertical, exc, lead_id=lead["id"])
-                logger.warning(
-                    "Autopilot lead analysis failed",
-                    extra={"vertical": vertical["name"], "lead_id": lead["id"]},
-                )
-
     def _process_vertical(
         self,
         *,
         cycle_id: str,
         state: dict[str, Any],
         vertical: dict[str, Any],
+        queue_slots: int,
         metrics: dict[str, Any],
     ) -> None:
         target_count = min(
-            int(vertical["daily_target"]), int(state["leads_per_vertical"])
+            int(vertical["daily_target"]),
+            int(state["leads_per_vertical"]),
+            max(1, int(queue_slots)),
         )
         campaign, campaign_created = self.crm.get_or_create_campaign(
             f"Autopilot — {vertical['name']} — {datetime.now(UTC).date().isoformat()}",
@@ -677,16 +476,6 @@ class AutopilotService:
                 metrics=metrics,
             )
             metrics["leads_found"] += len(leads)
-            self.crm.set_campaign_status(
-                campaign["id"], "analyzing" if leads else "paused"
-            )
-            threshold = max(int(vertical["min_score"]), int(state["score_threshold"]))
-            self._analyze_vertical_leads(
-                leads=leads,
-                vertical=vertical,
-                threshold=threshold,
-                metrics=metrics,
-            )
             self.crm.set_campaign_status(campaign["id"], "ready" if leads else "paused")
         except Exception as exc:
             self.crm.set_campaign_status(campaign["id"], "paused")
@@ -724,17 +513,40 @@ class AutopilotService:
         )
         try:
             state = self.crm.get_autopilot_state()
-            verticals = self._select_verticals(int(state["max_verticals_per_cycle"]))
+            queue_limit = max(
+                1,
+                int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 6)),
+            )
+            queue_before = self.crm.count_pending_chatgpt_prospecting_leads()
+            metrics["queue_before"] = queue_before
+            metrics["queue_limit"] = queue_limit
+            if queue_before >= queue_limit:
+                verticals: list[dict[str, Any]] = []
+                metrics["discovery_skipped_queue_full"] = 1
+            else:
+                verticals = self._select_verticals(
+                    int(state["max_verticals_per_cycle"])
+                )
             self.crm.set_cycle_verticals(
                 cycle["id"], [item["id"] for item in verticals]
             )
             for vertical in verticals:
+                queue_slots = (
+                    queue_limit - self.crm.count_pending_chatgpt_prospecting_leads()
+                )
+                if queue_slots <= 0:
+                    break
                 self._process_vertical(
                     cycle_id=cycle["id"],
                     state=state,
                     vertical=vertical,
+                    queue_slots=queue_slots,
                     metrics=metrics,
                 )
+
+            queue_after = self.crm.count_pending_chatgpt_prospecting_leads()
+            metrics["queue_after"] = queue_after
+            metrics["queued_for_chatgpt"] = max(0, queue_after - queue_before)
 
             self._finalize_cycle_work(cycle, metrics)
             completed = self.crm.complete_autopilot_cycle(cycle["id"], metrics=metrics)
@@ -744,8 +556,8 @@ class AutopilotService:
                     "cycle_id": cycle["id"],
                     "verticals": len(verticals),
                     "leads_found": metrics["leads_found"],
-                    "analyzed": metrics["analyzed"],
-                    "qualified": metrics["qualified"],
+                    "queued_for_chatgpt": metrics["queued_for_chatgpt"],
+                    "queue_after": metrics["queue_after"],
                     "errors": len(metrics["vertical_errors"]),
                 },
             )

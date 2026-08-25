@@ -1,11 +1,12 @@
 # Ollum Sales MCP — ChatGPT-native Edition
 
-Version **0.12.0** makes ChatGPT the only reasoning engine and separates work into two
-coordinated chats: one for inbound WhatsApp events and one for new companies. They share one
-persistent CRM and authenticate through a ChatGPT-compatible OAuth 2.1 server with dynamic
+Version **0.13.0** makes ChatGPT the only reasoning engine and separates work into two
+coordinated chats: a primary setup/prospecting chat and a dedicated inbound WhatsApp monitor.
+They share one persistent CRM and authenticate through a ChatGPT-compatible OAuth 2.1 server with dynamic
 client registration. The server uses no OpenAI or
-other LLM API key: it synchronizes WhatsApp every 15 minutes, stores durable work, gives
-ChatGPT a bounded MCP fact packet, validates the returned structured decision, and atomically
+other LLM API key: it collects and deduplicates public company facts, inspects official sites,
+synchronizes WhatsApp every 15 minutes, and fills bounded durable queues. It gives ChatGPT a
+bounded MCP fact packet, validates the returned structured decision, and atomically
 saves at most one grounded draft or escalation. ChatGPT can also interview the operator,
 persist the company profile, services, prices, cases and client context, and configure a
 niche-specific dialogue playbook. The guarded draft flow remains mandatory; the agent can
@@ -113,15 +114,15 @@ ChatGPT / MCP client                 Browser cabinet
         |
         | 127.0.0.1:18000
         v
-Ollum Sales MCP :8000 (container)       Autopilot worker
+Ollum Sales MCP :8000 (container)       Collection/sync worker
    |                 |                       |
-   |                 |                       +--> scheduled SAFE cycles
+   |                 |                       +--> scheduled SAFE collection cycles
 CRM SQLite volume   website evidence        +--> Google Sheets panel
    |                                         +--> durable inbound queue (15 min poll)
-   |                                         +--> SAFE deterministic Autopilot
+   |                                         +--> public fact inspection + bounded queue
    |                                         +--> shared WhatsApp SQLite
    |                                                |
-   +--> MCP fact packet -> ChatGPT decision -> validation + draft / escalation
+   +--> MCP fact packet -> ChatGPT-only analysis/decision -> validation + draft / escalation
                                              v
                                      Go WhatsApp bridge :8080
                                              |
@@ -205,8 +206,8 @@ The adapter dynamically loads the original `upstream/whatsapp-mcp/whatsapp-mcp-s
 A complete agent run is resumable:
 
 ```text
-campaign -> verified companies -> website evidence -> grounded analysis
-         -> deterministic score/ranking -> saved draft -> operator approval
+campaign -> server-collected company facts -> website evidence -> ChatGPT grounded analysis
+         -> ChatGPT score/ranking -> saved draft -> operator approval
          -> confirmed send -> interaction timeline -> scheduled follow-up
 ```
 
@@ -221,7 +222,8 @@ auto service, and legal companies.
 
 ```text
 worker -> choose scheduled verticals -> discover/dedupe -> inspect official sites
-       -> grounded deterministic analysis -> score -> save draft -> sync Sheets
+       -> bounded prospecting queue -> sync Sheets
+primary ChatGPT chat -> analyze queued facts -> score/rank -> save grounded draft
 ```
 
 Start the guarded mode:
@@ -230,15 +232,19 @@ Start the guarded mode:
 autopilot_start(mode="safe")
 ```
 
-SAFE can discover, analyze, score, and prepare drafts. It never sends messages or executes
-follow-ups. `SEMI_AUTO` and `AUTOPILOT` cannot start unless all of these are true:
+SAFE server work can discover, deduplicate, inspect public evidence, queue records, and synchronize
+state. It never analyzes, scores, composes drafts, sends messages, or executes follow-ups; those
+semantic decisions belong exclusively to ChatGPT through MCP. `SEMI_AUTO` and `AUTOPILOT` cannot
+start unless all of these are true:
 
 - the operator passes `confirm_non_safe=true`;
 - the CRM has at least `OLLUM_AUTOPILOT_MIN_TRAINING_LEADS` (100 by default);
 - both WhatsApp sending and `OLLUM_AUTOPILOT_ALLOW_SEND` are explicitly enabled.
 
-The worker polls WhatsApp every 15 minutes and starts an Autopilot cycle only when `next_cycle_at` is due. The cycle
-interval itself defaults to 60 minutes.
+The worker polls WhatsApp every 15 minutes and starts an Autopilot collection cycle only when
+`next_cycle_at` is due. The collection interval defaults to 15 minutes. Discovery pauses when the
+pending ChatGPT prospecting queue reaches `OLLUM_CHATGPT_PROSPECTING_QUEUE_LIMIT` (six by default),
+so the server cannot silently outrun the reasoning chat.
 
 The worker never generates a reply. The primary ChatGPT chat completes fact-only onboarding and then
 calls `sales_agent_next_action(lane="prospecting")`; it cannot consume inbox work. After confirmation,
@@ -369,13 +375,14 @@ the SAFE worker ignores send requests.
 2. `sales_create_campaign`
 3. `sales_import_leads` with one known company site
 4. `sales_analyze_lead`, reason only over its bounded facts/evidence URLs in ChatGPT, then call `sales_save_analysis`
-5. `sales_rank_leads`
-6. pass the recipient JID to `sales_prepare_whatsapp_reply_brief`; it reads only the latest unanswered inbound message
-7. draft in ChatGPT, call `sales_compare_whatsapp_replies` when testing variants, then validate the selected text with `sales_evaluate_whatsapp_reply` until the verdict is `pass`
-8. save with `sales_save_whatsapp_reply_draft` and review the exact recipient/message
-9. `sales_approve_outreach_draft`
-10. enable write mode and separately confirm `sales_send_whatsapp_draft`
-11. verify `sales_overview` and the follow-up timeline
+5. `sales_score_lead` with grounded components and rationale chosen in ChatGPT
+6. `sales_rank_leads`
+7. pass the recipient JID to `sales_prepare_whatsapp_reply_brief`; it reads only the latest unanswered inbound message
+8. draft in ChatGPT, call `sales_compare_whatsapp_replies` when testing variants, then validate the selected text with `sales_evaluate_whatsapp_reply` until the verdict is `pass`
+9. save with `sales_save_whatsapp_reply_draft` and review the exact recipient/message
+10. `sales_approve_outreach_draft`
+11. enable write mode and separately confirm `sales_send_whatsapp_draft`
+12. verify `sales_overview` and the follow-up timeline
 
 ## Upstream preservation
 

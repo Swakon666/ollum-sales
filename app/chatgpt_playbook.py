@@ -7,6 +7,37 @@ PRIMARY_CHAT_TITLE = "Ollum Sales — Настройка и новые комп�
 MONITORING_CHAT_TITLE = "Ollum Sales — WhatsApp"
 
 
+def reasoning_boundary() -> dict[str, Any]:
+    """Describe the non-negotiable split between the server and ChatGPT."""
+    return {
+        "server_llm_api": False,
+        "server_only": [
+            "public_fact_collection",
+            "deduplication",
+            "website_inspection",
+            "bounded_queue",
+            "whatsapp_sync",
+            "durable_state",
+            "decision_validation",
+            "safety_enforcement",
+        ],
+        "chatgpt_only": [
+            "lead_analysis",
+            "lead_scoring",
+            "outreach_drafting",
+            "inbound_classification",
+            "reply_drafting",
+        ],
+        "server_forbidden": [
+            "lead_analysis",
+            "lead_scoring",
+            "outreach_drafting",
+            "inbound_classification",
+            "reply_drafting",
+        ],
+    }
+
+
 def lane_prompts() -> dict[str, str]:
     """Return the canonical prompts used by MCP, admin and packaged guidance."""
     primary = (
@@ -18,10 +49,12 @@ def lane_prompts() -> dict[str, str]:
         "save only explicit user facts or bounded file summaries, and persist an explicit "
         "not-applicable answer when the operator says there is no site, customer proof or "
         "active client. Then show the returned factual review and confirm its exact revision "
-        "and summary hash. After onboarding is confirmed, "
-        "review at most three fresh companies: inspect official public evidence, analyze, "
-        "save grounded analysis, score, rank, and create at most one personalized draft "
-        "per qualified lead without a current draft. Never inspect the inbound queue, "
+        "and summary hash. After onboarding is confirmed, process at most three fresh "
+        "unreviewed companies already queued by the server: call sales_analyze_lead, reason "
+        "only from its bounded facts and evidence URLs, save grounded analysis, score, rank, "
+        "and create at most one personalized draft per qualified lead without a current "
+        "draft. Call sales_search_companies only after an explicit operator request, never "
+        "as part of scheduled work. Never inspect the inbound queue, "
         "approve, send, create follow-ups, or change send flags in this chat. Finish with "
         "aggregate statistics and the top five without private message text."
     )
@@ -144,6 +177,7 @@ def build_chatgpt_agent_playbook(
     safety: dict[str, Any],
     onboarding: dict[str, Any],
     whatsapp_connected: bool | None,
+    prospecting_queue_limit: int = 6,
 ) -> dict[str, Any]:
     selected_lane = str(lane or "all").strip().lower()
     if selected_lane not in CHATGPT_LANES:
@@ -164,6 +198,13 @@ def build_chatgpt_agent_playbook(
         "coordination_mode": "primary_setup_and_prospecting_plus_whatsapp_monitor",
         "server_llm_enabled": False,
         "api_key_required": False,
+        "reasoning_boundary": reasoning_boundary(),
+        "prospecting_queue": {
+            "producer": "server_public_fact_collector",
+            "consumer": "primary_chat_chatgpt",
+            "max_pending": max(1, int(prospecting_queue_limit)),
+            "backpressure": "pause_discovery_when_full",
+        },
         "tenant_mode": "single_company_closed_beta",
         "external_tenant_onboarding_supported": False,
         "server_whatsapp_sync": "every 15 minutes",
