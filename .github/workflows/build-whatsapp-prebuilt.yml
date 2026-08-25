@@ -49,7 +49,6 @@ jobs:
           set -euo pipefail
           binary="dist/$ASSET_NAME"
           test -s "$binary"
-          chmod 0755 "$binary"
           docker run --rm --platform linux/amd64 \
             --volume "$PWD/$binary:/usr/local/bin/whatsapp-bridge:ro" \
             debian:bookworm-slim \
