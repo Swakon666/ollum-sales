@@ -5,6 +5,8 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from app.candidate_quality import assess_company_candidate
 from app.company_search import (
     _decode_bing_target,
@@ -160,6 +162,95 @@ class CompanySearchTests(unittest.TestCase):
         self.assertEqual(result["provider"], "serper")
         self.assertEqual(result["found"], 1)
         self.assertEqual(result["results"][0]["website_url"], "https://alpha.example/")
+
+    @patch("app.company_search.requests.get")
+    @patch("app.company_search._yandex_maps_results")
+    def test_public_search_blends_maps_and_web_without_raw_duplicates(
+        self, maps_results: Mock, get: Mock
+    ) -> None:
+        maps_results.return_value = (
+            "cleaning Moscow",
+            [
+                {
+                    "company_name": "Maps Cleaning",
+                    "website_url": "https://maps-cleaning.example/",
+                    "snippet": "Cleaning company Moscow",
+                },
+                {
+                    "company_name": "Shared Cleaning",
+                    "website_url": "https://shared-cleaning.example/",
+                    "snippet": "Cleaning company Moscow",
+                },
+            ],
+        )
+        response = Mock()
+        response.text = """
+        <li class="b_algo"><h2><a href="https://shared-cleaning.example/about">
+          Shared Cleaning Moscow
+        </a></h2><div class="b_caption"><p>Cleaning services Moscow</p></div></li>
+        <li class="b_algo"><h2><a href="https://web-cleaning.example/">
+          Web Cleaning Moscow
+        </a></h2><div class="b_caption"><p>Cleaning services Moscow</p></div></li>
+        """
+        response.raise_for_status.return_value = None
+        get.return_value = response
+
+        result = search_company_websites("cleaning", "Moscow", limit=4)
+
+        self.assertEqual(result["provider"], "yandex_maps+bing_html")
+        self.assertEqual(result["providers_used"], ["yandex_maps", "bing_html"])
+        self.assertEqual(result["found"], 3)
+        self.assertEqual(
+            [item["source_provider"] for item in result["results"]],
+            ["yandex_maps", "bing_html", "yandex_maps"],
+        )
+        self.assertEqual(len({item["website_url"] for item in result["results"]}), 3)
+
+    @patch("app.company_search.requests.get")
+    @patch("app.company_search._yandex_maps_results")
+    def test_public_search_keeps_web_results_when_maps_fails(
+        self, maps_results: Mock, get: Mock
+    ) -> None:
+        maps_results.side_effect = requests.Timeout("maps unavailable")
+        response = Mock()
+        response.text = """
+        <li class="b_algo"><h2><a href="https://web-cleaning.example/">
+          Web Cleaning Moscow
+        </a></h2><div class="b_caption"><p>Cleaning services Moscow</p></div></li>
+        """
+        response.raise_for_status.return_value = None
+        get.return_value = response
+
+        result = search_company_websites("cleaning", "Moscow", limit=4)
+
+        self.assertEqual(result["provider"], "bing_html")
+        self.assertEqual(result["providers_used"], ["bing_html"])
+        self.assertEqual(result["results"][0]["source_provider"], "bing_html")
+        self.assertIn("Yandex Maps discovery failed", result["warning"])
+
+    @patch("app.company_search.requests.get")
+    @patch("app.company_search._yandex_maps_results")
+    def test_public_search_keeps_maps_results_when_web_fails(
+        self, maps_results: Mock, get: Mock
+    ) -> None:
+        maps_results.return_value = (
+            "cleaning Moscow",
+            [
+                {
+                    "company_name": "Maps Cleaning",
+                    "website_url": "https://maps-cleaning.example/",
+                    "snippet": "Cleaning company Moscow",
+                }
+            ],
+        )
+        get.side_effect = requests.Timeout("web unavailable")
+
+        result = search_company_websites("cleaning", "Moscow", limit=4)
+
+        self.assertEqual(result["provider"], "yandex_maps")
+        self.assertEqual(result["providers_used"], ["yandex_maps"])
+        self.assertEqual(result["results"][0]["source_provider"], "yandex_maps")
+        self.assertIn("Bing discovery failed", result["warning"])
 
 
 if __name__ == "__main__":

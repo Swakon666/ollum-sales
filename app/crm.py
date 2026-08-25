@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import sqlite3
 import uuid
 from collections.abc import Iterator
@@ -174,6 +176,18 @@ def _load_json(value: str | None, default: Any) -> Any:
         return default
 
 
+def search_query_fingerprint(
+    industry: str | None, location: str | None, query: str | None
+) -> str:
+    """Return a stable, non-reversible key for one normalized search hypothesis."""
+    normalized_parts = []
+    for value in (industry, location, query):
+        tokens = re.findall(r"\w+", str(value or "").casefold(), flags=re.UNICODE)
+        normalized_parts.append(" ".join(sorted(tokens)))
+    normalized = "|".join(normalized_parts)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20]
+
+
 class SalesCRM:
     """Small persistent CRM backed by SQLite and safe for multi-process reads/writes."""
 
@@ -252,6 +266,7 @@ class SalesCRM:
                     campaign_id TEXT NOT NULL REFERENCES campaigns(id) ON DELETE CASCADE,
                     lead_id TEXT NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
                     source_rank INTEGER,
+                    is_new INTEGER NOT NULL DEFAULT 0,
                     added_at TEXT NOT NULL,
                     PRIMARY KEY (campaign_id, lead_id)
                 );
@@ -602,6 +617,27 @@ class SalesCRM:
                     "ALTER TABLE conversation_agent_settings "
                     "ADD COLUMN response_sla_minutes INTEGER NOT NULL DEFAULT 60"
                 )
+            campaign_lead_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(campaign_leads)"
+                ).fetchall()
+            }
+            if "is_new" not in campaign_lead_columns:
+                connection.execute(
+                    "ALTER TABLE campaign_leads "
+                    "ADD COLUMN is_new INTEGER NOT NULL DEFAULT 0"
+                )
+                connection.execute(
+                    """
+                    UPDATE campaign_leads
+                    SET is_new = CASE WHEN EXISTS (
+                        SELECT 1 FROM leads l
+                        WHERE l.id = campaign_leads.lead_id
+                          AND l.created_at = campaign_leads.added_at
+                    ) THEN 1 ELSE 0 END
+                    """
+                )
             company_profile_columns = {
                 row["name"]
                 for row in connection.execute(
@@ -646,7 +682,7 @@ class SalesCRM:
                 ).fetchall()
             for row in lookup_rows:
                 self._sync_lead_lookup_keys(connection, row["id"])
-            connection.execute("PRAGMA user_version = 14")
+            connection.execute("PRAGMA user_version = 15")
             timestamp = utc_now()
             connection.execute(
                 """
@@ -3385,6 +3421,8 @@ class SalesCRM:
                 """
                 SELECT c.*,
                        COUNT(cl.lead_id) AS lead_count,
+                       SUM(CASE WHEN cl.is_new = 1 THEN 1 ELSE 0 END) AS new_unique_count,
+                       SUM(CASE WHEN cl.lead_id IS NOT NULL AND cl.is_new = 0 THEN 1 ELSE 0 END) AS reused_count,
                        SUM(CASE WHEN l.status IN ('analyzed','qualified','drafted','approved','contacted','replied','won') THEN 1 ELSE 0 END) AS analyzed_count,
                        SUM(CASE WHEN l.status IN ('contacted','replied','won') THEN 1 ELSE 0 END) AS contacted_count
                 FROM campaigns c
@@ -3398,6 +3436,17 @@ class SalesCRM:
         if row is None:
             raise ValueError("campaign not found")
         result = dict(row)
+        result["lead_count"] = int(result["lead_count"] or 0)
+        result["new_unique_count"] = int(result["new_unique_count"] or 0)
+        result["reused_count"] = int(result["reused_count"] or 0)
+        result["duplicate_rate"] = (
+            round(result["reused_count"] / result["lead_count"] * 100, 1)
+            if result["lead_count"]
+            else 0.0
+        )
+        result["query_fingerprint"] = search_query_fingerprint(
+            result.get("industry"), result.get("location"), result.get("search_query")
+        )
         result["analyzed_count"] = result["analyzed_count"] or 0
         result["contacted_count"] = result["contacted_count"] or 0
         return result
@@ -3416,7 +3465,9 @@ class SalesCRM:
         with self.connect() as connection:
             rows = connection.execute(
                 f"""
-                SELECT c.*, COUNT(cl.lead_id) AS lead_count
+                SELECT c.*, COUNT(cl.lead_id) AS lead_count,
+                       SUM(CASE WHEN cl.is_new = 1 THEN 1 ELSE 0 END) AS new_unique_count,
+                       SUM(CASE WHEN cl.lead_id IS NOT NULL AND cl.is_new = 0 THEN 1 ELSE 0 END) AS reused_count
                 FROM campaigns c
                 LEFT JOIN campaign_leads cl ON cl.campaign_id = c.id
                 {where}
@@ -3426,7 +3477,22 @@ class SalesCRM:
                 """,
                 values,
             ).fetchall()
-        return [dict(row) for row in rows]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["lead_count"] = int(item["lead_count"] or 0)
+            item["new_unique_count"] = int(item["new_unique_count"] or 0)
+            item["reused_count"] = int(item["reused_count"] or 0)
+            item["duplicate_rate"] = (
+                round(item["reused_count"] / item["lead_count"] * 100, 1)
+                if item["lead_count"]
+                else 0.0
+            )
+            item["query_fingerprint"] = search_query_fingerprint(
+                item.get("industry"), item.get("location"), item.get("search_query")
+            )
+            result.append(item)
+        return result
 
     def set_campaign_status(self, campaign_id: str, status: str) -> dict[str, Any]:
         status = self._validate_status(status, CAMPAIGN_STATUSES, "campaign status")
@@ -3612,12 +3678,20 @@ class SalesCRM:
                     raise ValueError("campaign not found")
                 connection.execute(
                     """
-                    INSERT INTO campaign_leads (campaign_id, lead_id, source_rank, added_at)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO campaign_leads (
+                        campaign_id, lead_id, source_rank, is_new, added_at
+                    ) VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(campaign_id, lead_id) DO UPDATE SET
-                        source_rank = COALESCE(excluded.source_rank, campaign_leads.source_rank)
+                        source_rank = COALESCE(excluded.source_rank, campaign_leads.source_rank),
+                        is_new = MAX(campaign_leads.is_new, excluded.is_new)
                     """,
-                    (campaign_id, lead_id, source_rank, timestamp),
+                    (
+                        campaign_id,
+                        lead_id,
+                        source_rank,
+                        int(duplicate is None),
+                        timestamp,
+                    ),
                 )
         return self.get_lead(lead_id)
 
@@ -4934,6 +5008,430 @@ class SalesCRM:
             )
             result.append(item)
         return result
+
+    def search_performance(
+        self,
+        *,
+        since: str | None = None,
+        limit: int = 50,
+        qualify_at: int = 65,
+    ) -> dict[str, Any]:
+        """Measure search quality without rewarding raw or duplicate result volume.
+
+        The reward is deliberately advisory. ChatGPT remains responsible for choosing the
+        next search hypothesis; the server only returns deterministic CRM measurements.
+        """
+        since_value = (
+            normalize_datetime(since)
+            if since
+            else (datetime.now(UTC) - timedelta(days=30)).isoformat(timespec="seconds")
+        )
+        campaign_limit = max(1, min(int(limit), 200))
+        threshold = max(0, min(int(qualify_at), 100))
+        now = utc_now()
+
+        with self.connect() as connection:
+            campaign_rows = connection.execute(
+                """
+                SELECT rowid AS search_sequence, * FROM campaigns
+                WHERE created_at >= ?
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ?
+                """,
+                (since_value, campaign_limit),
+            ).fetchall()
+            campaign_ids = [row["id"] for row in campaign_rows]
+            lead_rows: list[sqlite3.Row] = []
+            interaction_rows: list[sqlite3.Row] = []
+            if campaign_ids:
+                placeholders = ",".join("?" for _ in campaign_ids)
+                lead_rows = connection.execute(
+                    f"""
+                    SELECT cl.campaign_id, cl.lead_id, cl.is_new, cl.source_rank,
+                           l.score, l.status, l.source, l.analysis_json, l.contacts_json,
+                           l.inspection_json, l.evidence_expires_at
+                    FROM campaign_leads cl
+                    JOIN leads l ON l.id = cl.lead_id
+                    WHERE cl.campaign_id IN ({placeholders})
+                    """,
+                    campaign_ids,
+                ).fetchall()
+                lead_ids = sorted({row["lead_id"] for row in lead_rows})
+                if lead_ids:
+                    lead_placeholders = ",".join("?" for _ in lead_ids)
+                    interaction_rows = connection.execute(
+                        f"""
+                        SELECT rowid AS interaction_sequence, lead_id, direction,
+                               status, occurred_at
+                        FROM interactions
+                        WHERE lead_id IN ({lead_placeholders})
+                        ORDER BY lead_id, occurred_at, rowid
+                        """,
+                        lead_ids,
+                    ).fetchall()
+
+        leads_by_campaign: dict[str, list[sqlite3.Row]] = {}
+        for row in lead_rows:
+            leads_by_campaign.setdefault(row["campaign_id"], []).append(row)
+        interactions_by_lead: dict[str, list[sqlite3.Row]] = {}
+        for row in interaction_rows:
+            interactions_by_lead.setdefault(row["lead_id"], []).append(row)
+        outcomes: dict[str, dict[str, bool]] = {}
+        for lead_id, rows in interactions_by_lead.items():
+            outbound_keys = [
+                (row["occurred_at"], row["interaction_sequence"])
+                for row in rows
+                if row["direction"] == "outbound"
+                and str(row["status"] or "").lower() not in {"failed", "pending"}
+            ]
+            first_outbound = min(outbound_keys) if outbound_keys else None
+            outcomes[lead_id] = {
+                "contacted": first_outbound is not None,
+                "replied": bool(
+                    first_outbound
+                    and any(
+                        row["direction"] == "inbound"
+                        and (row["occurred_at"], row["interaction_sequence"])
+                        > first_outbound
+                        for row in rows
+                    )
+                ),
+            }
+
+        fingerprint_counts: dict[str, int] = {}
+        campaign_metrics: list[dict[str, Any]] = []
+        for campaign in sorted(
+            campaign_rows,
+            key=lambda item: (item["created_at"], item["search_sequence"]),
+        ):
+            rows = leads_by_campaign.get(campaign["id"], [])
+            fingerprint = search_query_fingerprint(
+                campaign["industry"], campaign["location"], campaign["search_query"]
+            )
+            repetition_count = fingerprint_counts.get(fingerprint, 0)
+            fingerprint_counts[fingerprint] = repetition_count + 1
+
+            new_rows = [row for row in rows if bool(row["is_new"])]
+            reused_count = len(rows) - len(new_rows)
+            analyzed_rows = [
+                row for row in new_rows if bool(_load_json(row["analysis_json"], {}))
+            ]
+            fresh_rows = [
+                row
+                for row in new_rows
+                if bool(_load_json(row["inspection_json"], {}))
+                and bool(row["evidence_expires_at"])
+                and row["evidence_expires_at"] > now
+            ]
+            fresh_ids = {row["lead_id"] for row in fresh_rows}
+            analyzed_ids = {row["lead_id"] for row in analyzed_rows}
+            validated_rows = [
+                row
+                for row in new_rows
+                if row["score"] is not None
+                and row["lead_id"] in fresh_ids
+                and row["lead_id"] in analyzed_ids
+            ]
+            contactable_rows = []
+            for row in validated_rows:
+                contacts = normalize_contacts(_load_json(row["contacts_json"], {}))
+                if any(
+                    contacts.get(channel)
+                    for channel in ("phones", "emails", "messengers")
+                ):
+                    contactable_rows.append(row)
+
+            validated_count = len(validated_rows)
+            new_count = len(new_rows)
+            total_count = len(rows)
+            scores = [int(row["score"]) for row in validated_rows]
+            average_score = round(sum(scores) / len(scores), 1) if scores else 0.0
+            qualified_count = sum(score >= threshold for score in scores)
+            contacted_count = sum(
+                bool(outcomes.get(row["lead_id"], {}).get("contacted"))
+                for row in new_rows
+            )
+            replied_count = sum(
+                bool(outcomes.get(row["lead_id"], {}).get("replied"))
+                for row in new_rows
+            )
+            meeting_count = sum(row["status"] == "meeting" for row in new_rows)
+            deal_count = sum(row["status"] == "won" for row in new_rows)
+            source_providers = sorted(
+                {
+                    str(row["source"]).strip()
+                    for row in new_rows
+                    if str(row["source"] or "").strip()
+                }
+            )
+            provider_diversity_score = min(len(source_providers) / 2, 1.0) * 100
+
+            duplicate_rate = reused_count / total_count * 100 if total_count else 0.0
+            analysis_completeness = (
+                len(analyzed_rows) / new_count * 100 if new_count else 0.0
+            )
+            fresh_evidence_rate = (
+                len(fresh_rows) / new_count * 100 if new_count else 0.0
+            )
+            contactable_rate = (
+                len(contactable_rows) / validated_count * 100
+                if validated_count
+                else 0.0
+            )
+            qualified_bayesian_rate = (
+                (qualified_count + 1) / (validated_count + 10) * 100
+            )
+            if contacted_count:
+                reply_posterior = (replied_count + 1) / (contacted_count + 5) * 100
+                meeting_posterior = (meeting_count + 0.25) / (contacted_count + 5) * 100
+                deal_posterior = (deal_count + 0.10) / (contacted_count + 5) * 100
+                outcome_score = (
+                    reply_posterior * 0.55
+                    + meeting_posterior * 0.30
+                    + deal_posterior * 0.15
+                )
+            else:
+                outcome_score = 50.0
+
+            evidence_score = analysis_completeness * 0.5 + fresh_evidence_rate * 0.5
+            quality_score = (
+                average_score * 0.45
+                + qualified_bayesian_rate * 0.20
+                + evidence_score * 0.15
+                + contactable_rate * 0.10
+                + provider_diversity_score * 0.05
+                + outcome_score * 0.05
+            )
+            target = max(1, int(campaign["target_count"] or 1))
+            target_coverage = min(validated_count / target, 1.0) * 100
+            logarithmic_volume = (
+                min(math.log1p(validated_count) / math.log1p(target), 1.0) * 100
+            )
+            quantity_score = target_coverage * 0.70 + logarithmic_volume * 0.30
+
+            penalties = {
+                "duplicate_results": round(duplicate_rate * 0.25, 1),
+                "zero_new": 20.0 if new_count == 0 else 0.0,
+                "unvalidated_new": round(
+                    ((new_count - validated_count) / new_count * 10)
+                    if new_count
+                    else 0.0,
+                    1,
+                ),
+                "repeated_query": float(min(20, repetition_count * 6)),
+                "low_quality": round(
+                    min(10.0, max(0.0, 45.0 - average_score) * 0.5)
+                    if validated_count >= 3
+                    else 0.0,
+                    1,
+                ),
+            }
+            total_penalty = sum(penalties.values())
+            reward_score = max(
+                0.0,
+                min(
+                    100.0, quality_score * 0.80 + quantity_score * 0.20 - total_penalty
+                ),
+            )
+            confidence_score = min(
+                100.0, validated_count * 12.0 + contacted_count * 6.0
+            )
+            selection_score = reward_score * (confidence_score / 100) + 50.0 * (
+                1 - confidence_score / 100
+            )
+            query_cooldown = (
+                new_count == 0 or duplicate_rate >= 80.0 or repetition_count >= 1
+            )
+
+            campaign_metrics.append(
+                {
+                    "campaign_id": campaign["id"],
+                    "campaign_name": campaign["name"],
+                    "industry": campaign["industry"],
+                    "location": campaign["location"],
+                    "search_query": campaign["search_query"],
+                    "query_fingerprint": fingerprint,
+                    "query_repetition_count": repetition_count,
+                    "query_cooldown": query_cooldown,
+                    "created_at": campaign["created_at"],
+                    "target_count": target,
+                    "result_count": total_count,
+                    "new_unique_count": new_count,
+                    "reused_count": reused_count,
+                    "duplicate_rate": round(duplicate_rate, 1),
+                    "analyzed_new_count": len(analyzed_rows),
+                    "fresh_evidence_count": len(fresh_rows),
+                    "validated_new_count": validated_count,
+                    "contactable_new_count": len(contactable_rows),
+                    "qualified_count": qualified_count,
+                    "contacted_count": contacted_count,
+                    "replied_count": replied_count,
+                    "meeting_count": meeting_count,
+                    "deal_count": deal_count,
+                    "provider_count": len(source_providers),
+                    "source_providers": source_providers,
+                    "component_scores": {
+                        "average_lead_score": average_score,
+                        "bayesian_qualified_rate": round(qualified_bayesian_rate, 1),
+                        "evidence_completeness": round(evidence_score, 1),
+                        "contactability": round(contactable_rate, 1),
+                        "source_diversity": round(provider_diversity_score, 1),
+                        "outcomes": round(outcome_score, 1),
+                        "quality": round(quality_score, 1),
+                        "useful_quantity": round(quantity_score, 1),
+                    },
+                    "penalties": penalties,
+                    "reward_score": round(reward_score, 1),
+                    "confidence_score": round(confidence_score, 1),
+                    "selection_score": round(selection_score, 1),
+                }
+            )
+
+        campaign_metrics.sort(key=lambda item: item["created_at"], reverse=True)
+        strategies: dict[tuple[str, str], dict[str, Any]] = {}
+        for item in campaign_metrics:
+            industry = str(item["industry"] or "unspecified").strip()
+            location = str(item["location"] or "unspecified").strip()
+            key = (industry.casefold(), location.casefold())
+            strategy = strategies.setdefault(
+                key,
+                {
+                    "industry": industry,
+                    "location": location,
+                    "configured_weight": 1.0,
+                    "campaigns": [],
+                },
+            )
+            strategy["campaigns"].append(item)
+
+        for vertical in self.list_verticals(enabled=True):
+            key = (vertical["name"].casefold(), vertical["region"].casefold())
+            strategy = strategies.setdefault(
+                key,
+                {
+                    "industry": vertical["name"],
+                    "location": vertical["region"],
+                    "configured_weight": float(vertical["weight"]),
+                    "campaigns": [],
+                },
+            )
+            strategy["configured_weight"] = float(vertical["weight"])
+
+        total_campaigns = len(campaign_metrics)
+        strategy_results: list[dict[str, Any]] = []
+        for strategy in strategies.values():
+            items = strategy.pop("campaigns")
+            campaign_count = len(items)
+            if items:
+                weighted_total = sum(
+                    item["reward_score"] * max(10.0, item["confidence_score"])
+                    for item in items
+                )
+                weight_total = sum(
+                    max(10.0, item["confidence_score"]) for item in items
+                )
+                empirical_reward = weighted_total / weight_total
+                validated = sum(item["validated_new_count"] for item in items)
+                contacted = sum(item["contacted_count"] for item in items)
+                confidence = min(100.0, validated * 12.0 + contacted * 6.0)
+                shrunk_reward = empirical_reward * (confidence / 100) + 50.0 * (
+                    1 - confidence / 100
+                )
+                latest = max(items, key=lambda item: item["created_at"])
+                must_change_query = bool(latest["query_cooldown"])
+                mode = "recover" if must_change_query else "exploit"
+            else:
+                empirical_reward = None
+                validated = 0
+                confidence = 0.0
+                shrunk_reward = 50.0
+                latest = None
+                must_change_query = False
+                mode = "explore"
+
+            exploration_bonus = min(
+                20.0,
+                14.0 * math.sqrt(math.log(total_campaigns + 2) / (campaign_count + 1)),
+            )
+            configured_weight_bonus = max(
+                -10.0,
+                min(10.0, (float(strategy["configured_weight"]) - 1.0) * 5.0),
+            )
+            selection_score = max(
+                0.0,
+                min(
+                    100.0,
+                    shrunk_reward
+                    + exploration_bonus
+                    + configured_weight_bonus
+                    - (15.0 if must_change_query else 0.0),
+                ),
+            )
+            strategy_results.append(
+                {
+                    **strategy,
+                    "campaign_count": campaign_count,
+                    "validated_new_count": validated,
+                    "empirical_reward": (
+                        round(empirical_reward, 1)
+                        if empirical_reward is not None
+                        else None
+                    ),
+                    "confidence_score": round(confidence, 1),
+                    "exploration_bonus": round(exploration_bonus, 1),
+                    "selection_score": round(selection_score, 1),
+                    "mode": mode,
+                    "must_change_query": must_change_query,
+                    "last_search_query": latest["search_query"] if latest else None,
+                    "last_query_fingerprint": (
+                        latest["query_fingerprint"] if latest else None
+                    ),
+                    "last_searched_at": latest["created_at"] if latest else None,
+                }
+            )
+
+        strategy_results.sort(
+            key=lambda item: (
+                item["selection_score"],
+                item["exploration_bonus"],
+                item["industry"],
+            ),
+            reverse=True,
+        )
+        return {
+            "window": {"since": since_value, "until": now},
+            "reward_contract": {
+                "quality_weight": 0.80,
+                "quantity_weight": 0.20,
+                "raw_result_count_rewarded": False,
+                "quantity_basis": "new unique leads with fresh evidence, grounded analysis and score",
+                "anti_gaming": [
+                    "duplicate and reused results are penalized",
+                    "repeated query fingerprints are penalized",
+                    "zero-new searches are penalized and cooled down",
+                    "small samples are shrunk toward a neutral prior",
+                    "outcomes stay neutral until real outreach exists",
+                    "source diversity is measured but cannot outweigh lead quality",
+                ],
+            },
+            "summary": {
+                "campaigns_evaluated": len(campaign_metrics),
+                "result_count": sum(item["result_count"] for item in campaign_metrics),
+                "new_unique_count": sum(
+                    item["new_unique_count"] for item in campaign_metrics
+                ),
+                "reused_count": sum(item["reused_count"] for item in campaign_metrics),
+                "validated_new_count": sum(
+                    item["validated_new_count"] for item in campaign_metrics
+                ),
+                "qualified_count": sum(
+                    item["qualified_count"] for item in campaign_metrics
+                ),
+            },
+            "campaigns": campaign_metrics,
+            "strategies": strategy_results,
+            "recommended_strategies": strategy_results[:5],
+        }
 
     def conversion_report(
         self, *, since: str | None = None, until: str | None = None

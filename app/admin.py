@@ -621,6 +621,7 @@ async def api_bootstrap(
             "google_sheets": context.sheets.status(),
             "top_leads": context.crm.list_leads(limit=12, order_by_score=True),
             "campaigns": context.crm.list_campaigns(limit=12),
+            "search_performance": context.crm.search_performance(limit=50),
             "drafts": [
                 _draft_view(item) for item in context.crm.list_outreach_drafts(limit=12)
             ],

@@ -335,9 +335,25 @@ function renderLeads() {
 
 function renderCampaigns() {
   const page = pageItems(state.campaigns, "campaigns");
-  $("#campaign-grid").innerHTML = state.campaigns.length ? page.items.map((campaign) => `
-    <article class="card campaign-card"><div>${statusPill(campaign.status)}<h3>${escapeHtml(campaign.name)}</h3><div class="campaign-meta">${escapeHtml([campaign.industry, campaign.location].filter(Boolean).join(" · ") || "Без сегмента")}</div></div><div class="campaign-stats"><div><strong>${escapeHtml(campaign.lead_count || 0)}</strong><small>лидов</small></div><small>${formatDate(campaign.created_at)}</small></div></article>
-  `).join("") : `<article class="card"><p class="muted">Кампаний пока нет.</p></article>`;
+  const performance = new Map(
+    (state.data.search_performance?.campaigns || []).map((item) => [item.campaign_id, item]),
+  );
+  $("#campaign-grid").innerHTML = state.campaigns.length ? page.items.map((campaign) => {
+    const metric = performance.get(campaign.id);
+    const reward = metric?.reward_score ?? "—";
+    const confidence = metric?.confidence_score ?? 0;
+    const cooldown = Boolean(metric?.query_cooldown);
+    return `
+      <article class="card campaign-card">
+        <div>${statusPill(campaign.status)}<h3>${escapeHtml(campaign.name)}</h3><div class="campaign-meta">${escapeHtml([campaign.industry, campaign.location].filter(Boolean).join(" · ") || "Без сегмента")}</div></div>
+        <div class="campaign-yield" aria-label="Качество поисковой выдачи">
+          <span><b>${escapeHtml(campaign.new_unique_count || 0)}</b> новых</span>
+          <span><b>${escapeHtml(campaign.reused_count || 0)}</b> повторов</span>
+          <span class="${cooldown ? "is-cooldown" : ""}">${cooldown ? "сменить запрос" : `дубли ${escapeHtml(campaign.duplicate_rate || 0)}%`}</span>
+        </div>
+        <div class="campaign-stats"><div><strong>${escapeHtml(reward)}</strong><small>search reward · уверенность ${escapeHtml(confidence)}%</small></div><small>${formatDate(campaign.created_at)}</small></div>
+      </article>`;
+  }).join("") : `<article class="card"><p class="muted">Кампаний пока нет.</p></article>`;
   renderPagination("campaigns", state.campaigns.length, page.page, page.pageCount, page.start);
 }
 

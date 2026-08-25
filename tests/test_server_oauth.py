@@ -37,6 +37,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     next_action_tool = server.mcp._tool_manager._tools["sales_agent_next_action"]
     coordination_tool = server.mcp._tool_manager._tools["sales_get_agent_coordination"]
     playbook_tool = server.mcp._tool_manager._tools["sales_get_chatgpt_agent_playbook"]
+    search_performance_tool = server.mcp._tool_manager._tools["sales_search_performance"]
     prepare_batch_tool = server.mcp._tool_manager._tools["sales_prepare_conversation_batch"]
     prepare_persisted_tool = server.mcp._tool_manager._tools[
         "sales_prepare_persisted_conversation"
@@ -68,6 +69,9 @@ with TestClient(server.app, base_url="https://sales.example") as client:
         "next_action_annotations": next_action_tool.annotations.model_dump(by_alias=True),
         "coordination_annotations": coordination_tool.annotations.model_dump(by_alias=True),
         "playbook_annotations": playbook_tool.annotations.model_dump(by_alias=True),
+        "search_performance_annotations": search_performance_tool.annotations.model_dump(
+            by_alias=True
+        ),
         "prepare_batch_annotations": prepare_batch_tool.annotations.model_dump(by_alias=True),
         "prepare_persisted_annotations": prepare_persisted_tool.annotations.model_dump(
             by_alias=True
@@ -110,7 +114,7 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     }
     assert payload["unauthorized_status"] == 401
     assert "resource_metadata=" in payload["challenge"]
-    assert payload["tool_count"] == 71
+    assert payload["tool_count"] == 72
     assert payload["status_annotations"]["readOnlyHint"] is True
     assert payload["status_annotations"]["destructiveHint"] is False
     assert payload["status_meta"]["securitySchemes"][0]["scopes"] == ["sales:read"]
@@ -149,6 +153,8 @@ with TestClient(server.app, base_url="https://sales.example") as client:
     assert payload["coordination_annotations"]["readOnlyHint"] is True
     assert payload["coordination_annotations"]["openWorldHint"] is False
     assert payload["playbook_annotations"]["readOnlyHint"] is True
+    assert payload["search_performance_annotations"]["readOnlyHint"] is True
+    assert payload["search_performance_annotations"]["openWorldHint"] is False
     assert payload["prepare_batch_annotations"]["readOnlyHint"] is False
     assert payload["prepare_batch_annotations"]["openWorldHint"] is True
     assert payload["prepare_persisted_annotations"]["readOnlyHint"] is False

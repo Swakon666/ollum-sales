@@ -57,15 +57,23 @@ def lane_prompts() -> dict[str, str]:
         "not-applicable answer when the operator says there is no site, customer proof or "
         "active client. Then show the returned factual review and confirm its exact revision "
         "and summary hash. After onboarding is confirmed, ChatGPT owns the discovery "
-        "strategy. Inspect aggregate coordination, recent campaigns and vertical performance; "
-        "choose one relevant vertical and region from confirmed company facts and verified "
-        "outcomes, then formulate one specific public-web search hypothesis. When fewer than "
-        "three fresh unreviewed companies are available and the bounded queue is below its "
-        "limit, call sales_search_companies once with a limit of at most five; do not wait for "
-        "a separate operator request. Reject directories, aggregators, social profiles and "
-        "unrelated results. If the search yields no relevant official websites, revise the "
-        "query once using the observed failure, then stop searching for this run. Process at "
-        "most three fresh unreviewed companies: call sales_analyze_lead, reason only from its "
+        "strategy. Call sales_search_performance and inspect aggregate coordination, recent "
+        "campaigns and vertical performance. Optimize the deterministic reward for grounded "
+        "quality first and useful new unique volume second; raw result count is never a "
+        "success metric. Choose a recommended relevant vertical and region from confirmed "
+        "company facts, verified outcomes and the exploration bonus, then formulate one "
+        "specific public-web search hypothesis. Never reuse a repeated query marked for "
+        "cooldown; change the segment, region or query hypothesis instead. When fewer than "
+        "five fresh unreviewed companies are available and the bounded queue is below its "
+        "limit, call sales_search_companies once for no more than the remaining queue capacity "
+        "and never more than eight; do not wait for a separate operator request. Reject "
+        "directories, aggregators, social profiles and unrelated results. Judge search yield "
+        "by new_unique and reused counts plus bounded source diversity; source count must "
+        "never outweigh grounded company quality. If the search yields fewer than three new unique "
+        "official websites, revise the query once using the observed failure and a different "
+        "hypothesis; recompute remaining queue capacity before that retry and skip it when the "
+        "queue is full. Then stop searching for this run. Process at most five fresh unreviewed "
+        "companies: call sales_analyze_lead, reason only from its "
         "bounded facts and evidence URLs, save grounded analysis, score, rank, and create at "
         "most one personalized draft per qualified lead without a current draft. Never inspect "
         "the inbound queue, "
@@ -191,7 +199,7 @@ def build_chatgpt_agent_playbook(
     safety: dict[str, Any],
     onboarding: dict[str, Any],
     whatsapp_connected: bool | None,
-    prospecting_queue_limit: int = 6,
+    prospecting_queue_limit: int = 12,
 ) -> dict[str, Any]:
     selected_lane = str(lane or "all").strip().lower()
     if selected_lane not in CHATGPT_LANES:
@@ -220,6 +228,21 @@ def build_chatgpt_agent_playbook(
             "backpressure": "skip_search_when_pending_at_limit",
             "server_autonomous_discovery": False,
             "server_role": "execute_bounded_search_and_inspection_after_mcp_tool_call",
+        },
+        "search_optimization": {
+            "quality_weight": 0.80,
+            "quantity_weight": 0.20,
+            "raw_result_count_rewarded": False,
+            "quantity_basis": "new unique leads with fresh evidence, grounded analysis and score",
+            "public_fallback": "interleaved Yandex Maps and Bing web with canonical-domain deduplication",
+            "selection": "confidence-shrunk reward plus exploration bonus",
+            "anti_gaming": [
+                "duplicate and reused results are penalized",
+                "repeated query fingerprints enter cooldown within the evaluation window",
+                "small samples are shrunk toward a neutral prior",
+                "outcomes affect reward only after real outreach exists",
+                "source diversity is bounded and cannot outweigh lead quality",
+            ],
         },
         "tenant_mode": "single_company_closed_beta",
         "external_tenant_onboarding_supported": False,
@@ -259,6 +282,7 @@ def build_chatgpt_agent_playbook(
             "sales_list_campaigns",
             "vertical_list",
             "sales_vertical_performance",
+            "sales_search_performance",
             "sales_analyze_lead",
             "sales_save_analysis",
             "sales_score_lead",

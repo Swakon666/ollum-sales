@@ -90,7 +90,7 @@ class AutopilotService:
         state = self.crm.get_autopilot_state()
         stats = self.crm.stats()
         queue_limit = max(
-            1, int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 6))
+            1, int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 12))
         )
         server_discovery_enabled = bool(
             getattr(self.settings, "autopilot_server_discovery_enabled", False)
@@ -527,7 +527,7 @@ class AutopilotService:
             state = self.crm.get_autopilot_state()
             queue_limit = max(
                 1,
-                int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 6)),
+                int(getattr(self.settings, "chatgpt_prospecting_queue_limit", 12)),
             )
             queue_before = self.crm.count_pending_chatgpt_prospecting_leads()
             metrics["queue_before"] = queue_before

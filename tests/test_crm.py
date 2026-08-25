@@ -68,6 +68,314 @@ class SalesCRMTests(unittest.TestCase):
         self.assertGreater(scored["score"], 0)
         self.assertEqual(self.crm.overview(campaign["id"])["lead_count"], 1)
 
+    def test_campaign_search_yield_distinguishes_new_unique_from_reused(self) -> None:
+        existing = self.crm.upsert_lead("Known company", "https://known.example")
+        campaign = self.crm.create_campaign(
+            "Search yield",
+            industry="cleaning",
+            location="Moscow",
+            search_query="commercial cleaning official website",
+            target_count=5,
+        )
+
+        reused = self.crm.upsert_lead(
+            "Known company",
+            "https://known.example/about",
+            campaign_id=campaign["id"],
+            source_rank=1,
+        )
+        fresh = self.crm.upsert_lead(
+            "Fresh company",
+            "https://fresh.example",
+            campaign_id=campaign["id"],
+            source_rank=2,
+        )
+
+        self.assertEqual(reused["id"], existing["id"])
+        self.assertNotEqual(fresh["id"], existing["id"])
+        measured = self.crm.get_campaign(campaign["id"])
+        self.assertEqual(measured["lead_count"], 2)
+        self.assertEqual(measured["new_unique_count"], 1)
+        self.assertEqual(measured["reused_count"], 1)
+        self.assertEqual(measured["duplicate_rate"], 50.0)
+        self.assertTrue(measured["query_fingerprint"])
+
+    def test_search_reward_prefers_grounded_quality_over_raw_volume(self) -> None:
+        def add_validated_lead(
+            campaign_id: str, index: int, *, score: int, prefix: str
+        ) -> None:
+            lead = self.crm.upsert_lead(
+                f"{prefix} {index}",
+                f"https://{prefix.casefold()}{index}.example",
+                campaign_id=campaign_id,
+                source_rank=index,
+            )
+            self.crm.save_inspection(
+                lead["id"],
+                {
+                    "final_url": lead["website_url"],
+                    "visible_text": "Verified public company facts",
+                },
+            )
+            self.crm.save_analysis(
+                lead["id"],
+                {
+                    "company_name": f"{prefix} {index}",
+                    "summary": "Grounded summary.",
+                    "contacts": {"phones": [], "emails": []},
+                    "website_problems": ["Verified issue"],
+                    "opportunities": ["Relevant improvement"],
+                    "recommended_ollum_services": ["Website development"],
+                    "outreach_angles": ["Grounded angle"],
+                },
+            )
+            self.crm.score_lead(
+                lead["id"],
+                fit=score,
+                need=score,
+                budget=score,
+                timing=score,
+            )
+
+        low_volume = self.crm.create_campaign(
+            "Five weak companies",
+            industry="cleaning",
+            location="Moscow",
+            search_query="generic cleaning companies",
+            target_count=5,
+        )
+        for index in range(1, 6):
+            add_validated_lead(low_volume["id"], index, score=40, prefix="Weak")
+
+        high_quality = self.crm.create_campaign(
+            "Three strong companies",
+            industry="logistics",
+            location="Moscow",
+            search_query="logistics operators quote request",
+            target_count=5,
+        )
+        for index in range(1, 4):
+            add_validated_lead(high_quality["id"], index, score=80, prefix="Strong")
+
+        tiny_sample = self.crm.create_campaign(
+            "One lucky company",
+            industry="legal",
+            location="Moscow",
+            search_query="law firm official website",
+            target_count=5,
+        )
+        add_validated_lead(tiny_sample["id"], 1, score=100, prefix="Lucky")
+
+        report = self.crm.search_performance(limit=20)
+        campaigns = {item["campaign_id"]: item for item in report["campaigns"]}
+
+        self.assertGreater(
+            campaigns[high_quality["id"]]["reward_score"],
+            campaigns[low_volume["id"]]["reward_score"],
+        )
+        self.assertGreater(
+            campaigns[high_quality["id"]]["selection_score"],
+            campaigns[tiny_sample["id"]]["selection_score"],
+        )
+        self.assertEqual(campaigns[low_volume["id"]]["validated_new_count"], 5)
+        self.assertEqual(campaigns[high_quality["id"]]["validated_new_count"], 3)
+        self.assertLess(campaigns[tiny_sample["id"]]["confidence_score"], 50)
+
+    def test_search_reward_reports_bounded_provider_diversity(self) -> None:
+        campaign = self.crm.create_campaign(
+            "Hybrid discovery",
+            industry="cleaning",
+            location="Moscow",
+            target_count=4,
+        )
+        self.crm.upsert_lead(
+            "Maps lead",
+            "https://maps-source.example",
+            source="yandex_maps",
+            campaign_id=campaign["id"],
+        )
+        self.crm.upsert_lead(
+            "Web lead",
+            "https://web-source.example",
+            source="bing_html",
+            campaign_id=campaign["id"],
+        )
+
+        report = self.crm.search_performance(limit=20)
+        measured = next(
+            item
+            for item in report["campaigns"]
+            if item["campaign_id"] == campaign["id"]
+        )
+
+        self.assertEqual(measured["provider_count"], 2)
+        self.assertEqual(measured["source_providers"], ["bing_html", "yandex_maps"])
+        self.assertEqual(measured["component_scores"]["source_diversity"], 100.0)
+
+    def test_search_reward_penalizes_repeated_duplicate_only_queries(self) -> None:
+        known = self.crm.upsert_lead("Known", "https://known-again.example")
+        first = self.crm.create_campaign(
+            "First query",
+            industry="cleaning",
+            location="Moscow",
+            search_query="same exact search",
+            target_count=5,
+        )
+        self.crm.upsert_lead(
+            "Known",
+            known["website_url"],
+            campaign_id=first["id"],
+        )
+        second = self.crm.create_campaign(
+            "Repeated query",
+            industry="cleaning",
+            location="Moscow",
+            search_query="SEARCH, same exact!",
+            target_count=5,
+        )
+        self.crm.upsert_lead(
+            "Known",
+            known["website_url"],
+            campaign_id=second["id"],
+        )
+
+        report = self.crm.search_performance(limit=20)
+        campaigns = {item["campaign_id"]: item for item in report["campaigns"]}
+        self.assertTrue(campaigns[first["id"]]["query_cooldown"])
+        repeated = campaigns[second["id"]]
+
+        self.assertEqual(repeated["new_unique_count"], 0)
+        self.assertEqual(repeated["duplicate_rate"], 100.0)
+        self.assertGreaterEqual(repeated["query_repetition_count"], 1)
+        self.assertTrue(repeated["query_cooldown"])
+        self.assertGreaterEqual(repeated["penalties"]["duplicate_results"], 20)
+        self.assertGreaterEqual(repeated["penalties"]["zero_new"], 20)
+
+    def test_exact_repeated_query_enters_cooldown_even_with_new_yield(self) -> None:
+        first = self.crm.create_campaign(
+            "First hypothesis",
+            industry="dentistry",
+            location="Moscow",
+            search_query="dentistry appointment site",
+            target_count=5,
+        )
+        self.crm.upsert_lead(
+            "First clinic",
+            "https://first-clinic.example",
+            campaign_id=first["id"],
+        )
+        repeated = self.crm.create_campaign(
+            "Repeated hypothesis",
+            industry="dentistry",
+            location="Moscow",
+            search_query="APPOINTMENT dentistry site!",
+            target_count=5,
+        )
+        self.crm.upsert_lead(
+            "Second clinic",
+            "https://second-clinic.example",
+            campaign_id=repeated["id"],
+        )
+
+        campaigns = {
+            item["campaign_id"]: item
+            for item in self.crm.search_performance(limit=20)["campaigns"]
+        }
+
+        self.assertEqual(campaigns[repeated["id"]]["new_unique_count"], 1)
+        self.assertEqual(campaigns[repeated["id"]]["duplicate_rate"], 0.0)
+        self.assertGreaterEqual(campaigns[repeated["id"]]["query_repetition_count"], 1)
+        self.assertTrue(campaigns[repeated["id"]]["query_cooldown"])
+
+    def test_search_performance_prioritizes_untested_vertical_exploration(self) -> None:
+        self.crm.create_vertical("cleaning", region="Moscow")
+        self.crm.create_vertical("dentistry", region="Moscow")
+        campaign = self.crm.create_campaign(
+            "Cleaning tried",
+            industry="cleaning",
+            location="Moscow",
+            search_query="cleaning official websites",
+            target_count=5,
+        )
+        self.crm.upsert_lead(
+            "Cleaning company",
+            "https://cleaning-tried.example",
+            campaign_id=campaign["id"],
+        )
+
+        report = self.crm.search_performance(limit=20)
+        strategies = {
+            (item["industry"], item["location"]): item for item in report["strategies"]
+        }
+        untested = strategies[("dentistry", "Moscow")]
+
+        self.assertEqual(untested["campaign_count"], 0)
+        self.assertEqual(untested["mode"], "explore")
+        self.assertGreater(untested["exploration_bonus"], 0)
+        self.assertIn(
+            "dentistry",
+            [item["industry"] for item in report["recommended_strategies"]],
+        )
+
+    def test_search_reward_keeps_outcomes_neutral_until_real_outreach(self) -> None:
+        campaign = self.crm.create_campaign(
+            "Outcome evidence",
+            industry="construction",
+            location="Moscow",
+            target_count=1,
+        )
+        lead = self.crm.upsert_lead(
+            "Outcome company",
+            "https://outcome.example",
+            campaign_id=campaign["id"],
+        )
+        self.crm.save_inspection(
+            lead["id"],
+            {"final_url": lead["website_url"], "visible_text": "Verified facts"},
+        )
+        self.crm.save_analysis(
+            lead["id"],
+            {
+                "summary": "Grounded summary",
+                "website_problems": ["Verified issue"],
+                "opportunities": ["Relevant opportunity"],
+                "recommended_ollum_services": ["Website development"],
+                "outreach_angles": ["Grounded angle"],
+            },
+        )
+        self.crm.score_lead(lead["id"], fit=70, need=70, budget=70, timing=70)
+
+        self.crm.record_interaction(
+            lead["id"],
+            channel="whatsapp",
+            direction="inbound",
+            content="Inbound before any outreach",
+        )
+
+        before = self.crm.search_performance()["campaigns"][0]
+        self.assertEqual(before["component_scores"]["outcomes"], 50.0)
+
+        self.crm.record_interaction(
+            lead["id"],
+            channel="whatsapp",
+            direction="outbound",
+            content="Sent only after approval",
+        )
+        no_reply = self.crm.search_performance()["campaigns"][0]
+        self.assertLess(no_reply["component_scores"]["outcomes"], 50.0)
+
+        self.crm.record_interaction(
+            lead["id"],
+            channel="whatsapp",
+            direction="inbound",
+            content="Verified reply",
+        )
+        replied = self.crm.search_performance()["campaigns"][0]
+        self.assertGreater(
+            replied["component_scores"]["outcomes"],
+            no_reply["component_scores"]["outcomes"],
+        )
+
     def test_reset_prospecting_data_is_backed_up_and_preserves_inbox_memory(
         self,
     ) -> None:
@@ -341,7 +649,7 @@ class SalesCRMTests(unittest.TestCase):
         )
         with self.crm.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 14
+                connection.execute("PRAGMA user_version").fetchone()[0], 15
             )
             index_names = {
                 row["name"] for row in connection.execute("PRAGMA index_list(leads)")
@@ -1197,8 +1505,39 @@ class SalesCRMTests(unittest.TestCase):
         )
         with migrated.connect() as connection:
             self.assertEqual(
-                connection.execute("PRAGMA user_version").fetchone()[0], 14
+                connection.execute("PRAGMA user_version").fetchone()[0], 15
             )
+
+    def test_existing_campaign_links_are_migrated_with_conservative_novelty(
+        self,
+    ) -> None:
+        campaign = self.crm.create_campaign("Legacy campaign")
+        self.crm.upsert_lead(
+            "Legacy new lead",
+            "https://legacy-new.example",
+            campaign_id=campaign["id"],
+        )
+        known = self.crm.upsert_lead("Legacy known", "https://legacy-known.example")
+        with self.crm.connect() as connection:
+            connection.execute(
+                "UPDATE leads SET created_at = '2020-01-01T00:00:00+00:00' "
+                "WHERE id = ?",
+                (known["id"],),
+            )
+        self.crm.upsert_lead(
+            "Legacy known",
+            known["website_url"],
+            campaign_id=campaign["id"],
+        )
+        with self.crm.connect() as connection:
+            connection.execute("ALTER TABLE campaign_leads DROP COLUMN is_new")
+            connection.execute("PRAGMA user_version = 14")
+
+        migrated = SalesCRM(self.crm.db_path)
+        measured = migrated.get_campaign(campaign["id"])
+
+        self.assertEqual(measured["new_unique_count"], 1)
+        self.assertEqual(measured["reused_count"], 1)
 
     def test_conversation_queue_watchdog_recovers_and_quarantines_safely(
         self,
