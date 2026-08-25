@@ -3648,20 +3648,21 @@ class SalesCRM:
         return dict(row)
 
     def overview(self, campaign_id: str | None = None) -> dict[str, Any]:
-        conditions = ""
+        conditions = ["l.source != 'whatsapp_inbound'"]
         values: list[Any] = []
         join = ""
         if campaign_id:
             join = "JOIN campaign_leads cl ON cl.lead_id = l.id"
-            conditions = "WHERE cl.campaign_id = ?"
+            conditions.append("cl.campaign_id = ?")
             values.append(campaign_id)
+        where_clause = f"WHERE {' AND '.join(conditions)}"
         with self.connect() as connection:
             status_rows = connection.execute(
-                f"SELECT l.status, COUNT(DISTINCT l.id) AS count FROM leads l {join} {conditions} GROUP BY l.status",
+                f"SELECT l.status, COUNT(DISTINCT l.id) AS count FROM leads l {join} {where_clause} GROUP BY l.status",
                 values,
             ).fetchall()
             score_row = connection.execute(
-                f"SELECT COUNT(DISTINCT l.id), ROUND(AVG(l.score), 1), MAX(l.score) FROM leads l {join} {conditions}",
+                f"SELECT COUNT(DISTINCT l.id), ROUND(AVG(l.score), 1), MAX(l.score) FROM leads l {join} {where_clause}",
                 values,
             ).fetchone()
             pending_followups = connection.execute(

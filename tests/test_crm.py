@@ -58,6 +58,25 @@ class SalesCRMTests(unittest.TestCase):
         self.assertGreater(scored["score"], 0)
         self.assertEqual(self.crm.overview(campaign["id"])["lead_count"], 1)
 
+    def test_overview_excludes_technical_whatsapp_contacts(self) -> None:
+        self.crm.upsert_lead(
+            "Grounded Prospect",
+            "https://grounded-overview.test",
+            source="autopilot:search",
+        )
+        self.crm.upsert_lead(
+            "Technical WhatsApp Contact",
+            "https://overview-contact.contact.invalid",
+            industry="WhatsApp inbound",
+            source="whatsapp_inbound",
+            phones=["+79990000041"],
+        )
+
+        overview = self.crm.overview()
+
+        self.assertEqual(overview["lead_count"], 1)
+        self.assertEqual(overview["by_status"], {"new": 1})
+
     def test_outreach_interaction_and_followup_lifecycle(self) -> None:
         lead = self.crm.upsert_lead("Example", "https://example.org")
         draft = self.crm.save_outreach_draft(
