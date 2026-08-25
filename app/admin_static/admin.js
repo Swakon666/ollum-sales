@@ -48,6 +48,7 @@ const VIEW_HASHES = Object.freeze({
 });
 
 const PAGE_SIZE = 50;
+const WHATSAPP_QR_RETRY_MS = 4000;
 
 const state = {
   data: null,
@@ -371,6 +372,35 @@ function renderAutopilot() {
   $("#cycles-table").innerHTML = cycles.length ? cycles.map((cycle) => `<tr><td>${formatDate(cycle.started_at)}</td><td>${escapeHtml(String(cycle.mode || "").toUpperCase())}</td><td>${statusPill(cycle.status)}</td><td>${escapeHtml((cycle.selected_verticals || []).length)}</td><td>${escapeHtml(cycle.error || "—")}</td></tr>`).join("") : `<tr><td class="empty-row" colspan="5">История циклов пуста</td></tr>`;
 }
 
+function setWhatsAppQRPlaceholder(title, detail) {
+  const placeholder = $("#whatsapp-qr-empty");
+  placeholder.hidden = false;
+  placeholder.querySelector("strong").textContent = title;
+  placeholder.querySelector("span").textContent = detail;
+}
+
+function whatsappQRKey(pairing) {
+  return `${String(pairing.generation || 0)}:${pairing.expires_at || pairing.updated_at || ""}`;
+}
+
+function loadWhatsAppQRCode(pairing) {
+  const image = $("#whatsapp-qr");
+  const generation = String(pairing.generation || 0);
+  const qrKey = whatsappQRKey(pairing);
+  const changed = image.dataset.qrKey !== qrKey;
+  const failed = image.dataset.loadState === "error";
+  const lastAttempt = Number(image.dataset.lastAttempt || 0);
+  if (!changed && (!failed || Date.now() - lastAttempt < WHATSAPP_QR_RETRY_MS)) return;
+
+  image.dataset.qrKey = qrKey;
+  image.dataset.generation = generation;
+  image.dataset.loadState = "loading";
+  image.dataset.lastAttempt = String(Date.now());
+  image.hidden = true;
+  setWhatsAppQRPlaceholder("Загружаем QR", "Если сеть задержит изображение, загрузка повторится автоматически.");
+  image.src = `/api/v1/whatsapp/qr?generation=${encodeURIComponent(generation)}&attempt=${encodeURIComponent(image.dataset.lastAttempt)}`;
+}
+
 function renderWhatsApp() {
   const bridge = state.data.whatsapp || {};
   const pairing = state.data.whatsapp_pairing || {};
@@ -391,26 +421,26 @@ function renderWhatsApp() {
   const image = $("#whatsapp-qr");
   const placeholder = $("#whatsapp-qr-empty");
   const showQR = Boolean(pairing.needs_pairing && pairing.has_qr);
-  image.hidden = !showQR;
-  placeholder.hidden = showQR;
   if (showQR) {
-    const generation = String(pairing.generation || 0);
-    if (image.dataset.generation !== generation) {
-      image.dataset.generation = generation;
-      image.src = `/api/v1/whatsapp/qr?generation=${encodeURIComponent(generation)}`;
+    loadWhatsAppQRCode(pairing);
+    if (image.dataset.loadState === "loaded") {
+      image.hidden = false;
+      placeholder.hidden = true;
     }
   } else {
-    const message = placeholder.querySelector("strong");
-    const hint = placeholder.querySelector("span");
+    image.hidden = true;
     if (ready) {
-      message.textContent = "Устройство подключено";
-      hint.textContent = "Повторная привязка не требуется.";
+      setWhatsAppQRPlaceholder("Устройство подключено", "Повторная привязка не требуется.");
+    } else if (["failed", "timed_out"].includes(pairing.state)) {
+      setWhatsAppQRPlaceholder("QR пока не получен", "Bridge сам повторит подключение. Обновлять страницу не нужно.");
+    } else if (pairing.state === "restarting") {
+      setWhatsAppQRPlaceholder("Перезапускаем WhatsApp bridge", "Сессия сохраняется; состояние обновится автоматически.");
+    } else if (pairing.state === "refreshing") {
+      setWhatsAppQRPlaceholder("Обновляем QR", "Запрашиваем свежий код у WhatsApp.");
     } else if (pairing.needs_pairing) {
-      message.textContent = "Готовим новый QR";
-      hint.textContent = "Код обновится автоматически через несколько секунд.";
+      setWhatsAppQRPlaceholder("Готовим новый QR", "Код обновится автоматически через несколько секунд.");
     } else {
-      message.textContent = "Bridge недоступен";
-      hint.textContent = "Проверьте состояние сервиса и повторите попытку.";
+      setWhatsAppQRPlaceholder("Bridge недоступен", "Сервис повторит подключение; можно нажать «Обновить» для проверки.");
     }
   }
 }
@@ -946,9 +976,27 @@ function bindEvents() {
   $("#knowledge-form").addEventListener("submit", saveCompanyKnowledge);
   $("#inbox-status-filter").addEventListener("change", renderInbox);
   $("#sync-inbox-button").addEventListener("click", syncAgentInbox);
+  $("#whatsapp-qr").addEventListener("load", () => {
+    const image = $("#whatsapp-qr");
+    const pairing = state.data?.whatsapp_pairing || {};
+    if (!pairing.needs_pairing || !pairing.has_qr || image.dataset.qrKey !== whatsappQRKey(pairing)) {
+      image.hidden = true;
+      return;
+    }
+    image.dataset.loadState = "loaded";
+    image.hidden = false;
+    $("#whatsapp-qr-empty").hidden = true;
+  });
   $("#whatsapp-qr").addEventListener("error", () => {
-    $("#whatsapp-qr").hidden = true;
-    $("#whatsapp-qr-empty").hidden = false;
+    const image = $("#whatsapp-qr");
+    const pairing = state.data?.whatsapp_pairing || {};
+    if (!pairing.needs_pairing || !pairing.has_qr) {
+      image.hidden = true;
+      return;
+    }
+    image.dataset.loadState = "error";
+    image.hidden = true;
+    setWhatsAppQRPlaceholder("Повторяем загрузку QR", "Страница сама запросит изображение ещё раз через несколько секунд.");
   });
 
   document.addEventListener("click", async (event) => {

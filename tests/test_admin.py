@@ -388,6 +388,10 @@ def test_admin_assets_keep_large_lists_bounded_and_keyboard_accessible(
     ):
         assert f'id="{pagination_id}"' in page.text
     assert "const PAGE_SIZE = 50;" in script.text
+    assert "const WHATSAPP_QR_RETRY_MS = 4000;" in script.text
+    assert "function loadWhatsAppQRCode(" in script.text
+    assert 'image.dataset.loadState = "error"' in script.text
+    assert "Обновлять страницу не нужно" in script.text
     assert "function pageItems(" in script.text
     assert "function renderView(" in script.text
     assert "function setMobileNavigation(" in script.text

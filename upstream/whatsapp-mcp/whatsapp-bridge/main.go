@@ -230,6 +230,31 @@ type PairingState struct {
 	expiresAt    time.Time
 }
 
+const (
+	pairingConnectTimeout    = 30 * time.Second
+	pairingFirstEventTimeout = 45 * time.Second
+	pairingFallbackQRTimeout = 20 * time.Second
+	pairingMaxQRTimeout      = 2 * time.Minute
+	connectionStallTimeout   = 2 * time.Minute
+)
+
+func normalizedPairingQRTimeout(value time.Duration) time.Duration {
+	if value <= 0 || value > pairingMaxQRTimeout {
+		return pairingFallbackQRTimeout
+	}
+	return value
+}
+
+func resetTimer(timer *time.Timer, duration time.Duration) {
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	timer.Reset(duration)
+}
+
 func newPairingState(needsPairing bool) *PairingState {
 	state := "not_required"
 	if needsPairing {
@@ -1275,42 +1300,97 @@ func main() {
 			// Whatsmeow emits a finite batch of rotating QR codes. When that batch
 			// expires, reconnect and request a fresh batch until our operator window
 			// closes. This keeps pairing interactive without restarting other services.
-			qrChan, qrErr := client.GetQRChannel(pairingContext)
+			batchContext, cancelBatch := context.WithCancel(pairingContext)
+			qrChan, qrErr := client.GetQRChannel(batchContext)
 			if qrErr != nil {
+				cancelBatch()
 				pairingState.update("failed", true, "", time.Time{})
 				logger.Errorf("Failed to initialize QR pairing: %v", qrErr)
 				return
 			}
 
-			err = client.Connect()
+			connectContext, cancelConnect := context.WithTimeout(
+				pairingContext,
+				pairingConnectTimeout,
+			)
+			err = client.ConnectContext(connectContext)
+			cancelConnect()
 			if err != nil {
-				pairingState.update("failed", true, "", time.Time{})
-				logger.Errorf("Failed to connect: %v", err)
-				return
+				cancelBatch()
+				client.Disconnect()
+				pairingState.update("refreshing", true, "", time.Time{})
+				logger.Warnf("QR pairing connection attempt failed; retrying: %v", err)
+				select {
+				case <-time.After(2 * time.Second):
+				case <-pairingContext.Done():
+					pairingState.update("timed_out", true, "", time.Time{})
+					logger.Errorf("Timeout waiting for QR code scan")
+					return
+				}
+				continue
 			}
 
 			retryWithFreshBatch := false
-			for evt := range qrChan {
-				switch evt.Event {
-				case "code":
-					pairingState.update("waiting_for_scan", true, evt.Code, time.Now().Add(30*time.Second))
-					fmt.Println("\nScan this QR code with your WhatsApp app:")
-					qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
-				case "success":
-					pairingState.update("paired", false, "", time.Time{})
-					paired = true
-				case "timeout":
+			batchFinished := false
+			batchTimer := time.NewTimer(pairingFirstEventTimeout)
+			for !batchFinished {
+				select {
+				case <-pairingContext.Done():
+					batchFinished = true
+				case <-batchTimer.C:
 					pairingState.update("refreshing", true, "", time.Time{})
 					retryWithFreshBatch = true
-					logger.Infof("QR batch expired; requesting a fresh batch")
-				case "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
-					pairingState.update("failed", true, "", time.Time{})
-					logger.Errorf("QR pairing failed: %s", evt.Event)
-					return
-				default:
-					logger.Infof("QR pairing event: %s", evt.Event)
+					batchFinished = true
+					logger.Warnf("QR channel produced no fresh event; requesting a new batch")
+				case evt, open := <-qrChan:
+					if !open {
+						batchFinished = true
+						break
+					}
+					switch evt.Event {
+					case "code":
+						qrTimeout := normalizedPairingQRTimeout(evt.Timeout)
+						pairingState.update(
+							"waiting_for_scan",
+							true,
+							evt.Code,
+							time.Now().Add(qrTimeout),
+						)
+						resetTimer(batchTimer, qrTimeout+15*time.Second)
+						fmt.Println("\nScan this QR code with your WhatsApp app:")
+						qrterminal.GenerateHalfBlock(evt.Code, qrterminal.L, os.Stdout)
+					case "success":
+						pairingState.update("paired", false, "", time.Time{})
+						paired = true
+						batchFinished = true
+					case "timeout":
+						pairingState.update("refreshing", true, "", time.Time{})
+						retryWithFreshBatch = true
+						batchFinished = true
+						logger.Infof("QR batch expired; requesting a fresh batch")
+					case "error", "err-unexpected-state", "err-client-outdated", "err-scanned-without-multidevice":
+						pairingState.update("failed", true, "", time.Time{})
+						logger.Errorf("QR pairing failed: %s", evt.Event)
+						if !batchTimer.Stop() {
+							select {
+							case <-batchTimer.C:
+							default:
+							}
+						}
+						cancelBatch()
+						return
+					default:
+						logger.Infof("QR pairing event: %s", evt.Event)
+					}
 				}
 			}
+			if !batchTimer.Stop() {
+				select {
+				case <-batchTimer.C:
+				default:
+				}
+			}
+			cancelBatch()
 
 			if paired {
 				break
@@ -1340,7 +1420,12 @@ func main() {
 	} else {
 		pairingState.update("not_required", false, "", time.Time{})
 		// Already logged in, just connect
-		err = client.Connect()
+		connectContext, cancelConnect := context.WithTimeout(
+			context.Background(),
+			pairingConnectTimeout,
+		)
+		err = client.ConnectContext(connectContext)
+		cancelConnect()
 		if err != nil {
 			logger.Errorf("Failed to connect: %v", err)
 			return
@@ -1354,6 +1439,35 @@ func main() {
 		logger.Errorf("Failed to establish stable connection")
 		return
 	}
+
+	// Whatsmeow normally reconnects on its own. If the bridge remains detached
+	// for too long, exit cleanly so Docker's unless-stopped policy can recreate
+	// only this service while preserving the authenticated session volume.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		disconnectedSince := time.Time{}
+		for range ticker.C {
+			if client.IsConnected() {
+				disconnectedSince = time.Time{}
+				continue
+			}
+			if disconnectedSince.IsZero() {
+				disconnectedSince = time.Now()
+				continue
+			}
+			if time.Since(disconnectedSince) < connectionStallTimeout {
+				continue
+			}
+			pairingState.update("restarting", client.Store.ID == nil, "", time.Time{})
+			logger.Warnf("WhatsApp connection remained unavailable; restarting bridge")
+			select {
+			case exitChan <- syscall.SIGTERM:
+			default:
+			}
+			return
+		}
+	}()
 
 	fmt.Println("\n✓ Connected to WhatsApp! Type 'help' for commands.")
 
