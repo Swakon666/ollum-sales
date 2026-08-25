@@ -7,9 +7,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/http/cookiejar"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +25,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mdp/qrterminal"
+	"golang.org/x/net/proxy"
 	"rsc.io/qr"
 
 	"go.mau.fi/whatsmeow"
@@ -31,6 +36,126 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
+
+const (
+	whatsAppWebURL           = "https://web.whatsapp.com/"
+	whatsAppBrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+	whatsAppChromiumBrand = `"Chromium";v="140", "Not=A?Brand";v="24"`
+)
+
+func whatsAppBrowserPreflightHeaders() http.Header {
+	return http.Header{
+		"Accept":                    {"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"},
+		"Accept-Encoding":           {"gzip, deflate, br, zstd"},
+		"Accept-Language":           {"en-US,en;q=0.9"},
+		"Priority":                  {"u=0, i"},
+		"Sec-Ch-Ua":                 {whatsAppChromiumBrand},
+		"Sec-Ch-Ua-Mobile":          {"?0"},
+		"Sec-Ch-Ua-Platform":        {`"Windows"`},
+		"Sec-Fetch-Dest":            {"document"},
+		"Sec-Fetch-Mode":            {"navigate"},
+		"Sec-Fetch-Site":            {"none"},
+		"Sec-Fetch-User":            {"?1"},
+		"Upgrade-Insecure-Requests": {"1"},
+		"User-Agent":                {whatsAppBrowserUserAgent},
+	}
+}
+
+func whatsAppBrowserWebSocketHeaders() http.Header {
+	return http.Header{
+		"Accept":             {"*/*"},
+		"Accept-Encoding":    {"gzip, deflate, br, zstd"},
+		"Accept-Language":    {"en-US,en;q=0.9"},
+		"Priority":           {"u=3, i"},
+		"Sec-Ch-Ua":          {whatsAppChromiumBrand},
+		"Sec-Ch-Ua-Mobile":   {"?0"},
+		"Sec-Ch-Ua-Platform": {`"Windows"`},
+		"Sec-Fetch-Dest":     {"websocket"},
+		"Sec-Fetch-Mode":     {"websocket"},
+		"Sec-Fetch-Site":     {"same-origin"},
+	}
+}
+
+func newWhatsAppWebHTTPClient(proxyAddress string) (*http.Client, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	proxyAddress = strings.TrimSpace(proxyAddress)
+	if proxyAddress != "" {
+		parsed, err := url.Parse(proxyAddress)
+		if err != nil || parsed.Host == "" {
+			return nil, fmt.Errorf("invalid WhatsApp proxy URL")
+		}
+		switch parsed.Scheme {
+		case "http", "https":
+			transport.Proxy = http.ProxyURL(parsed)
+		case "socks5", "socks5h":
+			dialer, err := proxy.FromURL(parsed, &net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 30 * time.Second,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to configure WhatsApp SOCKS5 proxy")
+			}
+			if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+				transport.DialContext = contextDialer.DialContext
+			} else {
+				transport.DialContext = func(_ context.Context, network, address string) (net.Conn, error) {
+					return dialer.Dial(network, address)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("unsupported WhatsApp proxy scheme %q", parsed.Scheme)
+		}
+	}
+
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		return nil, fmt.Errorf("create WhatsApp cookie jar: %w", err)
+	}
+	return &http.Client{Transport: transport, Jar: jar}, nil
+}
+
+func primeWhatsAppWebSession(ctx context.Context, httpClient *http.Client, targetURL string) (int, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
+	if err != nil {
+		return 0, fmt.Errorf("create WhatsApp browser preflight: %w", err)
+	}
+	request.Header = whatsAppBrowserPreflightHeaders()
+
+	response, err := httpClient.Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("WhatsApp browser preflight failed: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 2<<20))
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusBadRequest {
+		return 0, fmt.Errorf("WhatsApp browser preflight returned HTTP %d", response.StatusCode)
+	}
+	if httpClient.Jar == nil {
+		return 0, fmt.Errorf("WhatsApp browser preflight has no cookie jar")
+	}
+	cookies := httpClient.Jar.Cookies(request.URL)
+	if len(cookies) == 0 {
+		return 0, fmt.Errorf("WhatsApp browser preflight returned no session cookies")
+	}
+	return len(cookies), nil
+}
+
+func configureWhatsAppBrowserTransport(
+	ctx context.Context,
+	client *whatsmeow.Client,
+	proxyAddress string,
+) (int, error) {
+	httpClient, err := newWhatsAppWebHTTPClient(proxyAddress)
+	if err != nil {
+		return 0, err
+	}
+	client.UserAgent = whatsAppBrowserUserAgent
+	client.WebSocketHeaders = whatsAppBrowserWebSocketHeaders()
+	client.SetPreLoginHTTPClient(httpClient)
+	client.SetWebsocketHTTPClient(httpClient)
+	return primeWhatsAppWebSession(ctx, httpClient, whatsAppWebURL)
+}
 
 // Message represents a chat message for our client
 type Message struct {
@@ -1247,13 +1372,22 @@ func main() {
 		logger.Errorf("Failed to create WhatsApp client")
 		return
 	}
-	if proxyAddress := strings.TrimSpace(os.Getenv("WHATSAPP_PROXY_URL")); proxyAddress != "" {
+	proxyAddress := strings.TrimSpace(os.Getenv("WHATSAPP_PROXY_URL"))
+	if proxyAddress != "" {
 		if err := client.SetProxyAddress(proxyAddress); err != nil {
 			logger.Errorf("Failed to configure WhatsApp proxy: %v", err)
 			return
 		}
 		logger.Infof("WhatsApp proxy configured")
 	}
+	preflightContext, cancelPreflight := context.WithTimeout(context.Background(), 30*time.Second)
+	cookieCount, preflightErr := configureWhatsAppBrowserTransport(preflightContext, client, proxyAddress)
+	cancelPreflight()
+	if preflightErr != nil {
+		logger.Errorf("Failed to initialize browser-compatible WhatsApp transport: %v", preflightErr)
+		return
+	}
+	logger.Infof("WhatsApp browser session initialized with %d cookie(s)", cookieCount)
 
 	// Initialize message store
 	messageStore, err := NewMessageStore()

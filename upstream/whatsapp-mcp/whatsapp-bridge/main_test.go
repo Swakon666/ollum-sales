@@ -2,8 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"go.mau.fi/whatsmeow"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow"
 )
 
 func TestBridgeStatusHandlerReady(t *testing.T) {
@@ -145,6 +147,56 @@ func TestNormalizedWhatsAppLogLevel(t *testing.T) {
 		if got := normalizedWhatsAppLogLevel(input); got != expected {
 			t.Fatalf("expected %s for %q, got %s", expected, input, got)
 		}
+	}
+}
+
+func TestWhatsAppBrowserHeadersMatchNavigationAndWebSocketContexts(t *testing.T) {
+	preflight := whatsAppBrowserPreflightHeaders()
+	websocket := whatsAppBrowserWebSocketHeaders()
+	if preflight.Get("User-Agent") != whatsAppBrowserUserAgent {
+		t.Fatal("browser preflight must use the configured browser user agent")
+	}
+	if preflight.Get("Sec-Fetch-Dest") != "document" || preflight.Get("Sec-Fetch-Site") != "none" {
+		t.Fatalf("unexpected browser navigation headers: %v", preflight)
+	}
+	if websocket.Get("Sec-Fetch-Dest") != "websocket" || websocket.Get("Sec-Fetch-Site") != "same-origin" {
+		t.Fatalf("unexpected browser websocket headers: %v", websocket)
+	}
+	if websocket.Get("Priority") != "u=3, i" {
+		t.Fatalf("unexpected websocket priority: %q", websocket.Get("Priority"))
+	}
+}
+
+func TestPrimeWhatsAppWebSessionSeedsCookieJar(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != whatsAppBrowserUserAgent {
+			t.Errorf("unexpected user agent: %q", r.Header.Get("User-Agent"))
+		}
+		if r.Header.Get("Sec-Fetch-Dest") != "document" {
+			t.Errorf("unexpected fetch destination: %q", r.Header.Get("Sec-Fetch-Dest"))
+		}
+		http.SetCookie(w, &http.Cookie{Name: "wa_ul", Value: "test", Path: "/", HttpOnly: true})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	httpClient, err := newWhatsAppWebHTTPClient("")
+	if err != nil {
+		t.Fatalf("create browser HTTP client: %v", err)
+	}
+	cookieCount, err := primeWhatsAppWebSession(context.Background(), httpClient, server.URL)
+	if err != nil {
+		t.Fatalf("prime browser session: %v", err)
+	}
+	if cookieCount != 1 {
+		t.Fatalf("expected one browser session cookie, got %d", cookieCount)
+	}
+}
+
+func TestNewWhatsAppWebHTTPClientRejectsUnsupportedProxy(t *testing.T) {
+	if _, err := newWhatsAppWebHTTPClient("ftp://proxy.example.test:21"); err == nil {
+		t.Fatal("expected unsupported proxy scheme to fail")
 	}
 }
 
