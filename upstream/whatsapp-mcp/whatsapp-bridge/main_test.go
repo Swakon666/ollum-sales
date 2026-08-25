@@ -132,6 +132,22 @@ func TestNormalizedPairingQRTimeoutFallsBackForInvalidValues(t *testing.T) {
 	}
 }
 
+func TestNormalizedWhatsAppLogLevel(t *testing.T) {
+	tests := map[string]string{
+		"":        "INFO",
+		"info":    "INFO",
+		" debug ": "DEBUG",
+		"warn":    "WARN",
+		"ERROR":   "ERROR",
+		"trace":   "INFO",
+	}
+	for input, expected := range tests {
+		if got := normalizedWhatsAppLogLevel(input); got != expected {
+			t.Fatalf("expected %s for %q, got %s", expected, input, got)
+		}
+	}
+}
+
 func TestConnectionReadyTimeoutAllowsInitialAutoReconnect(t *testing.T) {
 	if connectionReadyTimeout < pairingConnectTimeout {
 		t.Fatalf(
