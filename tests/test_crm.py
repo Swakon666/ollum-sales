@@ -1033,6 +1033,39 @@ class SalesCRMTests(unittest.TestCase):
         self.assertEqual(summary["lanes"]["prospecting"]["drafts_waiting_review"], 1)
         self.assertEqual(summary["lanes"]["inbox"]["drafted"], 1)
 
+    def test_coordination_keeps_drafted_qualified_lead_in_qualified_count(
+        self,
+    ) -> None:
+        workspace_id = "ollum-group"
+        self.crm.ensure_workspace(workspace_id, "Ollum Group")
+        lead = self.crm.upsert_lead(
+            "Qualified Company",
+            "https://qualified-company.test",
+            source="agent_research_verified_official_sites",
+        )
+        scored = self.crm.score_lead(
+            lead["id"],
+            fit=80,
+            need=80,
+            budget=50,
+            timing=40,
+            confidence=80,
+        )
+        self.assertEqual(scored["score"], 68)
+        self.assertEqual(scored["status"], "qualified")
+
+        self.crm.save_outreach_draft(
+            lead["id"],
+            channel="email",
+            message="Grounded draft based on verified evidence.",
+        )
+        self.assertEqual(self.crm.get_lead(lead["id"])["status"], "drafted")
+
+        summary = self.crm.agent_coordination_summary(workspace_id)
+
+        self.assertEqual(summary["lanes"]["prospecting"]["qualified"], 1)
+        self.assertEqual(summary["lanes"]["prospecting"]["drafts_waiting_review"], 1)
+
     def test_conversation_agent_settings_sessions_and_queue_lease_are_persistent(
         self,
     ) -> None:

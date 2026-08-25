@@ -2807,7 +2807,7 @@ class SalesCRM:
                         THEN 1 ELSE 0 END) AS unreviewed,
                     SUM(CASE WHEN status = 'analyzed'
                         THEN 1 ELSE 0 END) AS analyzed,
-                    SUM(CASE WHEN status = 'qualified'
+                    SUM(CASE WHEN score >= 65
                         THEN 1 ELSE 0 END) AS qualified,
                     MAX(score) AS top_score
                 FROM leads
