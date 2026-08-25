@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waStore "go.mau.fi/whatsmeow/store"
 )
 
 func TestBridgeStatusHandlerReady(t *testing.T) {
@@ -200,6 +201,40 @@ func TestNewWhatsAppWebHTTPClientRejectsUnsupportedProxy(t *testing.T) {
 	}
 }
 
+func TestRefreshWhatsAppWebVersionUpdatesClientPayload(t *testing.T) {
+	originalVersion := waStore.GetWAVersion()
+	defer waStore.SetWAVersion(originalVersion)
+
+	expected := waStore.WAVersionContainer{2, 3000, 1999999999}
+	err := refreshWhatsAppWebVersion(
+		context.Background(),
+		&http.Client{},
+		func(context.Context, *http.Client) (*waStore.WAVersionContainer, error) {
+			return &expected, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("refresh WhatsApp Web version: %v", err)
+	}
+	if actual := waStore.GetWAVersion(); actual != expected {
+		t.Fatalf("expected version %s, got %s", expected.String(), actual.String())
+	}
+}
+
+func TestRefreshWhatsAppWebVersionRejectsEmptyVersion(t *testing.T) {
+	err := refreshWhatsAppWebVersion(
+		context.Background(),
+		&http.Client{},
+		func(context.Context, *http.Client) (*waStore.WAVersionContainer, error) {
+			empty := waStore.WAVersionContainer{}
+			return &empty, nil
+		},
+	)
+	if err == nil {
+		t.Fatal("expected an empty WhatsApp Web version to fail")
+	}
+}
+
 func TestConnectionReadyTimeoutAllowsInitialAutoReconnect(t *testing.T) {
 	if connectionReadyTimeout < pairingConnectTimeout {
 		t.Fatalf(
@@ -214,6 +249,27 @@ func TestConnectionReadyTimeoutAllowsInitialAutoReconnect(t *testing.T) {
 			connectionReadyTimeout,
 			connectionStallTimeout,
 		)
+	}
+}
+
+func TestWhatsAppHTTPClientBoundsOnlyUpgradeResponse(t *testing.T) {
+	client, err := newWhatsAppWebHTTPClient("")
+	if err != nil {
+		t.Fatalf("newWhatsAppWebHTTPClient: %v", err)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("unexpected transport type %T", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != pairingConnectTimeout {
+		t.Fatalf(
+			"response header timeout %s, want %s",
+			transport.ResponseHeaderTimeout,
+			pairingConnectTimeout,
+		)
+	}
+	if client.Timeout != 0 {
+		t.Fatalf("client timeout %s would terminate the long-lived websocket", client.Timeout)
 	}
 }
 

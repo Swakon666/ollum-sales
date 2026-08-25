@@ -30,6 +30,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
+	waStore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -40,8 +41,8 @@ import (
 const (
 	whatsAppWebURL           = "https://web.whatsapp.com/"
 	whatsAppBrowserUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
-	whatsAppChromiumBrand = `"Chromium";v="140", "Not=A?Brand";v="24"`
+		"AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+	whatsAppChromiumBrand = `"Chromium";v="148", "Not=A?Brand";v="24"`
 )
 
 func whatsAppBrowserPreflightHeaders() http.Header {
@@ -79,6 +80,10 @@ func whatsAppBrowserWebSocketHeaders() http.Header {
 
 func newWhatsAppWebHTTPClient(proxyAddress string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
+	// Connect() intentionally uses Whatsmeow's long-lived BackgroundEventCtx.
+	// Bound only the HTTP upgrade response here: cancelling the context passed
+	// to ConnectContext after it returns also cancels the live WhatsApp socket.
+	transport.ResponseHeaderTimeout = pairingConnectTimeout
 	proxyAddress = strings.TrimSpace(proxyAddress)
 	if proxyAddress != "" {
 		parsed, err := url.Parse(proxyAddress)
@@ -141,6 +146,22 @@ func primeWhatsAppWebSession(ctx context.Context, httpClient *http.Client, targe
 	return len(cookies), nil
 }
 
+func refreshWhatsAppWebVersion(
+	ctx context.Context,
+	httpClient *http.Client,
+	fetchLatest func(context.Context, *http.Client) (*waStore.WAVersionContainer, error),
+) error {
+	latestVersion, err := fetchLatest(ctx, httpClient)
+	if err != nil {
+		return fmt.Errorf("fetch current WhatsApp Web version: %w", err)
+	}
+	if latestVersion == nil || latestVersion.IsZero() {
+		return fmt.Errorf("fetch current WhatsApp Web version: empty version")
+	}
+	waStore.SetWAVersion(*latestVersion)
+	return nil
+}
+
 func configureWhatsAppBrowserTransport(
 	ctx context.Context,
 	client *whatsmeow.Client,
@@ -154,7 +175,14 @@ func configureWhatsAppBrowserTransport(
 	client.WebSocketHeaders = whatsAppBrowserWebSocketHeaders()
 	client.SetPreLoginHTTPClient(httpClient)
 	client.SetWebsocketHTTPClient(httpClient)
-	return primeWhatsAppWebSession(ctx, httpClient, whatsAppWebURL)
+	cookieCount, err := primeWhatsAppWebSession(ctx, httpClient, whatsAppWebURL)
+	if err != nil {
+		return 0, err
+	}
+	if err := refreshWhatsAppWebVersion(ctx, httpClient, whatsmeow.GetLatestVersion); err != nil {
+		return 0, err
+	}
+	return cookieCount, nil
 }
 
 // Message represents a chat message for our client
@@ -1478,12 +1506,10 @@ func main() {
 				return
 			}
 
-			connectContext, cancelConnect := context.WithTimeout(
-				pairingContext,
-				pairingConnectTimeout,
-			)
-			err = client.ConnectContext(connectContext)
-			cancelConnect()
+			// The context passed to ConnectContext remains the lifetime context for
+			// Whatsmeow's socket loops. Use Connect so the socket survives the
+			// handshake; the HTTP transport above still bounds the upgrade wait.
+			err = client.Connect()
 			if err != nil {
 				cancelBatch()
 				client.Disconnect()
@@ -1589,12 +1615,7 @@ func main() {
 	} else {
 		pairingState.update("not_required", false, "", time.Time{})
 		// Already logged in, just connect
-		connectContext, cancelConnect := context.WithTimeout(
-			context.Background(),
-			pairingConnectTimeout,
-		)
-		err = client.ConnectContext(connectContext)
-		cancelConnect()
+		err = client.Connect()
 		if err != nil {
 			logger.Errorf("Failed to connect: %v", err)
 			return
