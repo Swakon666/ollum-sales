@@ -1384,7 +1384,7 @@ func main() {
 	cookieCount, preflightErr := configureWhatsAppBrowserTransport(preflightContext, client, proxyAddress)
 	cancelPreflight()
 	if preflightErr != nil {
-		logger.Errorf("Failed to initialize browser-compatible WhatsApp transport: %v", preflightErr)
+		logger.Errorf("Failed to initialize browser-compatible WhatsApp transport")
 		return
 	}
 	logger.Infof("WhatsApp browser session initialized with %d cookie(s)", cookieCount)
